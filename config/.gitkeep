@@ -1,0 +1,3 @@
+# This file ensures the config directory is tracked by git
+# Credential files (*.json) are excluded via .gitignore
+

@@ -1,0 +1,1948 @@
+{
+	"info": {
+		"_postman_id": "erp-backend-api-collection",
+		"name": "ERP Backend API",
+		"description": "Comprehensive ERP Backend API Collection with all endpoints for suppliers, buyers, products, sales, purchases, inventory, expenses, delivery personnel, and reports.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "erp-api-v1"
+	},
+	"item": [
+		{
+			"name": "Authentication",
+			"item": [
+				{
+					"name": "Register User",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"John Admin\",\n  \"email\": \"admin@example.com\",\n  \"password\": \"Password123\",\n  \"role\": \"admin\",\n  \"phone\": \"03001234567\",\n  \"address\": \"123 Main St, Karachi\",\n  \"permissions\": [\"users\", \"suppliers\", \"buyers\", \"products\", \"sales\", \"purchases\", \"inventory\", \"reports\", \"expenses\", \"delivery\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/register",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"register"
+							]
+						}
+					}
+				},
+				{
+					"name": "Login User",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 200) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('auth_token', response.token);",
+									"    pm.environment.set('user_id', response.user.id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"admin@example.com\",\n  \"password\": \"Password123\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/auth/login",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"login"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Current User",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/auth/me",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"me"
+							]
+						}
+					}
+				},
+				{
+					"name": "Refresh Token",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"url": {
+							"raw": "{{base_url}}/api/auth/refresh",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"auth",
+								"refresh"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Users",
+			"item": [
+				{
+					"name": "Get All Users",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/users?page=1&limit=10&search=john&role=admin",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"users"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								},
+								{
+									"key": "search",
+									"value": "john"
+								},
+								{
+									"key": "role",
+									"value": "admin"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get User by ID",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/users/{{user_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"users",
+								"{{user_id}}"
+							]
+						}
+					}
+				},
+				{
+					"name": "Update User",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"John Admin Updated\",\n  \"phone\": \"03001234568\",\n  \"address\": \"456 Updated St, Lahore\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/users/{{user_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"users",
+								"{{user_id}}"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Cost Types",
+			"item": [
+				{
+					"name": "Create Cost Type",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('cost_type_id', response.data.id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"id\": \"A1\",\n  \"name\": \"Meals & Food\",\n  \"description\": \"Employee meals and food expenses\",\n  \"category\": \"operational\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/cost-types",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"cost-types"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get All Cost Types",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/cost-types?page=1&limit=50",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"cost-types"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "50"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Cost Type",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Meals & Food Updated\",\n  \"description\": \"Updated description for meals\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/cost-types/A1",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"cost-types",
+								"A1"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Suppliers",
+			"item": [
+				{
+					"name": "Create Supplier",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('supplier_id', response.data._id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"ABC Suppliers\",\n  \"company\": \"ABC Trading Co.\",\n  \"email\": \"contact@abcsuppliers.com\",\n  \"phone\": \"03001234567\",\n  \"alternatePhone\": \"03009876543\",\n  \"address\": {\n    \"street\": \"123 Industrial Area\",\n    \"city\": \"Karachi\",\n    \"state\": \"Sindh\",\n    \"zipCode\": \"74000\",\n    \"country\": \"Pakistan\"\n  },\n  \"taxNumber\": \"1234567890\",\n  \"paymentTerms\": \"net30\",\n  \"creditLimit\": 100000,\n  \"rating\": 4,\n  \"notes\": \"Reliable supplier for electronics\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/suppliers",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"suppliers"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get All Suppliers",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/suppliers?page=1&limit=10&search=ABC&paymentTerms=net30",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"suppliers"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								},
+								{
+									"key": "search",
+									"value": "ABC"
+								},
+								{
+									"key": "paymentTerms",
+									"value": "net30"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Supplier by ID",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/suppliers/{{supplier_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"suppliers",
+								"{{supplier_id}}"
+							]
+						}
+					}
+				},
+				{
+					"name": "Update Supplier Balance",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"amount\": 5000,\n  \"operation\": \"add\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/suppliers/{{supplier_id}}/balance",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"suppliers",
+								"{{supplier_id}}",
+								"balance"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Buyers",
+			"item": [
+				{
+					"name": "Create Buyer",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('buyer_id', response.data._id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"XYZ Retailers\",\n  \"company\": \"XYZ Retail Store\",\n  \"email\": \"orders@xyzretail.com\",\n  \"phone\": \"03001234567\",\n  \"address\": {\n    \"street\": \"456 Market Street\",\n    \"city\": \"Lahore\",\n    \"state\": \"Punjab\",\n    \"zipCode\": \"54000\",\n    \"country\": \"Pakistan\"\n  },\n  \"paymentTerms\": \"cash\",\n  \"creditLimit\": 50000,\n  \"discountRate\": 5,\n  \"customerType\": \"wholesale\",\n  \"notes\": \"Regular wholesale customer\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/buyers",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"buyers"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get All Buyers",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/buyers?page=1&limit=10&customerType=wholesale",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"buyers"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								},
+								{
+									"key": "customerType",
+									"value": "wholesale"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Product Types",
+			"item": [
+				{
+					"name": "Create Product Type",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('product_type_id', response.data._id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Electronics\",\n  \"description\": \"Electronic devices and accessories\",\n  \"category\": \"Technology\",\n  \"attributes\": [\n    {\n      \"name\": \"Brand\",\n      \"type\": \"text\",\n      \"required\": true\n    },\n    {\n      \"name\": \"Warranty Period\",\n      \"type\": \"number\",\n      \"required\": false\n    },\n    {\n      \"name\": \"Color\",\n      \"type\": \"text\",\n      \"required\": false\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/product-types",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"product-types"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get All Product Types",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/product-types?page=1&limit=20",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"product-types"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Products",
+			"item": [
+				{
+					"name": "Create Product",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('product_id', response.data._id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Samsung Galaxy S23\",\n  \"sku\": \"SAM-S23-128\",\n  \"description\": \"Latest Samsung smartphone with 128GB storage\",\n  \"productType\": \"{{product_type_id}}\",\n  \"category\": \"Smartphones\",\n  \"brand\": \"Samsung\",\n  \"unit\": \"piece\",\n  \"pricing\": {\n    \"costPrice\": 80000,\n    \"sellingPrice\": 95000,\n    \"wholesalePrice\": 90000,\n    \"minSellingPrice\": 85000\n  },\n  \"inventory\": {\n    \"currentStock\": 50,\n    \"minStockLevel\": 10,\n    \"maxStockLevel\": 100,\n    \"reorderLevel\": 15\n  },\n  \"suppliers\": [\n    {\n      \"supplier\": \"{{supplier_id}}\",\n      \"supplierPrice\": 78000,\n      \"isPrimary\": true\n    }\n  ],\n  \"specifications\": {\n    \"weight\": 168,\n    \"dimensions\": {\n      \"length\": 146.3,\n      \"width\": 70.9,\n      \"height\": 7.6\n    },\n    \"color\": \"Phantom Black\",\n    \"material\": \"Glass/Aluminum\"\n  },\n  \"barcode\": \"1234567890123\",\n  \"taxRate\": 17\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/products",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"products"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get All Products",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/products?page=1&limit=20&search=Samsung&category=Smartphones",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"products"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								},
+								{
+									"key": "search",
+									"value": "Samsung"
+								},
+								{
+									"key": "category",
+									"value": "Smartphones"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Low Stock Products",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/products/reports/low-stock",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"products",
+								"reports",
+								"low-stock"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Delivery Personnel",
+			"item": [
+				{
+					"name": "Create Delivery Personnel",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('delivery_personnel_id', response.data._id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Ahmed Ali\",\n  \"employeeId\": \"DEL001\",\n  \"phone\": \"03001234567\",\n  \"email\": \"ahmed@example.com\",\n  \"address\": {\n    \"street\": \"789 Delivery Lane\",\n    \"city\": \"Karachi\",\n    \"state\": \"Sindh\",\n    \"country\": \"Pakistan\"\n  },\n  \"licenseNumber\": \"KHI-12345\",\n  \"licenseExpiry\": \"2025-12-31\",\n  \"vehicleInfo\": {\n    \"type\": \"Motorcycle\",\n    \"model\": \"Honda CD 70\",\n    \"plateNumber\": \"KHI-1234\",\n    \"capacity\": 50\n  },\n  \"salary\": 25000,\n  \"commissionRate\": 2,\n  \"workingAreas\": [\"Karachi North\", \"Karachi Central\"],\n  \"emergencyContact\": {\n    \"name\": \"Fatima Ali\",\n    \"phone\": \"03009876543\",\n    \"relation\": \"Wife\"\n  }\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/delivery-personnel",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"delivery-personnel"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get All Delivery Personnel",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/delivery-personnel?page=1&limit=20",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"delivery-personnel"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Expenses",
+			"item": [
+				{
+					"name": "Create Expense",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('expense_id', response.data._id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"description\": \"Office lunch for team meeting\",\n  \"costType\": \"A1\",\n  \"amount\": 2500,\n  \"paymentMethod\": \"cash\",\n  \"vendor\": \"Local Restaurant\",\n  \"taxAmount\": 425,\n  \"notes\": \"Monthly team lunch\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/expenses",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"expenses"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get All Expenses",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/expenses?page=1&limit=20&paymentMethod=cash&status=pending",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"expenses"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								},
+								{
+									"key": "paymentMethod",
+									"value": "cash"
+								},
+								{
+									"key": "status",
+									"value": "pending"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Approve Expense",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"url": {
+							"raw": "{{base_url}}/api/expenses/{{expense_id}}/approve",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"expenses",
+								"{{expense_id}}",
+								"approve"
+							]
+						}
+					}
+				},
+				{
+					"name": "Expense Summary Report",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/expenses/reports/summary?startDate=2024-01-01&endDate=2024-12-31",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"expenses",
+								"reports",
+								"summary"
+							],
+							"query": [
+								{
+									"key": "startDate",
+									"value": "2024-01-01"
+								},
+								{
+									"key": "endDate",
+									"value": "2024-12-31"
+								}
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Purchases",
+			"item": [
+				{
+					"name": "Create Purchase Order",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('purchase_id', response.data._id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"supplier\": \"{{supplier_id}}\",\n  \"expectedDeliveryDate\": \"2024-02-15\",\n  \"items\": [\n    {\n      \"product\": \"{{product_id}}\",\n      \"quantity\": 25,\n      \"unitPrice\": 78000,\n      \"discount\": 1000,\n      \"taxRate\": 17\n    }\n  ],\n  \"totalDiscount\": 5000,\n  \"shippingCost\": 2000,\n  \"paymentTerms\": \"net30\",\n  \"invoiceNumber\": \"INV-001\",\n  \"notes\": \"Urgent delivery required\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/purchases",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"purchases"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get All Purchases",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/purchases?page=1&limit=20&deliveryStatus=pending",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"purchases"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								},
+								{
+									"key": "deliveryStatus",
+									"value": "pending"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Mark Purchase as Delivered",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"actualDeliveryDate\": \"2024-02-14T10:30:00Z\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/purchases/{{purchase_id}}/delivered",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"purchases",
+								"{{purchase_id}}",
+								"delivered"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Sales",
+			"item": [
+				{
+					"name": "Create Sale",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"if (responseCode.code === 201) {",
+									"    const response = pm.response.json();",
+									"    pm.environment.set('sale_id', response.data._id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"buyer\": \"{{buyer_id}}\",\n  \"deliveryDate\": \"2024-02-20\",\n  \"deliveryAddress\": {\n    \"street\": \"456 Customer Street\",\n    \"city\": \"Lahore\",\n    \"state\": \"Punjab\",\n    \"zipCode\": \"54000\",\n    \"country\": \"Pakistan\"\n  },\n  \"deliveryPersonnel\": \"{{delivery_personnel_id}}\",\n  \"items\": [\n    {\n      \"product\": \"{{product_id}}\",\n      \"quantity\": 2,\n      \"unitPrice\": 90000,\n      \"discount\": 2000,\n      \"taxRate\": 17\n    }\n  ],\n  \"totalDiscount\": 5000,\n  \"shippingCost\": 1000,\n  \"paymentMethod\": \"card\",\n  \"saleType\": \"wholesale\",\n  \"invoiceNumber\": \"INV-SALE-001\",\n  \"notes\": \"Priority customer order\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/sales",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"sales"
+							]
+						}
+					}
+				},
+				{
+					"name": "Create Bulk Sales",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"sales\": [\n    {\n      \"buyer\": \"{{buyer_id}}\",\n      \"items\": [\n        {\n          \"product\": \"{{product_id}}\",\n          \"quantity\": 1,\n          \"unitPrice\": 95000,\n          \"taxRate\": 17\n        }\n      ],\n      \"paymentMethod\": \"cash\"\n    },\n    {\n      \"buyer\": \"{{buyer_id}}\",\n      \"items\": [\n        {\n          \"product\": \"{{product_id}}\",\n          \"quantity\": 3,\n          \"unitPrice\": 90000,\n          \"taxRate\": 17\n        }\n      ],\n      \"paymentMethod\": \"card\"\n    }\n  ]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/sales/bulk",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"sales",
+								"bulk"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get All Sales",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/sales?page=1&limit=20&saleType=wholesale&deliveryStatus=pending",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"sales"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								},
+								{
+									"key": "saleType",
+									"value": "wholesale"
+								},
+								{
+									"key": "deliveryStatus",
+									"value": "pending"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Mark Sale as Delivered",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "PATCH",
+						"url": {
+							"raw": "{{base_url}}/api/sales/{{sale_id}}/delivered",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"sales",
+								"{{sale_id}}",
+								"delivered"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Inventory",
+			"item": [
+				{
+					"name": "Get All Inventory",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/inventory?page=1&limit=20&lowStock=false",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"inventory"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "20"
+								},
+								{
+									"key": "lowStock",
+									"value": "false"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Add Stock",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"product\": \"{{product_id}}\",\n  \"quantity\": 25,\n  \"reference\": \"Purchase Order Received\",\n  \"notes\": \"Stock from supplier ABC\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/inventory/add-stock",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"inventory",
+								"add-stock"
+							]
+						}
+					}
+				},
+				{
+					"name": "Reduce Stock",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"product\": \"{{product_id}}\",\n  \"quantity\": 5,\n  \"reference\": \"Manual Adjustment\",\n  \"notes\": \"Damaged units removed\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/inventory/reduce-stock",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"inventory",
+								"reduce-stock"
+							]
+						}
+					}
+				},
+				{
+					"name": "Adjust Stock",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"product\": \"{{product_id}}\",\n  \"newQuantity\": 65,\n  \"reference\": \"Physical Count\",\n  \"notes\": \"Stock count adjustment after audit\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/inventory/adjust-stock",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"inventory",
+								"adjust-stock"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Stock Movements",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/inventory/movements/{{product_id}}?page=1&limit=50",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"inventory",
+								"movements",
+								"{{product_id}}"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "50"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Low Stock Report",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/inventory/reports/low-stock",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"inventory",
+								"reports",
+								"low-stock"
+							]
+						}
+					}
+				},
+				{
+					"name": "Inventory Valuation Report",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/inventory/reports/valuation",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"inventory",
+								"reports",
+								"valuation"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Reports",
+			"item": [
+				{
+					"name": "Sales Report",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/reports/sales?startDate=2024-01-01&endDate=2024-12-31&groupBy=month&saleType=wholesale",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"reports",
+								"sales"
+							],
+							"query": [
+								{
+									"key": "startDate",
+									"value": "2024-01-01"
+								},
+								{
+									"key": "endDate",
+									"value": "2024-12-31"
+								},
+								{
+									"key": "groupBy",
+									"value": "month"
+								},
+								{
+									"key": "saleType",
+									"value": "wholesale"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Purchase Report",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/reports/purchases?startDate=2024-01-01&endDate=2024-12-31&deliveryStatus=delivered",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"reports",
+								"purchases"
+							],
+							"query": [
+								{
+									"key": "startDate",
+									"value": "2024-01-01"
+								},
+								{
+									"key": "endDate",
+									"value": "2024-12-31"
+								},
+								{
+									"key": "deliveryStatus",
+									"value": "delivered"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Financial Report",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/reports/financial?startDate=2024-01-01&endDate=2024-12-31",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"reports",
+								"financial"
+							],
+							"query": [
+								{
+									"key": "startDate",
+									"value": "2024-01-01"
+								},
+								{
+									"key": "endDate",
+									"value": "2024-12-31"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Inventory Report",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/reports/inventory",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"reports",
+								"inventory"
+							]
+						}
+					}
+				},
+				{
+					"name": "Supplier Performance Report",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/reports/suppliers?startDate=2024-01-01&endDate=2024-12-31",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"reports",
+								"suppliers"
+							],
+							"query": [
+								{
+									"key": "startDate",
+									"value": "2024-01-01"
+								},
+								{
+									"key": "endDate",
+									"value": "2024-12-31"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Customer Analysis Report",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/reports/customers?startDate=2024-01-01&endDate=2024-12-31",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"reports",
+								"customers"
+							],
+							"query": [
+								{
+									"key": "startDate",
+									"value": "2024-01-01"
+								},
+								{
+									"key": "endDate",
+									"value": "2024-12-31"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Dashboard Summary",
+					"request": {
+						"auth": {
+							"type": "bearer",
+							"bearer": [
+								{
+									"key": "token",
+									"value": "{{auth_token}}",
+									"type": "string"
+								}
+							]
+						},
+						"method": "GET",
+						"url": {
+							"raw": "{{base_url}}/api/reports/dashboard",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"reports",
+								"dashboard"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Health Check",
+			"request": {
+				"method": "GET",
+				"url": {
+					"raw": "{{base_url}}/health",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"health"
+					]
+				}
+			}
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:5000",
+			"type": "string"
+		}
+	]
+}
