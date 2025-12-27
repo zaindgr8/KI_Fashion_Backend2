@@ -422,6 +422,18 @@ router.post('/entry', auth, async (req, res) => {
         totalAmount = Math.max(0, totalAmount - discount);
       }
 
+      // IMPORTANT: Subtract return amounts from totalAmount
+      // Returns reduce what admin owes supplier
+      const returnEntries = await Ledger.find({
+        type: 'supplier',
+        entityId: entityId,
+        referenceModel: 'Return',
+        transactionType: 'return'
+      }).where('description').regex(new RegExp(dispatchOrder.orderNumber, 'i'));
+
+      const totalReturns = returnEntries.reduce((sum, entry) => sum + (entry.credit || 0), 0);
+      totalAmount = Math.max(0, totalAmount - totalReturns);
+
       // Calculate cumulative payments from ledger entries
       const totalPaid = await calculateDispatchOrderPayments(referenceId, entityId);
 
