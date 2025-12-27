@@ -53,7 +53,7 @@ async function convertDispatchOrderImages(orders, options = {}) {
           if (Array.isArray(item.productImage)) {
             // Store total image count before processing
             const totalImages = item.productImage.length;
-            
+
             // For list views, only process the first image
             const urlsToProcess = primaryOnly ? [item.productImage[0]] : [...item.productImage];
             const finalUrls = [];
@@ -258,7 +258,8 @@ const dispatchOrderSchema = Joi.object({
   }).optional(),
   specialInstructions: Joi.string().optional(),
   notes: Joi.string().optional(),
-  totalDiscount: Joi.number().min(0).default(0).optional()
+  totalDiscount: Joi.number().min(0).default(0).optional(),
+  totalBoxes: Joi.number().min(0).optional()
 });
 
 // Schema for manual entry (Purchase-like)
@@ -1522,7 +1523,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             req.user._id,
             `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed quantity with variants`
           );
-          
+
           // Also add purchase batch for FIFO tracking
           inventory.purchaseBatches.push({
             dispatchOrderId: batchInfo.dispatchOrderId,
@@ -1536,7 +1537,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             notes: `Dispatch Order ${dispatchOrder.orderNumber} - With variants`
           });
           await inventory.save();
-          
+
           console.log(`[Confirm Order] Added ${confirmedQuantity} units with variants and batch tracking to inventory for ${product.name}`);
         } else {
           // Add stock with batch tracking (for FIFO cost calculation)
