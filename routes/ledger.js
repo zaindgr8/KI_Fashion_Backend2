@@ -117,10 +117,29 @@ router.get('/supplier/:id', auth, async (req, res) => {
       type: 'supplier',
       entityId: req.params.id,
       transactionType: 'payment'
-    }).select('paymentDetails').lean();
+    }).select('paymentDetails paymentMethod credit').lean();
 
-    const totalCashPayment = allPayments.reduce((sum, p) => sum + (p.paymentDetails?.cashPayment || 0), 0);
-    const totalBankPayment = allPayments.reduce((sum, p) => sum + (p.paymentDetails?.bankPayment || 0), 0);
+    const totalCashPayment = allPayments.reduce((sum, p) => {
+      // Priority 1: Check paymentDetails (set by DispatchOrder specific payment logic)
+      if (p.paymentDetails?.cashPayment) return sum + p.paymentDetails.cashPayment;
+      // Priority 2: Check top-level paymentMethod and credit (set by general SupplierPaymentModal)
+      if (p.paymentMethod === 'cash') return sum + (p.credit || 0);
+      return sum;
+    }, 0);
+
+    const totalBankPayment = allPayments.reduce((sum, p) => {
+      // Priority 1: Check paymentDetails
+      if (p.paymentDetails?.bankPayment) return sum + p.paymentDetails.bankPayment;
+      // Priority 2: Check top-level paymentMethod and credit
+      if (p.paymentMethod === 'bank') return sum + (p.credit || 0);
+      return sum;
+    }, 0);
+
+    // Calculate total outstanding balance (amount supplier owes admin from overpayments)
+    // This is the sum of all outstandingBalance values from payment entries
+    const totalOutstandingBalance = allPayments.reduce((sum, p) => {
+      return sum + (p.paymentDetails?.outstandingBalance || 0);
+    }, 0);
 
     res.json({
       success: true,
@@ -130,6 +149,7 @@ router.get('/supplier/:id', auth, async (req, res) => {
         totalBalance: balance,
         totalCashPayment,
         totalBankPayment,
+        totalOutstandingBalance,
         supplierCount: 1
       },
       pagination: {
@@ -455,6 +475,13 @@ router.post('/entry', auth, async (req, res) => {
       const bankPayment = paymentMethod === 'bank' ? paymentAmount : (paymentDetails?.bankPayment || 0);
       const newPaymentTotal = cashPayment + bankPayment;
 
+      // Ensure paymentDetails is populated for the ledger entry
+      entryData.paymentDetails = {
+        cashPayment,
+        bankPayment,
+        remainingBalance: totalAmount - totalPaid - newPaymentTotal
+      };
+
       // Calculate new total paid amount (including this payment)
       const newTotalPaid = totalPaid + newPaymentTotal;
 
@@ -595,6 +622,13 @@ router.post('/entry', auth, async (req, res) => {
       const bankPayment = paymentMethod === 'bank' ? paymentAmount : (paymentDetails?.bankPayment || 0);
       const newPaymentTotal = cashPayment + bankPayment;
 
+      // Ensure paymentDetails is populated for the ledger entry
+      entryData.paymentDetails = {
+        cashPayment,
+        bankPayment,
+        remainingBalance: totalAmount - totalPaid - newPaymentTotal
+      };
+
       // Calculate new total paid amount (including this payment)
       const newTotalPaid = totalPaid + newPaymentTotal;
 
@@ -696,17 +730,27 @@ router.post('/entry', auth, async (req, res) => {
     session.startTransaction();
 
     try {
-      const entry = await Ledger.createEntry(entryData);
-
       // Update supplier balance for regular payments (if it's a supplier payment)
       if (entryData.type === 'supplier' && entryData.transactionType === 'payment') {
         const paymentAmount = entryData.credit || 0;
+        
+        // Ensure paymentDetails is populated for the ledger entry
+        if (!entryData.paymentDetails) {
+          entryData.paymentDetails = {
+            cashPayment: entryData.paymentMethod === 'cash' ? paymentAmount : 0,
+            bankPayment: entryData.paymentMethod === 'bank' ? paymentAmount : 0,
+            remainingBalance: 0 // We don't track total balance per DO here
+          };
+        }
+
         await Supplier.findByIdAndUpdate(
           entryData.entityId,
           { $inc: { currentBalance: -paymentAmount } },
           { session }
         );
       }
+
+      const entry = await Ledger.createEntry(entryData);
 
       // Commit transaction
       await session.commitTransaction();
