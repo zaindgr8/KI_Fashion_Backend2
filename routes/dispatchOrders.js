@@ -1635,6 +1635,41 @@ router.post('/:id/confirm', auth, async (req, res) => {
     };
     dispatchOrder.confirmedQuantities = confirmedQuantities;
 
+    // ==========================================
+    // CREDIT APPLICATION: Check if supplier owes admin and auto-apply credit
+    // ==========================================
+
+    // Get current supplier balance BEFORE this order is recorded
+    const currentSupplierBalance = await Ledger.getBalance('supplier', dispatchOrder.supplier._id);
+    let creditApplied = 0;
+
+    // If balance is negative, supplier owes admin - we can apply credit
+    if (currentSupplierBalance < 0) {
+      const availableCredit = Math.abs(currentSupplierBalance);
+      const amountNeeded = dispatchOrder.paymentDetails.remainingBalance;
+
+      // Apply credit: min of available credit and amount needed
+      creditApplied = Math.min(availableCredit, amountNeeded);
+
+      if (creditApplied > 0) {
+        console.log(`[Confirm Order] Supplier has €${availableCredit.toFixed(2)} credit (owes admin). Applying €${creditApplied.toFixed(2)} to this order.`);
+
+        // Update payment details with credit applied
+        dispatchOrder.paymentDetails.creditApplied = creditApplied;
+        dispatchOrder.paymentDetails.remainingBalance = amountNeeded - creditApplied;
+
+        // Recalculate payment status
+        const totalPaid = (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) + creditApplied;
+        if (totalPaid >= discountedSupplierPaymentTotal) {
+          dispatchOrder.paymentDetails.paymentStatus = 'paid';
+        } else if (totalPaid > 0) {
+          dispatchOrder.paymentDetails.paymentStatus = 'partial';
+        } else {
+          dispatchOrder.paymentDetails.paymentStatus = 'pending';
+        }
+      }
+    }
+
     // Update prices on items
     dispatchOrder.items.forEach((item, index) => {
       item.supplierPaymentAmount = itemsWithPrices[index].supplierPaymentAmount;
@@ -1721,7 +1756,30 @@ router.post('/:id/confirm', auth, async (req, res) => {
       console.log(`[Confirm Order] Created bank payment ledger entry: £${bankPaymentAmount}`);
     }
 
-    // Create logistics charge entry (debit) if logistics company and boxes exist
+    // Create credit application entry if credit was applied from supplier's existing debt
+    if (creditApplied > 0) {
+      await Ledger.createEntry({
+        type: 'supplier',
+        entityId: dispatchOrder.supplier._id,
+        entityModel: 'Supplier',
+        transactionType: 'credit_application',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: 0,
+        credit: creditApplied,
+        date: new Date(),
+        description: `Credit applied from previous overpayment to Dispatch Order ${dispatchOrder.orderNumber} - €${creditApplied.toFixed(2)} offset against supplier debt`,
+        paymentDetails: {
+          cashPayment: 0,
+          bankPayment: 0,
+          creditApplied: creditApplied,
+          remainingBalance: dispatchOrder.paymentDetails.remainingBalance
+        },
+        createdBy: req.user._id
+      });
+      console.log(`[Confirm Order] Created credit application ledger entry: €${creditApplied.toFixed(2)}`);
+    }
+
     try {
       if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {
         // logisticsCompany should be populated from the initial query

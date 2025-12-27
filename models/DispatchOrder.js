@@ -102,6 +102,7 @@ const dispatchOrderSchema = new mongoose.Schema({
   paymentDetails: {
     cashPayment: { type: Number, default: 0 },
     bankPayment: { type: Number, default: 0 },
+    creditApplied: { type: Number, default: 0 }, // Credit automatically applied from supplier's debt to admin
     remainingBalance: { type: Number, default: 0 },
     paymentStatus: {
       type: String,

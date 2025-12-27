@@ -18,7 +18,7 @@ const ledgerSchema = new mongoose.Schema({
   },
   transactionType: {
     type: String,
-    enum: ['purchase', 'payment', 'sale', 'receipt', 'adjustment', 'return', 'charge'],
+    enum: ['purchase', 'payment', 'sale', 'receipt', 'adjustment', 'return', 'charge', 'credit_application'],
     required: true
   },
   referenceId: {
@@ -79,23 +79,23 @@ ledgerSchema.index({ entityId: 1, date: -1 });
 ledgerSchema.index({ type: 1, entityId: 1 });
 
 // Performance indexes for payment queries
-ledgerSchema.index({ 
-  type: 1, 
-  entityId: 1, 
-  referenceModel: 1, 
+ledgerSchema.index({
+  type: 1,
+  entityId: 1,
+  referenceModel: 1,
   referenceId: 1,
-  transactionType: 1 
+  transactionType: 1
 });
 
 // Index for getting latest balance efficiently
-ledgerSchema.index({ 
-  type: 1, 
-  entityId: 1, 
-  date: -1, 
-  createdAt: -1 
+ledgerSchema.index({
+  type: 1,
+  entityId: 1,
+  date: -1,
+  createdAt: -1
 });
 
-ledgerSchema.statics.createEntry = async function(entryData) {
+ledgerSchema.statics.createEntry = async function (entryData) {
   const lastEntry = await this.findOne({
     type: entryData.type,
     entityId: entryData.entityId
@@ -112,7 +112,7 @@ ledgerSchema.statics.createEntry = async function(entryData) {
   return await entry.save();
 };
 
-ledgerSchema.statics.getBalance = async function(type, entityId) {
+ledgerSchema.statics.getBalance = async function (type, entityId) {
   const lastEntry = await this.findOne({ type, entityId }).sort({ date: -1, createdAt: -1 });
   return lastEntry ? lastEntry.balance : 0;
 };
