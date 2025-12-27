@@ -312,7 +312,15 @@ dispatchOrderSchema.pre('save', async function (next) {
 // Calculate totals before saving
 dispatchOrderSchema.pre('save', function (next) {
   this.totalQuantity = this.items.reduce((sum, item) => sum + item.quantity, 0);
-  this.totalBoxes = this.items.reduce((sum, item) => sum + item.totalBoxes, 0);
+  // Only recalculate totalBoxes if not already set (Supplier Portal sets it explicitly)
+  const calculatedBoxes = this.items.reduce((sum, item) => sum + (item.totalBoxes || 0), 0);
+  if (!this.totalBoxes || this.totalBoxes === 0) {
+    this.totalBoxes = calculatedBoxes;
+  }
+  // If calculated is greater than current (items were added), update
+  if (calculatedBoxes > this.totalBoxes) {
+    this.totalBoxes = calculatedBoxes;
+  }
   this.totalWeight = this.items.reduce((sum, item) => sum + item.totalWeight, 0);
 
   // Calculate dueDate from paymentTerms if not set

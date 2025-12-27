@@ -436,7 +436,9 @@ router.post('/', auth, async (req, res) => {
 
     // Calculate totals before saving (pre-save hook will recalculate, but this ensures validation passes)
     const totalQuantity = processedItems.reduce((sum, item) => sum + item.quantity, 0);
-    const totalBoxes = processedItems.reduce((sum, item) => sum + (item.totalBoxes || 0), 0);
+    // Use req.body.totalBoxes if provided (from Supplier Portal form), otherwise calculate from items
+    const calculatedBoxes = processedItems.reduce((sum, item) => sum + (item.totalBoxes || 0), 0);
+    const totalBoxes = req.body.totalBoxes && req.body.totalBoxes > 0 ? req.body.totalBoxes : calculatedBoxes;
 
     const dispatchOrder = new DispatchOrder({
       ...req.body,
@@ -2661,7 +2663,9 @@ router.put('/:id', auth, async (req, res) => {
 
       updateData.items = processedItems;
       updateData.totalQuantity = processedItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
-      updateData.totalBoxes = processedItems.reduce((sum, item) => sum + (item.totalBoxes || item.boxes?.length || 0), 0);
+      // Use req.body.totalBoxes if provided (from Supplier Portal form), otherwise calculate from items
+      const calculatedBoxes = processedItems.reduce((sum, item) => sum + (item.totalBoxes || item.boxes?.length || 0), 0);
+      updateData.totalBoxes = req.body.totalBoxes && req.body.totalBoxes > 0 ? req.body.totalBoxes : calculatedBoxes;
     }
 
     // Handle date field
