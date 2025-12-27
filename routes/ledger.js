@@ -112,12 +112,24 @@ router.get('/supplier/:id', auth, async (req, res) => {
     const total = await Ledger.countDocuments(query);
     const balance = await Ledger.getBalance('supplier', req.params.id);
 
+    // Calculate total cash and bank payments for the supplier
+    const allPayments = await Ledger.find({
+      type: 'supplier',
+      entityId: req.params.id,
+      transactionType: 'payment'
+    }).select('paymentDetails').lean();
+
+    const totalCashPayment = allPayments.reduce((sum, p) => sum + (p.paymentDetails?.cashPayment || 0), 0);
+    const totalBankPayment = allPayments.reduce((sum, p) => sum + (p.paymentDetails?.bankPayment || 0), 0);
+
     res.json({
       success: true,
       data: {
         entries,
         currentBalance: balance,
         totalBalance: balance,
+        totalCashPayment,
+        totalBankPayment,
         supplierCount: 1
       },
       pagination: {
