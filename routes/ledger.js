@@ -1,5 +1,5 @@
 const express = require('express');
-const mongoose = require('mongoose'); 
+const mongoose = require('mongoose');
 
 const Ledger = require('../models/Ledger');
 const DispatchOrder = require('../models/DispatchOrder');
@@ -15,18 +15,18 @@ async function getBuyerIdForUser(user) {
   if (user.buyer) {
     return user.buyer;
   }
-  
+
   // If user is distributor/buyer, try to find buyer by email
   if ((user.role === 'distributor' || user.role === 'buyer') && user.email) {
-    const buyer = await Buyer.findOne({ 
-      email: user.email.toLowerCase(), 
-      customerType: 'distributor' 
+    const buyer = await Buyer.findOne({
+      email: user.email.toLowerCase(),
+      customerType: 'distributor'
     });
     if (buyer) {
       return buyer._id;
     }
   }
-  
+
   return null;
 }
 
@@ -39,11 +39,11 @@ async function calculateDispatchOrderPayments(dispatchOrderId, supplierId) {
     referenceId: dispatchOrderId,
     transactionType: 'payment'
   });
-  
+
   const totalPaid = paymentEntries.reduce((sum, entry) => {
     return sum + (entry.paymentDetails?.cashPayment || 0) + (entry.paymentDetails?.bankPayment || 0);
   }, 0);
-  
+
   return totalPaid;
 }
 
@@ -169,7 +169,7 @@ router.get('/suppliers', auth, async (req, res) => {
     const DispatchOrder = mongoose.model('DispatchOrder');
     // Purchase model removed - use DispatchOrder for manual entries
     const Return = mongoose.model('Return');
-    
+
     entries = await Promise.all(entries.map(async (entry) => {
       if (entry.referenceId && entry.referenceModel) {
         try {
@@ -255,7 +255,7 @@ router.get('/buyer', auth, async (req, res) => {
           }
         });
       }
-      
+
       // Use the same logic as /buyer/:id route
       const { page = 1, limit = 50, startDate, endDate } = req.query;
 
@@ -374,7 +374,7 @@ router.post('/entry', auth, async (req, res) => {
     // Handle dispatch order payments
     if (entryData.referenceModel === 'DispatchOrder' && entryData.transactionType === 'payment') {
       const { referenceId, entityId, paymentMethod, paymentDetails } = entryData;
-      
+
       // Validate required fields
       if (!referenceId || !entityId) {
         return res.status(400).json({
@@ -410,9 +410,9 @@ router.post('/entry', auth, async (req, res) => {
       } else {
         // For pending orders, calculate from items (discount will be applied on confirmation)
         const itemsWithDetails = dispatchOrder.items?.map((item, index) => {
-          const confirmedQty = dispatchOrder.confirmedQuantities?.find(cq => cq.itemIndex === index)?.quantity 
+          const confirmedQty = dispatchOrder.confirmedQuantities?.find(cq => cq.itemIndex === index)?.quantity
             || item.quantity;
-          const supplierPaymentAmount = item.supplierPaymentAmount || 
+          const supplierPaymentAmount = item.supplierPaymentAmount ||
             (item.costPrice / (dispatchOrder.exchangeRate || 1.0));
           return supplierPaymentAmount * confirmedQty;
         }) || [];
@@ -424,7 +424,7 @@ router.post('/entry', auth, async (req, res) => {
 
       // Calculate cumulative payments from ledger entries
       const totalPaid = await calculateDispatchOrderPayments(referenceId, entityId);
-      
+
       // Get payment amount from the current entry
       const paymentAmount = entryData.credit || 0;
       const cashPayment = paymentMethod === 'cash' ? paymentAmount : (paymentDetails?.cashPayment || 0);
@@ -434,14 +434,9 @@ router.post('/entry', auth, async (req, res) => {
       // Calculate new total paid amount (including this payment)
       const newTotalPaid = totalPaid + newPaymentTotal;
 
-      // Validate payment doesn't exceed remaining balance
+      // Calculate remaining balance (can be negative for overpayments)
+      // Negative remaining = supplier owes admin (credit with supplier)
       const remainingBalance = totalAmount - totalPaid;
-      if (newPaymentTotal > remainingBalance) {
-        return res.status(400).json({
-          success: false,
-          message: `Payment amount (€${newPaymentTotal.toFixed(2)}) exceeds remaining balance (€${remainingBalance.toFixed(2)})`
-        });
-      }
 
       // ============================================
       // START TRANSACTION - Ensure atomic operations
@@ -463,11 +458,11 @@ router.post('/entry', auth, async (req, res) => {
         };
 
         // Increment by new payment (O(1) instead of O(n))
-        const calculatedCashPayment = (currentPaymentDetails.cashPayment || 0) + 
+        const calculatedCashPayment = (currentPaymentDetails.cashPayment || 0) +
           (paymentMethod === 'cash' ? paymentAmount : 0);
-        const calculatedBankPayment = (currentPaymentDetails.bankPayment || 0) + 
+        const calculatedBankPayment = (currentPaymentDetails.bankPayment || 0) +
           (paymentMethod === 'bank' ? paymentAmount : 0);
-        
+
         const calculatedTotalPaid = calculatedCashPayment + calculatedBankPayment;
         const calculatedRemainingBalance = totalAmount - calculatedTotalPaid;
 
@@ -510,7 +505,7 @@ router.post('/entry', auth, async (req, res) => {
         // Rollback transaction on any error
         await session.abortTransaction();
         console.error(`[Payment Transaction] Rolled back payment for dispatch order ${referenceId}:`, transactionError);
-        
+
         // Handle version errors (optimistic locking conflicts)
         if (transactionError.name === 'VersionError') {
           return res.status(409).json({
@@ -519,7 +514,7 @@ router.post('/entry', auth, async (req, res) => {
             error: 'CONCURRENT_MODIFICATION'
           });
         }
-        
+
         throw transactionError;
       } finally {
         session.endSession();
@@ -529,7 +524,7 @@ router.post('/entry', auth, async (req, res) => {
     // Handle Purchase payments (similar to DispatchOrder)
     if (entryData.referenceModel === 'Purchase' && entryData.transactionType === 'payment') {
       const { referenceId, entityId, paymentMethod, paymentDetails } = entryData;
-      
+
       // Validate required fields
       if (!referenceId || !entityId) {
         return res.status(400).json({
@@ -565,11 +560,11 @@ router.post('/entry', auth, async (req, res) => {
         ],
         transactionType: 'payment'
       });
-      
+
       const totalPaid = existingPaymentEntries.reduce((sum, entry) => {
         return sum + (entry.credit || 0);
       }, 0);
-      
+
       // Get payment amount from the current entry
       const paymentAmount = entryData.credit || 0;
       const cashPayment = paymentMethod === 'cash' ? paymentAmount : (paymentDetails?.cashPayment || 0);
@@ -579,14 +574,9 @@ router.post('/entry', auth, async (req, res) => {
       // Calculate new total paid amount (including this payment)
       const newTotalPaid = totalPaid + newPaymentTotal;
 
-      // Validate payment doesn't exceed remaining balance
+      // Calculate remaining balance (can be negative for overpayments)
+      // Negative remaining = supplier owes admin (credit with supplier)
       const remainingBalance = totalAmount - totalPaid;
-      if (newPaymentTotal > remainingBalance) {
-        return res.status(400).json({
-          success: false,
-          message: `Payment amount (€${newPaymentTotal.toFixed(2)}) exceeds remaining balance (€${remainingBalance.toFixed(2)})`
-        });
-      }
 
       // ============================================
       // START TRANSACTION - Ensure atomic operations
@@ -608,11 +598,11 @@ router.post('/entry', auth, async (req, res) => {
         };
 
         // Increment by new payment (O(1) instead of O(n))
-        const calculatedCashPayment = (currentPaymentDetails.cashPayment || dispatchOrder.cashPayment || 0) + 
+        const calculatedCashPayment = (currentPaymentDetails.cashPayment || dispatchOrder.cashPayment || 0) +
           (paymentMethod === 'cash' ? paymentAmount : 0);
-        const calculatedBankPayment = (currentPaymentDetails.bankPayment || dispatchOrder.bankPayment || 0) + 
+        const calculatedBankPayment = (currentPaymentDetails.bankPayment || dispatchOrder.bankPayment || 0) +
           (paymentMethod === 'bank' ? paymentAmount : 0);
-        
+
         const calculatedTotalPaid = calculatedCashPayment + calculatedBankPayment;
         const calculatedRemainingBalance = totalAmount - calculatedTotalPaid;
 
@@ -661,7 +651,7 @@ router.post('/entry', auth, async (req, res) => {
         // Rollback transaction on any error
         await session.abortTransaction();
         console.error(`[Payment Transaction] Rolled back payment for purchase ${referenceId}:`, transactionError);
-        
+
         // Handle version errors (optimistic locking conflicts)
         if (transactionError.name === 'VersionError') {
           return res.status(409).json({
@@ -670,7 +660,7 @@ router.post('/entry', auth, async (req, res) => {
             error: 'CONCURRENT_MODIFICATION'
           });
         }
-        
+
         throw transactionError;
       } finally {
         session.endSession();
@@ -748,10 +738,10 @@ router.get('/logistics/:id', auth, async (req, res) => {
       type: 'logistics',
       entityId: id
     })
-    .sort({ date: -1, createdAt: -1 })
-    .skip(parseInt(offset))
-    .limit(parseInt(limit))
-    .populate('createdBy', 'name email');
+      .sort({ date: -1, createdAt: -1 })
+      .skip(parseInt(offset))
+      .limit(parseInt(limit))
+      .populate('createdBy', 'name email');
 
     // Get current balance
     const balance = await Ledger.getBalance('logistics', id);
@@ -812,7 +802,7 @@ router.get('/logistics', auth, async (req, res) => {
 
     // Populate reference documents dynamically
     const DispatchOrder = mongoose.model('DispatchOrder');
-    
+
     entries = await Promise.all(entries.map(async (entry) => {
       if (entry.referenceId && entry.referenceModel) {
         try {
