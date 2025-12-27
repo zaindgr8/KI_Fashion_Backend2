@@ -1970,6 +1970,24 @@ router.post('/:id/return', auth, async (req, res) => {
         };
       });
 
+      // Update payment details - reduce remaining balance by return value
+      const currentRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0;
+      const newRemaining = Math.max(0, currentRemaining - totalReturnValue);
+
+      dispatchOrder.paymentDetails = {
+        ...dispatchOrder.paymentDetails,
+        remainingBalance: newRemaining,
+        // Update payment status if now fully paid
+        paymentStatus: newRemaining <= 0 ? 'paid' :
+          (dispatchOrder.paymentDetails?.cashPayment || 0) +
+            (dispatchOrder.paymentDetails?.bankPayment || 0) +
+            (dispatchOrder.paymentDetails?.creditApplied || 0) > 0
+            ? 'partial' : 'pending'
+      };
+
+      console.log(`[Return] Updated remainingBalance: €${currentRemaining.toFixed(2)} -> €${newRemaining.toFixed(2)} (return value: €${totalReturnValue.toFixed(2)})`);
+
+
       // Reduce inventory for returned items
       try {
         for (const returnItem of returnItemsData) {
