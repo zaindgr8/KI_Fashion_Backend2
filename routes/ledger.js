@@ -136,10 +136,30 @@ router.get('/supplier/:id', auth, async (req, res) => {
     }, 0);
 
     // Calculate total outstanding balance (amount supplier owes admin from overpayments)
-    // This is the sum of all outstandingBalance values from payment entries
-    const totalOutstandingBalance = allPayments.reduce((sum, p) => {
+    // First try from payment entries (for new payments with outstandingBalance stored)
+    let totalOutstandingBalance = allPayments.reduce((sum, p) => {
       return sum + (p.paymentDetails?.outstandingBalance || 0);
     }, 0);
+
+    // If no outstanding balance found in entries, calculate dynamically from dispatch orders
+    // This handles legacy data where outstandingBalance wasn't stored
+    if (totalOutstandingBalance === 0) {
+      const DispatchOrder = mongoose.model('DispatchOrder');
+      const confirmedOrders = await DispatchOrder.find({
+        supplier: req.params.id,
+        status: 'confirmed'
+      }).select('supplierPaymentTotal paymentDetails totalDiscount').lean();
+
+      for (const order of confirmedOrders) {
+        const totalAmount = order.supplierPaymentTotal || 0;
+        const totalPaid = (order.paymentDetails?.cashPayment || 0) + (order.paymentDetails?.bankPayment || 0);
+        
+        // If paid more than owed, this is outstanding (supplier owes admin)
+        if (totalPaid > totalAmount) {
+          totalOutstandingBalance += (totalPaid - totalAmount);
+        }
+      }
+    }
 
     res.json({
       success: true,
@@ -475,11 +495,21 @@ router.post('/entry', auth, async (req, res) => {
       const bankPayment = paymentMethod === 'bank' ? paymentAmount : (paymentDetails?.bankPayment || 0);
       const newPaymentTotal = cashPayment + bankPayment;
 
-      // Ensure paymentDetails is populated for the ledger entry
+      // Calculate remaining balance after this payment
+      const remainingAfterPayment = totalAmount - totalPaid - newPaymentTotal;
+      
+      // Calculate outstanding balance (when payment exceeds what's owed, supplier owes admin)
+      // Use the value from CRM if provided, otherwise calculate
+      const outstandingBalance = paymentDetails?.outstandingBalance !== undefined 
+        ? paymentDetails.outstandingBalance 
+        : (remainingAfterPayment < 0 ? Math.abs(remainingAfterPayment) : 0);
+
+      // Ensure paymentDetails is populated for the ledger entry (preserve outstandingBalance)
       entryData.paymentDetails = {
         cashPayment,
         bankPayment,
-        remainingBalance: totalAmount - totalPaid - newPaymentTotal
+        remainingBalance: Math.max(0, remainingAfterPayment),
+        outstandingBalance: outstandingBalance
       };
 
       // Calculate new total paid amount (including this payment)
