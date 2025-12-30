@@ -169,7 +169,6 @@ router.get("/supplier/:id", auth, async (req, res) => {
 
     // Calculate totals from dispatch orders (same calculation as CRM)
     // Must calculate based on CURRENT confirmed quantities (after returns)
-    const DispatchOrder = mongoose.model("DispatchOrder");
     const confirmedOrders = await DispatchOrder.find({
       supplier: req.params.id,
       status: "confirmed",
@@ -290,7 +289,6 @@ router.get("/suppliers", auth, async (req, res) => {
       .skip((page - 1) * limit);
 
     // Populate reference documents dynamically
-    const DispatchOrder = mongoose.model("DispatchOrder");
     // Purchase model removed - use DispatchOrder for manual entries
     const Return = mongoose.model("Return");
 
@@ -1073,8 +1071,6 @@ router.get("/logistics", auth, async (req, res) => {
       .skip((page - 1) * limit);
 
     // Populate reference documents dynamically
-    const DispatchOrder = mongoose.model("DispatchOrder");
-
     entries = await Promise.all(
       entries.map(async (entry) => {
         if (entry.referenceId && entry.referenceModel) {
