@@ -1,11 +1,11 @@
-const express = require('express');
-const mongoose = require('mongoose');
+const express = require("express");
+const mongoose = require("mongoose");
 
-const Ledger = require('../models/Ledger');
-const DispatchOrder = require('../models/DispatchOrder');
-const Supplier = require('../models/Supplier');
-const Buyer = require('../models/Buyer');
-const auth = require('../middleware/auth');
+const Ledger = require("../models/Ledger");
+const DispatchOrder = require("../models/DispatchOrder");
+const Supplier = require("../models/Supplier");
+const Buyer = require("../models/Buyer");
+const auth = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -17,10 +17,10 @@ async function getBuyerIdForUser(user) {
   }
 
   // If user is distributor/buyer, try to find buyer by email
-  if ((user.role === 'distributor' || user.role === 'buyer') && user.email) {
+  if ((user.role === "distributor" || user.role === "buyer") && user.email) {
     const buyer = await Buyer.findOne({
       email: user.email.toLowerCase(),
-      customerType: 'distributor'
+      customerType: "distributor",
     });
     if (buyer) {
       return buyer._id;
@@ -33,42 +33,53 @@ async function getBuyerIdForUser(user) {
 // Helper function to calculate total payments for a dispatch order
 async function calculateDispatchOrderPayments(dispatchOrderId, supplierId) {
   const paymentEntries = await Ledger.find({
-    type: 'supplier',
+    type: "supplier",
     entityId: supplierId,
-    referenceModel: 'DispatchOrder',
+    referenceModel: "DispatchOrder",
     referenceId: dispatchOrderId,
-    transactionType: 'payment'
+    transactionType: "payment",
   });
 
   const totalPaid = paymentEntries.reduce((sum, entry) => {
-    return sum + (entry.paymentDetails?.cashPayment || 0) + (entry.paymentDetails?.bankPayment || 0);
+    return (
+      sum +
+      (entry.paymentDetails?.cashPayment || 0) +
+      (entry.paymentDetails?.bankPayment || 0)
+    );
   }, 0);
 
   return totalPaid;
 }
 
-router.get('/supplier/:id', auth, async (req, res) => {
+router.get("/supplier/:id", auth, async (req, res) => {
   try {
     // Authorization check: Suppliers can only access their own ledger
-    if (req.user.role === 'supplier') {
-      const supplierId = req.user.supplier?._id?.toString() || req.user.supplier?.toString();
+    if (req.user.role === "supplier") {
+      const supplierId =
+        req.user.supplier?._id?.toString() || req.user.supplier?.toString();
       if (supplierId !== req.params.id) {
         return res.status(403).json({
           success: false,
-          message: 'Access denied. You can only view your own ledger.'
+          message: "Access denied. You can only view your own ledger.",
         });
       }
     }
 
-    const { page = 1, limit = 50, startDate, endDate, transactionType } = req.query;
+    const {
+      page = 1,
+      limit = 50,
+      startDate,
+      endDate,
+      transactionType,
+    } = req.query;
 
     const query = {
-      type: 'supplier',
-      entityId: req.params.id
+      type: "supplier",
+      entityId: req.params.id,
     };
 
     // Add transaction type filter if provided
-    if (transactionType && transactionType !== 'all') {
+    if (transactionType && transactionType !== "all") {
       query.transactionType = transactionType;
     }
 
@@ -80,84 +91,144 @@ router.get('/supplier/:id', auth, async (req, res) => {
 
     // Fetch entries
     let entries = await Ledger.find(query)
-      .populate('createdBy', 'name')
+      .populate("createdBy", "name")
       .sort({ date: -1, createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
       .lean();
 
     // Populate referenceId for DispatchOrder references (same as /suppliers endpoint)
-    const DispatchOrder = require('../models/DispatchOrder');
-    entries = await Promise.all(entries.map(async (entry) => {
-      if (entry.referenceId && entry.referenceModel) {
-        try {
-          let refDoc;
-          if (entry.referenceModel === 'DispatchOrder') {
-            refDoc = await DispatchOrder.findById(entry.referenceId).select('orderNumber items confirmedQuantities').lean();
-            if (refDoc) entry.referenceId = { _id: refDoc._id, orderNumber: refDoc.orderNumber, items: refDoc.items, confirmedQuantities: refDoc.confirmedQuantities };
-          } else if (entry.referenceModel === 'Purchase') {
-            refDoc = await DispatchOrder.findById(entry.referenceId).select('orderNumber items confirmedQuantities').lean();
-            if (refDoc) {
-              refDoc.purchaseNumber = refDoc.orderNumber;
-              entry.referenceId = { _id: refDoc._id, purchaseNumber: refDoc.purchaseNumber, items: refDoc.items, confirmedQuantities: refDoc.confirmedQuantities };
+    const DispatchOrder = require("../models/DispatchOrder");
+    entries = await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.referenceId && entry.referenceModel) {
+          try {
+            let refDoc;
+            if (entry.referenceModel === "DispatchOrder") {
+              refDoc = await DispatchOrder.findById(entry.referenceId)
+                .select("orderNumber items confirmedQuantities")
+                .lean();
+              if (refDoc)
+                entry.referenceId = {
+                  _id: refDoc._id,
+                  orderNumber: refDoc.orderNumber,
+                  items: refDoc.items,
+                  confirmedQuantities: refDoc.confirmedQuantities,
+                };
+            } else if (entry.referenceModel === "Purchase") {
+              refDoc = await DispatchOrder.findById(entry.referenceId)
+                .select("orderNumber items confirmedQuantities")
+                .lean();
+              if (refDoc) {
+                refDoc.purchaseNumber = refDoc.orderNumber;
+                entry.referenceId = {
+                  _id: refDoc._id,
+                  purchaseNumber: refDoc.purchaseNumber,
+                  items: refDoc.items,
+                  confirmedQuantities: refDoc.confirmedQuantities,
+                };
+              }
             }
+          } catch (err) {
+            console.error("Error populating reference:", err);
           }
-        } catch (err) {
-          console.error('Error populating reference:', err);
         }
-      }
-      return entry;
-    }));
+        return entry;
+      })
+    );
 
     const total = await Ledger.countDocuments(query);
-    const balance = await Ledger.getBalance('supplier', req.params.id);
+    const balance = await Ledger.getBalance("supplier", req.params.id);
 
     // Calculate total cash and bank payments for the supplier
     const allPayments = await Ledger.find({
-      type: 'supplier',
+      type: "supplier",
       entityId: req.params.id,
-      transactionType: 'payment'
-    }).select('paymentDetails paymentMethod credit').lean();
+      transactionType: "payment",
+    })
+      .select("paymentDetails paymentMethod credit")
+      .lean();
 
     const totalCashPayment = allPayments.reduce((sum, p) => {
       // Priority 1: Check paymentDetails (set by DispatchOrder specific payment logic)
-      if (p.paymentDetails?.cashPayment) return sum + p.paymentDetails.cashPayment;
+      if (p.paymentDetails?.cashPayment)
+        return sum + p.paymentDetails.cashPayment;
       // Priority 2: Check top-level paymentMethod and credit (set by general SupplierPaymentModal)
-      if (p.paymentMethod === 'cash') return sum + (p.credit || 0);
+      if (p.paymentMethod === "cash") return sum + (p.credit || 0);
       return sum;
     }, 0);
 
     const totalBankPayment = allPayments.reduce((sum, p) => {
       // Priority 1: Check paymentDetails
-      if (p.paymentDetails?.bankPayment) return sum + p.paymentDetails.bankPayment;
+      if (p.paymentDetails?.bankPayment)
+        return sum + p.paymentDetails.bankPayment;
       // Priority 2: Check top-level paymentMethod and credit
-      if (p.paymentMethod === 'bank') return sum + (p.credit || 0);
+      if (p.paymentMethod === "bank") return sum + (p.credit || 0);
       return sum;
     }, 0);
 
-    // Calculate total outstanding balance (amount supplier owes admin from overpayments)
-    // First try from payment entries (for new payments with outstandingBalance stored)
-    let totalOutstandingBalance = allPayments.reduce((sum, p) => {
-      return sum + (p.paymentDetails?.outstandingBalance || 0);
-    }, 0);
+    // Calculate totals from dispatch orders (same calculation as CRM)
+    // Must calculate based on CURRENT confirmed quantities (after returns)
+    const DispatchOrder = mongoose.model("DispatchOrder");
+    const confirmedOrders = await DispatchOrder.find({
+      supplier: req.params.id,
+      status: "confirmed",
+    })
+      .select(
+        "items confirmedQuantities returnedItems paymentDetails totalDiscount supplierPaymentTotal exchangeRate"
+      )
+      .lean();
 
-    // If no outstanding balance found in entries, calculate dynamically from dispatch orders
-    // This handles legacy data where outstandingBalance wasn't stored
-    if (totalOutstandingBalance === 0) {
-      const DispatchOrder = mongoose.model('DispatchOrder');
-      const confirmedOrders = await DispatchOrder.find({
-        supplier: req.params.id,
-        status: 'confirmed'
-      }).select('supplierPaymentTotal paymentDetails totalDiscount').lean();
+    let totalRemainingBalance = 0;
+    let totalOutstandingBalance = 0;
 
-      for (const order of confirmedOrders) {
-        const totalAmount = order.supplierPaymentTotal || 0;
-        const totalPaid = (order.paymentDetails?.cashPayment || 0) + (order.paymentDetails?.bankPayment || 0);
-        
-        // If paid more than owed, this is outstanding (supplier owes admin)
-        if (totalPaid > totalAmount) {
-          totalOutstandingBalance += (totalPaid - totalAmount);
-        }
+    for (const order of confirmedOrders) {
+      const exchangeRate = order.exchangeRate || 1;
+
+      // Calculate supplier payment based on CURRENT confirmed quantities (after returns)
+      // This matches CRM calculation: sum(costPrice × confirmedQty)
+      // Cost prices are in supplier currency
+      let supplierPaymentAmount = 0;
+
+      if (order.items && order.items.length > 0) {
+        order.items.forEach((item, index) => {
+          const costPrice = item.costPrice || 0;
+          // Get confirmed quantity (which is updated after returns)
+          const confirmedQtyObj = order.confirmedQuantities?.find(
+            (cq) => cq.itemIndex === index
+          );
+          const confirmedQty = confirmedQtyObj?.quantity ?? item.quantity;
+          supplierPaymentAmount += costPrice * confirmedQty;
+        });
+      } else {
+        // Fallback to stored supplierPaymentTotal if no items
+        supplierPaymentAmount = order.supplierPaymentTotal || 0;
+      }
+
+      // Apply discount (discount is in supplier currency)
+      const discount = order.totalDiscount || 0;
+      const totalAmountSupplierCurrency = Math.max(
+        0,
+        supplierPaymentAmount - discount
+      );
+
+      // Get total paid from paymentDetails (stored in EUR)
+      const totalPaidEur =
+        (order.paymentDetails?.cashPayment || 0) +
+        (order.paymentDetails?.bankPayment || 0);
+
+      // Convert EUR payments to supplier currency for comparison
+      // Exchange rate: 1 EUR = X supplier currency (e.g., 0.74 means 1 EUR = 0.74 GBP)
+      const totalPaidSupplierCurrency = totalPaidEur * exchangeRate;
+
+      const remaining = totalAmountSupplierCurrency - totalPaidSupplierCurrency;
+
+      if (remaining > 0) {
+        // Admin still owes supplier for this order (in supplier currency)
+        totalRemainingBalance += remaining;
+      } else if (remaining < 0) {
+        // Supplier owes admin (overpayment or returns after payment)
+        totalOutstandingBalance += Math.abs(remaining);
       }
     }
 
@@ -169,36 +240,37 @@ router.get('/supplier/:id', auth, async (req, res) => {
         totalBalance: balance,
         totalCashPayment,
         totalBankPayment,
+        totalRemainingBalance,
         totalOutstandingBalance,
-        supplierCount: 1
+        supplierCount: 1,
       },
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
         totalItems: total,
-        itemsPerPage: limit
-      }
+        itemsPerPage: limit,
+      },
     });
   } catch (error) {
-    console.error('Get supplier ledger error:', error);
+    console.error("Get supplier ledger error:", error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: "Server error",
     });
   }
 });
 
 // Get all supplier ledger entries (optionally filtered by supplier)
-router.get('/suppliers', auth, async (req, res) => {
+router.get("/suppliers", auth, async (req, res) => {
   try {
     const { page = 1, limit = 100, supplierId, startDate, endDate } = req.query;
 
     const query = {
-      type: 'supplier'
+      type: "supplier",
     };
 
     // Filter by specific supplier if provided
-    if (supplierId && supplierId !== 'all') {
+    if (supplierId && supplierId !== "all") {
       query.entityId = supplierId;
     }
 
@@ -210,55 +282,77 @@ router.get('/suppliers', auth, async (req, res) => {
 
     // Find entries
     let entries = await Ledger.find(query)
-      .populate('createdBy', 'name')
-      .populate('entityId', 'name company') // Populate supplier info
+      .populate("createdBy", "name")
+      .populate("entityId", "name company") // Populate supplier info
       .lean() // Use lean for better performance
       .sort({ date: -1, createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
 
     // Populate reference documents dynamically
-    const DispatchOrder = mongoose.model('DispatchOrder');
+    const DispatchOrder = mongoose.model("DispatchOrder");
     // Purchase model removed - use DispatchOrder for manual entries
-    const Return = mongoose.model('Return');
+    const Return = mongoose.model("Return");
 
-    entries = await Promise.all(entries.map(async (entry) => {
-      if (entry.referenceId && entry.referenceModel) {
-        try {
-          let refDoc;
-          if (entry.referenceModel === 'DispatchOrder') {
-            refDoc = await DispatchOrder.findById(entry.referenceId).select('orderNumber items confirmedQuantities').lean();
-            if (refDoc) entry.referenceId = { _id: refDoc._id, orderNumber: refDoc.orderNumber, items: refDoc.items, confirmedQuantities: refDoc.confirmedQuantities };
-          } else if (entry.referenceModel === 'Purchase') {
-            // Legacy Purchase references - now use DispatchOrder (manual entries have supplierUser: null)
-            refDoc = await DispatchOrder.findById(entry.referenceId).select('orderNumber items confirmedQuantities').lean();
-            if (refDoc) {
-              refDoc.purchaseNumber = refDoc.orderNumber; // For compatibility
+    entries = await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.referenceId && entry.referenceModel) {
+          try {
+            let refDoc;
+            if (entry.referenceModel === "DispatchOrder") {
+              refDoc = await DispatchOrder.findById(entry.referenceId)
+                .select("orderNumber items confirmedQuantities")
+                .lean();
+              if (refDoc)
+                entry.referenceId = {
+                  _id: refDoc._id,
+                  orderNumber: refDoc.orderNumber,
+                  items: refDoc.items,
+                  confirmedQuantities: refDoc.confirmedQuantities,
+                };
+            } else if (entry.referenceModel === "Purchase") {
+              // Legacy Purchase references - now use DispatchOrder (manual entries have supplierUser: null)
+              refDoc = await DispatchOrder.findById(entry.referenceId)
+                .select("orderNumber items confirmedQuantities")
+                .lean();
+              if (refDoc) {
+                refDoc.purchaseNumber = refDoc.orderNumber; // For compatibility
+              }
+              if (refDoc)
+                entry.referenceId = {
+                  _id: refDoc._id,
+                  purchaseNumber: refDoc.purchaseNumber,
+                  items: refDoc.items,
+                  confirmedQuantities: refDoc.confirmedQuantities,
+                };
+            } else if (entry.referenceModel === "Return") {
+              refDoc = await Return.findById(entry.referenceId)
+                .select("_id")
+                .lean();
+              if (refDoc) entry.referenceId = { _id: refDoc._id };
             }
-            if (refDoc) entry.referenceId = { _id: refDoc._id, purchaseNumber: refDoc.purchaseNumber, items: refDoc.items, confirmedQuantities: refDoc.confirmedQuantities };
-          } else if (entry.referenceModel === 'Return') {
-            refDoc = await Return.findById(entry.referenceId).select('_id').lean();
-            if (refDoc) entry.referenceId = { _id: refDoc._id };
+          } catch (err) {
+            // If model doesn't exist or populate fails, continue without reference
+            console.error("Error populating reference:", err);
           }
-        } catch (err) {
-          // If model doesn't exist or populate fails, continue without reference
-          console.error('Error populating reference:', err);
         }
-      }
-      return entry;
-    }));
+        return entry;
+      })
+    );
 
     const total = await Ledger.countDocuments(query);
 
     // Calculate total balance for all suppliers or specific supplier
     let totalBalance = 0;
-    if (supplierId && supplierId !== 'all') {
-      totalBalance = await Ledger.getBalance('supplier', supplierId);
+    if (supplierId && supplierId !== "all") {
+      totalBalance = await Ledger.getBalance("supplier", supplierId);
     } else {
       // Get balance for all suppliers - get the latest balance entry for each supplier
-      const supplierIds = await Ledger.distinct('entityId', { type: 'supplier' });
+      const supplierIds = await Ledger.distinct("entityId", {
+        type: "supplier",
+      });
       const balances = await Promise.all(
-        supplierIds.map(id => Ledger.getBalance('supplier', id))
+        supplierIds.map((id) => Ledger.getBalance("supplier", id))
       );
       totalBalance = balances.reduce((sum, balance) => sum + (balance || 0), 0);
     }
@@ -268,43 +362,48 @@ router.get('/suppliers', auth, async (req, res) => {
       data: {
         entries,
         totalBalance,
-        supplierCount: supplierId && supplierId !== 'all' ? 1 : await Ledger.distinct('entityId', { type: 'supplier' }).then(ids => ids.length)
+        supplierCount:
+          supplierId && supplierId !== "all"
+            ? 1
+            : await Ledger.distinct("entityId", { type: "supplier" }).then(
+                (ids) => ids.length
+              ),
       },
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
         totalItems: total,
-        itemsPerPage: limit
-      }
+        itemsPerPage: limit,
+      },
     });
   } catch (error) {
-    console.error('Get all supplier ledgers error:', error);
+    console.error("Get all supplier ledgers error:", error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: "Server error",
     });
   }
 });
 
 // Get buyer ledger (auto-detect buyer ID for distributors)
-router.get('/buyer', auth, async (req, res) => {
+router.get("/buyer", auth, async (req, res) => {
   try {
     // Only for distributors/buyers - auto-detect their buyer ID
-    if (req.user.role === 'distributor' || req.user.role === 'buyer') {
+    if (req.user.role === "distributor" || req.user.role === "buyer") {
       const buyerId = await getBuyerIdForUser(req.user);
       if (!buyerId) {
         return res.json({
           success: true,
           data: {
             entries: [],
-            currentBalance: 0
+            currentBalance: 0,
           },
           pagination: {
             currentPage: 1,
             totalPages: 0,
             totalItems: 0,
-            itemsPerPage: 50
-          }
+            itemsPerPage: 50,
+          },
         });
       }
 
@@ -312,8 +411,8 @@ router.get('/buyer', auth, async (req, res) => {
       const { page = 1, limit = 50, startDate, endDate } = req.query;
 
       const query = {
-        type: 'buyer',
-        entityId: buyerId
+        type: "buyer",
+        entityId: buyerId,
       };
 
       if (startDate || endDate) {
@@ -323,51 +422,51 @@ router.get('/buyer', auth, async (req, res) => {
       }
 
       const entries = await Ledger.find(query)
-        .populate('createdBy', 'name')
+        .populate("createdBy", "name")
         .sort({ date: -1, createdAt: -1 })
         .limit(limit * 1)
         .skip((page - 1) * limit);
 
       const total = await Ledger.countDocuments(query);
-      const balance = await Ledger.getBalance('buyer', buyerId);
+      const balance = await Ledger.getBalance("buyer", buyerId);
 
       return res.json({
         success: true,
         data: {
           entries,
-          currentBalance: balance
+          currentBalance: balance,
         },
         pagination: {
           currentPage: page,
           totalPages: Math.ceil(total / limit),
           totalItems: total,
-          itemsPerPage: limit
-        }
+          itemsPerPage: limit,
+        },
       });
     } else {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. This endpoint is for distributors only.'
+        message: "Access denied. This endpoint is for distributors only.",
       });
     }
   } catch (error) {
-    console.error('Get buyer ledger (auto) error:', error);
+    console.error("Get buyer ledger (auto) error:", error);
     return res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: "Server error",
     });
   }
 });
 
-router.get('/buyer/:id', auth, async (req, res) => {
+router.get("/buyer/:id", auth, async (req, res) => {
   try {
     // Authorization check: Distributors can only access their own ledger
-    if (req.user.role === 'distributor' || req.user.role === 'buyer') {
+    if (req.user.role === "distributor" || req.user.role === "buyer") {
       const buyerId = await getBuyerIdForUser(req.user);
       if (!buyerId || buyerId.toString() !== req.params.id) {
         return res.status(403).json({
           success: false,
-          message: 'Access denied. You can only view your own ledger.'
+          message: "Access denied. You can only view your own ledger.",
         });
       }
     }
@@ -375,8 +474,8 @@ router.get('/buyer/:id', auth, async (req, res) => {
     const { page = 1, limit = 50, startDate, endDate } = req.query;
 
     const query = {
-      type: 'buyer',
-      entityId: req.params.id
+      type: "buyer",
+      entityId: req.params.id,
     };
 
     if (startDate || endDate) {
@@ -386,52 +485,56 @@ router.get('/buyer/:id', auth, async (req, res) => {
     }
 
     const entries = await Ledger.find(query)
-      .populate('createdBy', 'name')
+      .populate("createdBy", "name")
       .sort({ date: -1, createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
 
     const total = await Ledger.countDocuments(query);
-    const balance = await Ledger.getBalance('buyer', req.params.id);
+    const balance = await Ledger.getBalance("buyer", req.params.id);
 
     res.json({
       success: true,
       data: {
         entries,
-        currentBalance: balance
+        currentBalance: balance,
       },
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
         totalItems: total,
-        itemsPerPage: limit
-      }
+        itemsPerPage: limit,
+      },
     });
   } catch (error) {
-    console.error('Get buyer ledger error:', error);
+    console.error("Get buyer ledger error:", error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: "Server error",
     });
   }
 });
 
-router.post('/entry', auth, async (req, res) => {
+router.post("/entry", auth, async (req, res) => {
   try {
     const entryData = {
       ...req.body,
-      createdBy: req.user._id
+      createdBy: req.user._id,
     };
 
     // Handle dispatch order payments
-    if (entryData.referenceModel === 'DispatchOrder' && entryData.transactionType === 'payment') {
-      const { referenceId, entityId, paymentMethod, paymentDetails } = entryData;
+    if (
+      entryData.referenceModel === "DispatchOrder" &&
+      entryData.transactionType === "payment"
+    ) {
+      const { referenceId, entityId, paymentMethod, paymentDetails } =
+        entryData;
 
       // Validate required fields
       if (!referenceId || !entityId) {
         return res.status(400).json({
           success: false,
-          message: 'Dispatch order ID and supplier ID are required'
+          message: "Dispatch order ID and supplier ID are required",
         });
       }
 
@@ -440,15 +543,15 @@ router.post('/entry', auth, async (req, res) => {
       if (!dispatchOrder) {
         return res.status(404).json({
           success: false,
-          message: 'Dispatch order not found'
+          message: "Dispatch order not found",
         });
       }
 
       // Check if dispatch order is confirmed
-      if (dispatchOrder.status !== 'confirmed') {
+      if (dispatchOrder.status !== "confirmed") {
         return res.status(400).json({
           success: false,
-          message: 'Only confirmed dispatch orders can receive payments'
+          message: "Only confirmed dispatch orders can receive payments",
         });
       }
 
@@ -456,18 +559,25 @@ router.post('/entry', auth, async (req, res) => {
       // Use supplierPaymentTotal (already has discount applied) if order is confirmed
       // Otherwise calculate from items
       let totalAmount = 0;
-      if (dispatchOrder.status === 'confirmed' && dispatchOrder.supplierPaymentTotal !== undefined) {
+      if (
+        dispatchOrder.status === "confirmed" &&
+        dispatchOrder.supplierPaymentTotal !== undefined
+      ) {
         // Use the supplierPaymentTotal which already has discount applied
         totalAmount = dispatchOrder.supplierPaymentTotal;
       } else {
         // For pending orders, calculate from items (discount will be applied on confirmation)
-        const itemsWithDetails = dispatchOrder.items?.map((item, index) => {
-          const confirmedQty = dispatchOrder.confirmedQuantities?.find(cq => cq.itemIndex === index)?.quantity
-            || item.quantity;
-          const supplierPaymentAmount = item.supplierPaymentAmount ||
-            (item.costPrice / (dispatchOrder.exchangeRate || 1.0));
-          return supplierPaymentAmount * confirmedQty;
-        }) || [];
+        const itemsWithDetails =
+          dispatchOrder.items?.map((item, index) => {
+            const confirmedQty =
+              dispatchOrder.confirmedQuantities?.find(
+                (cq) => cq.itemIndex === index
+              )?.quantity || item.quantity;
+            const supplierPaymentAmount =
+              item.supplierPaymentAmount ||
+              item.costPrice / (dispatchOrder.exchangeRate || 1.0);
+            return supplierPaymentAmount * confirmedQty;
+          }) || [];
         totalAmount = itemsWithDetails.reduce((sum, amount) => sum + amount, 0);
         // Apply discount if set
         const discount = dispatchOrder.totalDiscount || 0;
@@ -477,39 +587,56 @@ router.post('/entry', auth, async (req, res) => {
       // IMPORTANT: Subtract return amounts from totalAmount
       // Returns reduce what admin owes supplier
       const returnEntries = await Ledger.find({
-        type: 'supplier',
+        type: "supplier",
         entityId: entityId,
-        referenceModel: 'Return',
-        transactionType: 'return'
-      }).where('description').regex(new RegExp(dispatchOrder.orderNumber, 'i'));
+        referenceModel: "Return",
+        transactionType: "return",
+      })
+        .where("description")
+        .regex(new RegExp(dispatchOrder.orderNumber, "i"));
 
-      const totalReturns = returnEntries.reduce((sum, entry) => sum + (entry.credit || 0), 0);
+      const totalReturns = returnEntries.reduce(
+        (sum, entry) => sum + (entry.credit || 0),
+        0
+      );
       totalAmount = Math.max(0, totalAmount - totalReturns);
 
       // Calculate cumulative payments from ledger entries
-      const totalPaid = await calculateDispatchOrderPayments(referenceId, entityId);
+      const totalPaid = await calculateDispatchOrderPayments(
+        referenceId,
+        entityId
+      );
 
       // Get payment amount from the current entry
       const paymentAmount = entryData.credit || 0;
-      const cashPayment = paymentMethod === 'cash' ? paymentAmount : (paymentDetails?.cashPayment || 0);
-      const bankPayment = paymentMethod === 'bank' ? paymentAmount : (paymentDetails?.bankPayment || 0);
+      const cashPayment =
+        paymentMethod === "cash"
+          ? paymentAmount
+          : paymentDetails?.cashPayment || 0;
+      const bankPayment =
+        paymentMethod === "bank"
+          ? paymentAmount
+          : paymentDetails?.bankPayment || 0;
       const newPaymentTotal = cashPayment + bankPayment;
 
       // Calculate remaining balance after this payment
       const remainingAfterPayment = totalAmount - totalPaid - newPaymentTotal;
-      
+
       // Calculate outstanding balance (when payment exceeds what's owed, supplier owes admin)
       // Use the value from CRM if provided, otherwise calculate
-      const outstandingBalance = paymentDetails?.outstandingBalance !== undefined 
-        ? paymentDetails.outstandingBalance 
-        : (remainingAfterPayment < 0 ? Math.abs(remainingAfterPayment) : 0);
+      const outstandingBalance =
+        paymentDetails?.outstandingBalance !== undefined
+          ? paymentDetails.outstandingBalance
+          : remainingAfterPayment < 0
+          ? Math.abs(remainingAfterPayment)
+          : 0;
 
       // Ensure paymentDetails is populated for the ledger entry (preserve outstandingBalance)
       entryData.paymentDetails = {
         cashPayment,
         bankPayment,
         remainingBalance: Math.max(0, remainingAfterPayment),
-        outstandingBalance: outstandingBalance
+        outstandingBalance: outstandingBalance,
       };
 
       // Calculate new total paid amount (including this payment)
@@ -535,24 +662,27 @@ router.post('/entry', auth, async (req, res) => {
           cashPayment: 0,
           bankPayment: 0,
           remainingBalance: totalAmount,
-          paymentStatus: 'pending'
+          paymentStatus: "pending",
         };
 
         // Increment by new payment (O(1) instead of O(n))
-        const calculatedCashPayment = (currentPaymentDetails.cashPayment || 0) +
-          (paymentMethod === 'cash' ? paymentAmount : 0);
-        const calculatedBankPayment = (currentPaymentDetails.bankPayment || 0) +
-          (paymentMethod === 'bank' ? paymentAmount : 0);
+        const calculatedCashPayment =
+          (currentPaymentDetails.cashPayment || 0) +
+          (paymentMethod === "cash" ? paymentAmount : 0);
+        const calculatedBankPayment =
+          (currentPaymentDetails.bankPayment || 0) +
+          (paymentMethod === "bank" ? paymentAmount : 0);
 
-        const calculatedTotalPaid = calculatedCashPayment + calculatedBankPayment;
+        const calculatedTotalPaid =
+          calculatedCashPayment + calculatedBankPayment;
         const calculatedRemainingBalance = totalAmount - calculatedTotalPaid;
 
         // Determine payment status
-        let paymentStatus = 'pending';
+        let paymentStatus = "pending";
         if (calculatedRemainingBalance <= 0) {
-          paymentStatus = 'paid';
+          paymentStatus = "paid";
         } else if (calculatedTotalPaid > 0) {
-          paymentStatus = 'partial';
+          paymentStatus = "partial";
         }
 
         // Update dispatch order payment details with incremented values
@@ -560,7 +690,7 @@ router.post('/entry', auth, async (req, res) => {
           cashPayment: calculatedCashPayment,
           bankPayment: calculatedBankPayment,
           remainingBalance: calculatedRemainingBalance,
-          paymentStatus: paymentStatus
+          paymentStatus: paymentStatus,
         };
 
         await dispatchOrder.save({ session });
@@ -574,25 +704,30 @@ router.post('/entry', auth, async (req, res) => {
 
         // Commit transaction - all operations succeeded
         await session.commitTransaction();
-        console.log(`[Payment Transaction] Successfully committed payment for dispatch order ${referenceId}`);
+        console.log(
+          `[Payment Transaction] Successfully committed payment for dispatch order ${referenceId}`
+        );
 
         return res.status(201).json({
           success: true,
-          message: 'Payment recorded successfully',
-          data: entry
+          message: "Payment recorded successfully",
+          data: entry,
         });
-
       } catch (transactionError) {
         // Rollback transaction on any error
         await session.abortTransaction();
-        console.error(`[Payment Transaction] Rolled back payment for dispatch order ${referenceId}:`, transactionError);
+        console.error(
+          `[Payment Transaction] Rolled back payment for dispatch order ${referenceId}:`,
+          transactionError
+        );
 
         // Handle version errors (optimistic locking conflicts)
-        if (transactionError.name === 'VersionError') {
+        if (transactionError.name === "VersionError") {
           return res.status(409).json({
             success: false,
-            message: 'This order was modified by another user. Please refresh and try again.',
-            error: 'CONCURRENT_MODIFICATION'
+            message:
+              "This order was modified by another user. Please refresh and try again.",
+            error: "CONCURRENT_MODIFICATION",
           });
         }
 
@@ -603,29 +738,39 @@ router.post('/entry', auth, async (req, res) => {
     }
 
     // Handle Purchase payments (similar to DispatchOrder)
-    if (entryData.referenceModel === 'Purchase' && entryData.transactionType === 'payment') {
-      const { referenceId, entityId, paymentMethod, paymentDetails } = entryData;
+    if (
+      entryData.referenceModel === "Purchase" &&
+      entryData.transactionType === "payment"
+    ) {
+      const { referenceId, entityId, paymentMethod, paymentDetails } =
+        entryData;
 
       // Validate required fields
       if (!referenceId || !entityId) {
         return res.status(400).json({
           success: false,
-          message: 'Purchase ID and supplier ID are required'
+          message: "Purchase ID and supplier ID are required",
         });
       }
 
       // Fetch DispatchOrder (manual entry - supplierUser is null)
-      const dispatchOrder = await DispatchOrder.findById(referenceId).populate('supplier');
+      const dispatchOrder = await DispatchOrder.findById(referenceId).populate(
+        "supplier"
+      );
       if (!dispatchOrder) {
         return res.status(404).json({
           success: false,
-          message: 'Purchase not found'
+          message: "Purchase not found",
         });
       }
 
       // For manual entries, use grandTotal if available, otherwise calculate from items
       let totalAmount = dispatchOrder.grandTotal || 0;
-      if (totalAmount === 0 && dispatchOrder.items && dispatchOrder.items.length > 0) {
+      if (
+        totalAmount === 0 &&
+        dispatchOrder.items &&
+        dispatchOrder.items.length > 0
+      ) {
         totalAmount = dispatchOrder.items.reduce((sum, item) => {
           return sum + (item.landedTotal || 0);
         }, 0);
@@ -633,13 +778,13 @@ router.post('/entry', auth, async (req, res) => {
 
       // Calculate cumulative payments from ledger entries (before creating new entry)
       const existingPaymentEntries = await Ledger.find({
-        type: 'supplier',
+        type: "supplier",
         entityId: entityId,
         $or: [
-          { referenceModel: 'Purchase', referenceId: referenceId },
-          { referenceModel: 'DispatchOrder', referenceId: referenceId }
+          { referenceModel: "Purchase", referenceId: referenceId },
+          { referenceModel: "DispatchOrder", referenceId: referenceId },
         ],
-        transactionType: 'payment'
+        transactionType: "payment",
       });
 
       const totalPaid = existingPaymentEntries.reduce((sum, entry) => {
@@ -648,15 +793,21 @@ router.post('/entry', auth, async (req, res) => {
 
       // Get payment amount from the current entry
       const paymentAmount = entryData.credit || 0;
-      const cashPayment = paymentMethod === 'cash' ? paymentAmount : (paymentDetails?.cashPayment || 0);
-      const bankPayment = paymentMethod === 'bank' ? paymentAmount : (paymentDetails?.bankPayment || 0);
+      const cashPayment =
+        paymentMethod === "cash"
+          ? paymentAmount
+          : paymentDetails?.cashPayment || 0;
+      const bankPayment =
+        paymentMethod === "bank"
+          ? paymentAmount
+          : paymentDetails?.bankPayment || 0;
       const newPaymentTotal = cashPayment + bankPayment;
 
       // Ensure paymentDetails is populated for the ledger entry
       entryData.paymentDetails = {
         cashPayment,
         bankPayment,
-        remainingBalance: totalAmount - totalPaid - newPaymentTotal
+        remainingBalance: totalAmount - totalPaid - newPaymentTotal,
       };
 
       // Calculate new total paid amount (including this payment)
@@ -682,24 +833,29 @@ router.post('/entry', auth, async (req, res) => {
           cashPayment: 0,
           bankPayment: 0,
           remainingBalance: totalAmount,
-          paymentStatus: 'pending'
+          paymentStatus: "pending",
         };
 
         // Increment by new payment (O(1) instead of O(n))
-        const calculatedCashPayment = (currentPaymentDetails.cashPayment || dispatchOrder.cashPayment || 0) +
-          (paymentMethod === 'cash' ? paymentAmount : 0);
-        const calculatedBankPayment = (currentPaymentDetails.bankPayment || dispatchOrder.bankPayment || 0) +
-          (paymentMethod === 'bank' ? paymentAmount : 0);
+        const calculatedCashPayment =
+          (currentPaymentDetails.cashPayment ||
+            dispatchOrder.cashPayment ||
+            0) + (paymentMethod === "cash" ? paymentAmount : 0);
+        const calculatedBankPayment =
+          (currentPaymentDetails.bankPayment ||
+            dispatchOrder.bankPayment ||
+            0) + (paymentMethod === "bank" ? paymentAmount : 0);
 
-        const calculatedTotalPaid = calculatedCashPayment + calculatedBankPayment;
+        const calculatedTotalPaid =
+          calculatedCashPayment + calculatedBankPayment;
         const calculatedRemainingBalance = totalAmount - calculatedTotalPaid;
 
         // Determine payment status
-        let paymentStatus = 'pending';
+        let paymentStatus = "pending";
         if (calculatedRemainingBalance <= 0) {
-          paymentStatus = 'paid';
+          paymentStatus = "paid";
         } else if (calculatedTotalPaid > 0) {
-          paymentStatus = 'partial';
+          paymentStatus = "partial";
         }
 
         // Update purchase payment details with incremented values
@@ -713,7 +869,7 @@ router.post('/entry', auth, async (req, res) => {
           cashPayment: calculatedCashPayment,
           bankPayment: calculatedBankPayment,
           remainingBalance: calculatedRemainingBalance,
-          paymentStatus: paymentStatus
+          paymentStatus: paymentStatus,
         };
 
         await dispatchOrder.save({ session });
@@ -727,25 +883,30 @@ router.post('/entry', auth, async (req, res) => {
 
         // Commit transaction - all operations succeeded
         await session.commitTransaction();
-        console.log(`[Payment Transaction] Successfully committed payment for purchase ${referenceId}`);
+        console.log(
+          `[Payment Transaction] Successfully committed payment for purchase ${referenceId}`
+        );
 
         return res.status(201).json({
           success: true,
-          message: 'Payment recorded successfully',
-          data: entry
+          message: "Payment recorded successfully",
+          data: entry,
         });
-
       } catch (transactionError) {
         // Rollback transaction on any error
         await session.abortTransaction();
-        console.error(`[Payment Transaction] Rolled back payment for purchase ${referenceId}:`, transactionError);
+        console.error(
+          `[Payment Transaction] Rolled back payment for purchase ${referenceId}:`,
+          transactionError
+        );
 
         // Handle version errors (optimistic locking conflicts)
-        if (transactionError.name === 'VersionError') {
+        if (transactionError.name === "VersionError") {
           return res.status(409).json({
             success: false,
-            message: 'This purchase was modified by another user. Please refresh and try again.',
-            error: 'CONCURRENT_MODIFICATION'
+            message:
+              "This purchase was modified by another user. Please refresh and try again.",
+            error: "CONCURRENT_MODIFICATION",
           });
         }
 
@@ -761,15 +922,18 @@ router.post('/entry', auth, async (req, res) => {
 
     try {
       // Update supplier balance for regular payments (if it's a supplier payment)
-      if (entryData.type === 'supplier' && entryData.transactionType === 'payment') {
+      if (
+        entryData.type === "supplier" &&
+        entryData.transactionType === "payment"
+      ) {
         const paymentAmount = entryData.credit || 0;
-        
+
         // Ensure paymentDetails is populated for the ledger entry
         if (!entryData.paymentDetails) {
           entryData.paymentDetails = {
-            cashPayment: entryData.paymentMethod === 'cash' ? paymentAmount : 0,
-            bankPayment: entryData.paymentMethod === 'bank' ? paymentAmount : 0,
-            remainingBalance: 0 // We don't track total balance per DO here
+            cashPayment: entryData.paymentMethod === "cash" ? paymentAmount : 0,
+            bankPayment: entryData.paymentMethod === "bank" ? paymentAmount : 0,
+            remainingBalance: 0, // We don't track total balance per DO here
           };
         }
 
@@ -784,103 +948,113 @@ router.post('/entry', auth, async (req, res) => {
 
       // Commit transaction
       await session.commitTransaction();
-      console.log('[Payment Transaction] Successfully committed regular payment');
+      console.log(
+        "[Payment Transaction] Successfully committed regular payment"
+      );
 
       res.status(201).json({
         success: true,
-        message: 'Ledger entry created successfully',
-        data: entry
+        message: "Ledger entry created successfully",
+        data: entry,
       });
-
     } catch (transactionError) {
       await session.abortTransaction();
-      console.error('[Payment Transaction] Rolled back regular payment:', transactionError);
+      console.error(
+        "[Payment Transaction] Rolled back regular payment:",
+        transactionError
+      );
       throw transactionError;
     } finally {
       session.endSession();
     }
   } catch (error) {
-    console.error('Create ledger entry error:', error);
+    console.error("Create ledger entry error:", error);
     res.status(500).json({
       success: false,
-      message: error.message || 'Server error'
+      message: error.message || "Server error",
     });
   }
 });
 
-router.get('/balance/:type/:id', auth, async (req, res) => {
+router.get("/balance/:type/:id", auth, async (req, res) => {
   try {
     const balance = await Ledger.getBalance(req.params.type, req.params.id);
 
     res.json({
       success: true,
-      data: { balance }
+      data: { balance },
     });
   } catch (error) {
-    console.error('Get balance error:', error);
+    console.error("Get balance error:", error);
     res.status(500).json({
       success: false,
-      message: 'Server error'
+      message: "Server error",
     });
   }
 });
 
 // Get logistics company ledger
-router.get('/logistics/:id', auth, async (req, res) => {
+router.get("/logistics/:id", auth, async (req, res) => {
   try {
     const { id } = req.params;
     const { limit = 100, offset = 0 } = req.query;
 
     // Fetch ledger entries for this logistics company
     const entries = await Ledger.find({
-      type: 'logistics',
-      entityId: id
+      type: "logistics",
+      entityId: id,
     })
       .sort({ date: -1, createdAt: -1 })
       .skip(parseInt(offset))
       .limit(parseInt(limit))
-      .populate('createdBy', 'name email');
+      .populate("createdBy", "name email");
 
     // Get current balance
-    const balance = await Ledger.getBalance('logistics', id);
+    const balance = await Ledger.getBalance("logistics", id);
 
     res.json({
       success: true,
       data: {
         entries,
         balance,
-        count: entries.length
-      }
+        count: entries.length,
+      },
     });
   } catch (error) {
-    console.error('Get logistics ledger error:', error);
+    console.error("Get logistics ledger error:", error);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch logistics company ledger'
+      message: "Failed to fetch logistics company ledger",
     });
   }
 });
 
 // Get all logistics ledger entries (optionally filtered by company)
-router.get('/logistics', auth, async (req, res) => {
+router.get("/logistics", auth, async (req, res) => {
   try {
-    const { page = 1, limit = 100, logisticsCompanyId, startDate, endDate } = req.query;
+    const {
+      page = 1,
+      limit = 100,
+      logisticsCompanyId,
+      startDate,
+      endDate,
+    } = req.query;
 
     const query = {
-      type: 'logistics'
+      type: "logistics",
     };
 
     // Filter by specific logistics company if provided
-    if (logisticsCompanyId && logisticsCompanyId !== 'all') {
+    if (logisticsCompanyId && logisticsCompanyId !== "all") {
       query.entityId = logisticsCompanyId;
     }
 
     // Debug logging
-    console.log('Get all logistics ledgers query:', {
+    console.log("Get all logistics ledgers query:", {
       logisticsCompanyId,
       query,
       page,
-      limit
+      limit,
     });
 
     if (startDate || endDate) {
@@ -891,53 +1065,64 @@ router.get('/logistics', auth, async (req, res) => {
 
     // Find entries
     let entries = await Ledger.find(query)
-      .populate('createdBy', 'name')
-      .populate('entityId', 'name') // Populate logistics company info
+      .populate("createdBy", "name")
+      .populate("entityId", "name") // Populate logistics company info
       .lean() // Use lean for better performance
       .sort({ date: -1, createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
 
     // Populate reference documents dynamically
-    const DispatchOrder = mongoose.model('DispatchOrder');
+    const DispatchOrder = mongoose.model("DispatchOrder");
 
-    entries = await Promise.all(entries.map(async (entry) => {
-      if (entry.referenceId && entry.referenceModel) {
-        try {
-          let refDoc;
-          if (entry.referenceModel === 'DispatchOrder') {
-            refDoc = await DispatchOrder.findById(entry.referenceId).select('orderNumber totalBoxes').lean();
-            if (refDoc) entry.referenceId = { _id: refDoc._id, orderNumber: refDoc.orderNumber, totalBoxes: refDoc.totalBoxes };
+    entries = await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.referenceId && entry.referenceModel) {
+          try {
+            let refDoc;
+            if (entry.referenceModel === "DispatchOrder") {
+              refDoc = await DispatchOrder.findById(entry.referenceId)
+                .select("orderNumber totalBoxes")
+                .lean();
+              if (refDoc)
+                entry.referenceId = {
+                  _id: refDoc._id,
+                  orderNumber: refDoc.orderNumber,
+                  totalBoxes: refDoc.totalBoxes,
+                };
+            }
+          } catch (err) {
+            // If model doesn't exist or populate fails, continue without reference
+            console.error("Error populating reference:", err);
           }
-        } catch (err) {
-          // If model doesn't exist or populate fails, continue without reference
-          console.error('Error populating reference:', err);
         }
-      }
-      return entry;
-    }));
+        return entry;
+      })
+    );
 
     const total = await Ledger.countDocuments(query);
 
     // Calculate total balance for all logistics companies or specific company
     let totalBalance = 0;
-    if (logisticsCompanyId && logisticsCompanyId !== 'all') {
-      totalBalance = await Ledger.getBalance('logistics', logisticsCompanyId);
+    if (logisticsCompanyId && logisticsCompanyId !== "all") {
+      totalBalance = await Ledger.getBalance("logistics", logisticsCompanyId);
     } else {
       // Get balance for all logistics companies
-      const companyIds = await Ledger.distinct('entityId', { type: 'logistics' });
+      const companyIds = await Ledger.distinct("entityId", {
+        type: "logistics",
+      });
       const balances = await Promise.all(
-        companyIds.map(id => Ledger.getBalance('logistics', id))
+        companyIds.map((id) => Ledger.getBalance("logistics", id))
       );
       totalBalance = balances.reduce((sum, balance) => sum + (balance || 0), 0);
     }
 
     // Debug logging
-    console.log('Get all logistics ledgers response:', {
+    console.log("Get all logistics ledgers response:", {
       entriesCount: entries.length,
       total,
       totalBalance,
-      logisticsCompanyId
+      logisticsCompanyId,
     });
 
     res.json({
@@ -945,20 +1130,25 @@ router.get('/logistics', auth, async (req, res) => {
       data: {
         entries,
         totalBalance,
-        logisticsCount: logisticsCompanyId && logisticsCompanyId !== 'all' ? 1 : await Ledger.distinct('entityId', { type: 'logistics' }).then(ids => ids.length)
+        logisticsCount:
+          logisticsCompanyId && logisticsCompanyId !== "all"
+            ? 1
+            : await Ledger.distinct("entityId", { type: "logistics" }).then(
+                (ids) => ids.length
+              ),
       },
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
         totalItems: total,
-        itemsPerPage: limit
-      }
+        itemsPerPage: limit,
+      },
     });
   } catch (error) {
-    console.error('Get all logistics ledgers error:', error);
+    console.error("Get all logistics ledgers error:", error);
     res.status(500).json({
       success: false,
-      message: 'Failed to fetch logistics ledgers'
+      message: "Failed to fetch logistics ledgers",
     });
   }
 });
