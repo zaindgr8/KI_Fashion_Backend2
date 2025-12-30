@@ -185,14 +185,59 @@ router.get("/supplier/:id", auth, async (req, res) => {
       return sum + (p.paymentDetails?.outstandingBalance || 0);
     }, 0);
 
-    // Calculate remaining balance from dispatch orders' paymentDetails (stored by CRM)
-    // Use the stored remainingBalance value, not recalculate
-    // This ensures exact match with CRM's display
-    let totalRemainingBalance = confirmedOrders.reduce((sum, order) => {
-      const remaining = order.paymentDetails?.remainingBalance || 0;
-      // Only add positive remaining balance (admin owes supplier)
-      return sum + Math.max(0, remaining);
-    }, 0);
+    // Calculate remaining balance dynamically (same as CRM calculation)
+    // For each order: remaining = totalAmountOwed - totalPaid
+    // Only positive values (admin owes supplier)
+    let totalRemainingBalance = 0;
+
+    for (const order of confirmedOrders) {
+      // Calculate supplier payment based on CURRENT confirmed quantities (after returns)
+      let currentOrderValue = 0;
+      let originalOrderValue = 0;
+
+      if (order.items && order.items.length > 0) {
+        order.items.forEach((item, index) => {
+          const costPrice = item.costPrice || 0;
+          const originalQty = item.quantity || 0;
+          originalOrderValue += costPrice * originalQty;
+
+          const confirmedQtyObj = order.confirmedQuantities?.find(
+            (cq) => cq.itemIndex === index
+          );
+          const confirmedQty = confirmedQtyObj?.quantity ?? item.quantity;
+          currentOrderValue += costPrice * confirmedQty;
+        });
+      } else {
+        currentOrderValue = order.supplierPaymentTotal || 0;
+        originalOrderValue = currentOrderValue;
+      }
+
+      // Calculate proportional discount if items were returned
+      let discount = 0;
+      const originalDiscount = order.totalDiscount || 0;
+
+      if (originalOrderValue > 0 && currentOrderValue !== originalOrderValue) {
+        const discountPercentage = originalDiscount / originalOrderValue;
+        discount = currentOrderValue * discountPercentage;
+      } else {
+        discount = originalDiscount;
+      }
+
+      const totalAmountOwed = Math.max(0, currentOrderValue - discount);
+
+      // Get total paid from ledger entries (most accurate, includes all payments)
+      const totalPaid = await calculateDispatchOrderPayments(
+        order._id,
+        req.params.id
+      );
+
+      // Calculate remaining: positive = admin owes supplier
+      const remaining = totalAmountOwed - totalPaid;
+
+      if (remaining > 0) {
+        totalRemainingBalance += remaining;
+      }
+    }
 
     res.json({
       success: true,
