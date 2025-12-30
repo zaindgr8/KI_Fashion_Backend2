@@ -169,8 +169,7 @@ router.get("/supplier/:id", auth, async (req, res) => {
 
     // Calculate totals from dispatch orders (same calculation as CRM)
     // Must calculate based on CURRENT confirmed quantities (after returns)
-    // IMPORTANT: Outstanding Balance takes priority - if supplier owes admin,
-    // remaining balance is 0 until outstanding is cleared
+    // IMPORTANT: Use outstandingBalance from ledger entries (stored by CRM) for accuracy
     const confirmedOrders = await DispatchOrder.find({
       supplier: req.params.id,
       status: "confirmed",
@@ -181,7 +180,12 @@ router.get("/supplier/:id", auth, async (req, res) => {
       .lean();
 
     let totalRemainingBalance = 0;
-    let totalOutstandingBalance = 0;
+
+    // Calculate outstanding balance from ledger entries (stored by CRM when payments are made)
+    // This ensures consistency with CRM's calculation
+    let totalOutstandingBalance = allPayments.reduce((sum, p) => {
+      return sum + (p.paymentDetails?.outstandingBalance || 0);
+    }, 0);
 
     for (const order of confirmedOrders) {
       // Calculate supplier payment based on CURRENT confirmed quantities (after returns)
@@ -232,34 +236,19 @@ router.get("/supplier/:id", auth, async (req, res) => {
         (order.paymentDetails?.cashPayment || 0) +
         (order.paymentDetails?.bankPayment || 0);
 
-      // Calculate the difference: positive = admin owes, negative = supplier owes
+      // Calculate remaining balance: positive = admin owes supplier
       const difference = totalAmountOwed - totalPaid;
 
       if (difference > 0) {
         // Admin still owes supplier for this order
         totalRemainingBalance += difference;
-      } else if (difference < 0) {
-        // Supplier owes admin (overpayment OR returns after payment)
-        totalOutstandingBalance += Math.abs(difference);
       }
+      // Note: Outstanding balance is now calculated from ledger entries above
     }
 
-    // CRITICAL: Net Admin's Remaining Balance against Supplier's Outstanding Balance
-    // Admin's Remaining Balance (what admin owes supplier) should offset
-    // Supplier's Outstanding Balance (what supplier owes admin)
-    // Example: Outstanding = $5, Remaining = $4 → Net Outstanding = $1, Remaining = $0
-    if (totalOutstandingBalance > 0 && totalRemainingBalance > 0) {
-      if (totalOutstandingBalance >= totalRemainingBalance) {
-        // Outstanding is greater or equal - reduce outstanding by remaining
-        totalOutstandingBalance =
-          totalOutstandingBalance - totalRemainingBalance;
-        totalRemainingBalance = 0;
-      } else {
-        // Remaining is greater - reduce remaining by outstanding
-        totalRemainingBalance = totalRemainingBalance - totalOutstandingBalance;
-        totalOutstandingBalance = 0;
-      }
-    }
+    // Note: Outstanding Balance is calculated from ledger entries (stored by CRM)
+    // Remaining Balance is calculated from dispatch orders
+    // Both are shown separately to match CRM's display
 
     res.json({
       success: true,
