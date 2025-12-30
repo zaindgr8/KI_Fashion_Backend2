@@ -174,7 +174,7 @@ router.get("/supplier/:id", auth, async (req, res) => {
       status: "confirmed",
     })
       .select(
-        "items confirmedQuantities returnedItems paymentDetails totalDiscount supplierPaymentTotal exchangeRate"
+        "items confirmedQuantities returnedItems paymentDetails totalDiscount supplierPaymentTotal"
       )
       .lean();
 
@@ -182,12 +182,9 @@ router.get("/supplier/:id", auth, async (req, res) => {
     let totalOutstandingBalance = 0;
 
     for (const order of confirmedOrders) {
-      const exchangeRate = order.exchangeRate || 1;
-
       // Calculate supplier payment based on CURRENT confirmed quantities (after returns)
       // This matches CRM calculation: sum(costPrice × confirmedQty)
-      // Cost prices are in supplier currency
-      let supplierPaymentAmount = 0;
+      let currentOrderValue = 0;
 
       if (order.items && order.items.length > 0) {
         order.items.forEach((item, index) => {
@@ -197,36 +194,33 @@ router.get("/supplier/:id", auth, async (req, res) => {
             (cq) => cq.itemIndex === index
           );
           const confirmedQty = confirmedQtyObj?.quantity ?? item.quantity;
-          supplierPaymentAmount += costPrice * confirmedQty;
+          currentOrderValue += costPrice * confirmedQty;
         });
       } else {
         // Fallback to stored supplierPaymentTotal if no items
-        supplierPaymentAmount = order.supplierPaymentTotal || 0;
+        currentOrderValue = order.supplierPaymentTotal || 0;
       }
 
-      // Apply discount (discount is in supplier currency)
+      // Apply discount
       const discount = order.totalDiscount || 0;
-      const totalAmountSupplierCurrency = Math.max(
-        0,
-        supplierPaymentAmount - discount
-      );
+      const totalAmountOwed = Math.max(0, currentOrderValue - discount);
 
-      // Get total paid from paymentDetails (stored in EUR)
-      const totalPaidEur =
+      // Get total paid from paymentDetails
+      // Example: Cash 12.50 + Bank 20.00 = 32.50 total paid
+      const totalPaid =
         (order.paymentDetails?.cashPayment || 0) +
         (order.paymentDetails?.bankPayment || 0);
 
-      // Convert EUR payments to supplier currency for comparison
-      // Exchange rate: 1 EUR = X supplier currency (e.g., 0.74 means 1 EUR = 0.74 GBP)
-      const totalPaidSupplierCurrency = totalPaidEur * exchangeRate;
-
-      const remaining = totalAmountSupplierCurrency - totalPaidSupplierCurrency;
+      // Calculate: Outstanding = Total Paid - Current Order Value (after returns)
+      // Example before returns: 32.50 - 22.50 = 10.00 outstanding
+      // Example after 1 item ($5) returned: 32.50 - 17.50 = 15.00 outstanding
+      const remaining = totalAmountOwed - totalPaid;
 
       if (remaining > 0) {
-        // Admin still owes supplier for this order (in supplier currency)
+        // Admin still owes supplier for this order
         totalRemainingBalance += remaining;
       } else if (remaining < 0) {
-        // Supplier owes admin (overpayment or returns after payment)
+        // Supplier owes admin (overpayment OR returns after payment increased the debt)
         totalOutstandingBalance += Math.abs(remaining);
       }
     }
