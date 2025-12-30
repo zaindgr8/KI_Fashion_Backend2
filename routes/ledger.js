@@ -179,76 +179,20 @@ router.get("/supplier/:id", auth, async (req, res) => {
       )
       .lean();
 
-    let totalRemainingBalance = 0;
-
     // Calculate outstanding balance from ledger entries (stored by CRM when payments are made)
     // This ensures consistency with CRM's calculation
     let totalOutstandingBalance = allPayments.reduce((sum, p) => {
       return sum + (p.paymentDetails?.outstandingBalance || 0);
     }, 0);
 
-    for (const order of confirmedOrders) {
-      // Calculate supplier payment based on CURRENT confirmed quantities (after returns)
-      // This matches CRM calculation: sum(costPrice × confirmedQty)
-      let currentOrderValue = 0;
-      let originalOrderValue = 0;
-
-      if (order.items && order.items.length > 0) {
-        order.items.forEach((item, index) => {
-          const costPrice = item.costPrice || 0;
-
-          // Original quantity (before returns)
-          const originalQty = item.quantity || 0;
-          originalOrderValue += costPrice * originalQty;
-
-          // Get confirmed quantity (which is updated after returns)
-          const confirmedQtyObj = order.confirmedQuantities?.find(
-            (cq) => cq.itemIndex === index
-          );
-          const confirmedQty = confirmedQtyObj?.quantity ?? item.quantity;
-          currentOrderValue += costPrice * confirmedQty;
-        });
-      } else {
-        // Fallback to stored supplierPaymentTotal if no items
-        currentOrderValue = order.supplierPaymentTotal || 0;
-        originalOrderValue = currentOrderValue;
-      }
-
-      // Calculate proportional discount if items were returned
-      // Example: Original 2 items × $2 = $4, discount $2 (50%)
-      // After return: 1 item × $2 = $2, discount should be $1 (50% of $2)
-      let discount = 0;
-      const originalDiscount = order.totalDiscount || 0;
-
-      if (originalOrderValue > 0 && currentOrderValue !== originalOrderValue) {
-        // Items were returned - calculate proportional discount
-        const discountPercentage = originalDiscount / originalOrderValue;
-        discount = currentOrderValue * discountPercentage;
-      } else {
-        // No returns or same value - use original discount
-        discount = originalDiscount;
-      }
-
-      const totalAmountOwed = Math.max(0, currentOrderValue - discount);
-
-      // Get total paid from paymentDetails
-      const totalPaid =
-        (order.paymentDetails?.cashPayment || 0) +
-        (order.paymentDetails?.bankPayment || 0);
-
-      // Calculate remaining balance: positive = admin owes supplier
-      const difference = totalAmountOwed - totalPaid;
-
-      if (difference > 0) {
-        // Admin still owes supplier for this order
-        totalRemainingBalance += difference;
-      }
-      // Note: Outstanding balance is now calculated from ledger entries above
-    }
-
-    // Note: Outstanding Balance is calculated from ledger entries (stored by CRM)
-    // Remaining Balance is calculated from dispatch orders
-    // Both are shown separately to match CRM's display
+    // Calculate remaining balance from dispatch orders' paymentDetails (stored by CRM)
+    // Use the stored remainingBalance value, not recalculate
+    // This ensures exact match with CRM's display
+    let totalRemainingBalance = confirmedOrders.reduce((sum, order) => {
+      const remaining = order.paymentDetails?.remainingBalance || 0;
+      // Only add positive remaining balance (admin owes supplier)
+      return sum + Math.max(0, remaining);
+    }, 0);
 
     res.json({
       success: true,
