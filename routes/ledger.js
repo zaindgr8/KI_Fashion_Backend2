@@ -179,16 +179,12 @@ router.get("/supplier/:id", auth, async (req, res) => {
       )
       .lean();
 
-    // Calculate outstanding balance from ledger entries (stored by CRM when payments are made)
-    // This ensures consistency with CRM's calculation
-    let totalOutstandingBalance = allPayments.reduce((sum, p) => {
-      return sum + (p.paymentDetails?.outstandingBalance || 0);
-    }, 0);
-
-    // Calculate remaining balance dynamically (same as CRM calculation)
-    // For each order: remaining = totalAmountOwed - totalPaid
-    // Only positive values (admin owes supplier)
+    // Calculate remaining and outstanding balance dynamically (same as CRM calculation)
+    // For each order:
+    // - remaining = totalAmountOwed - totalPaid (if positive, admin owes supplier)
+    // - outstanding = totalPaid - totalAmountOwed (if positive, supplier owes admin)
     let totalRemainingBalance = 0;
+    let totalOutstandingBalance = 0;
 
     for (const order of confirmedOrders) {
       // Calculate supplier payment based on CURRENT confirmed quantities (after returns)
@@ -236,6 +232,9 @@ router.get("/supplier/:id", auth, async (req, res) => {
 
       if (remaining > 0) {
         totalRemainingBalance += remaining;
+      } else if (remaining < 0) {
+        // Negative remaining means overpayment = outstanding balance
+        totalOutstandingBalance += Math.abs(remaining);
       }
     }
 
