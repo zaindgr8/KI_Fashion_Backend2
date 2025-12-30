@@ -244,11 +244,22 @@ router.get("/supplier/:id", auth, async (req, res) => {
       }
     }
 
-    // CRITICAL: Outstanding Balance takes priority
-    // If supplier owes admin ANY amount, remaining balance must be 0
-    // Only when outstanding is cleared (0) should remaining balance be shown
-    if (totalOutstandingBalance > 0) {
-      totalRemainingBalance = 0;
+    // CRITICAL: Net Remaining Balance against Outstanding Balance
+    // If admin owes supplier (remaining) and supplier owes admin (outstanding),
+    // they should offset each other
+    // Example: Outstanding = $5, Remaining = $4 → Net Outstanding = $1, Remaining = $0
+    if (totalOutstandingBalance > 0 && totalRemainingBalance > 0) {
+      // Net them: Outstanding takes priority, but remaining reduces it
+      if (totalOutstandingBalance >= totalRemainingBalance) {
+        // Outstanding is greater or equal - reduce outstanding by remaining
+        totalOutstandingBalance =
+          totalOutstandingBalance - totalRemainingBalance;
+        totalRemainingBalance = 0;
+      } else {
+        // Remaining is greater - reduce remaining by outstanding
+        totalRemainingBalance = totalRemainingBalance - totalOutstandingBalance;
+        totalOutstandingBalance = 0;
+      }
     }
 
     res.json({
