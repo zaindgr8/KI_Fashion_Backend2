@@ -44,7 +44,6 @@ const productionOrigins = [
   "https://www.ki-fashion-supplier-portal.vercel.app",
   "https://ki-fashion-admin-panel.vercel.app",
   "https://www.ki-fashion-admin-panel.vercel.app",
-  
 ];
 
 // Development/localhost origins (always allowed for local testing)
@@ -60,9 +59,16 @@ const localhostOrigins = [
 // Combine all allowed origins
 const defaultOrigins = [...productionOrigins, ...localhostOrigins];
 
+// Always include localhost origins for development, even if ALLOWED_ORIGINS is set
 const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim())
+  ? [
+      ...process.env.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()),
+      ...localhostOrigins,
+    ]
   : defaultOrigins;
+
+// Remove duplicates
+const uniqueOrigins = [...new Set(allowedOrigins)];
 
 app.use(
   cors({
@@ -74,14 +80,14 @@ app.use(
       }
 
       // Check if origin is in allowed list
-      if (allowedOrigins.indexOf(origin) !== -1) {
+      if (uniqueOrigins.indexOf(origin) !== -1) {
+        console.log("CORS allowed origin:", origin);
         return callback(null, true);
       } else {
         console.error("CORS blocked origin:", origin);
-        console.error("Allowed origins:", allowedOrigins);
-        // Still allow the request but log the error
-        // In production, you might want to reject this
-        return callback(null, false);
+        console.error("Allowed origins:", uniqueOrigins);
+        // Reject the request
+        return callback(new Error("Not allowed by CORS"), false);
       }
     },
     credentials: true,
@@ -181,8 +187,8 @@ const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
-  console.log(`CORS enabled for ${allowedOrigins.length} origins`);
-  console.log("Allowed origins:", allowedOrigins);
+  console.log(`CORS enabled for ${uniqueOrigins.length} origins`);
+  console.log("Allowed origins:", uniqueOrigins);
 });
 
 module.exports = app;
