@@ -1643,7 +1643,13 @@ router.post('/:id/confirm', auth, async (req, res) => {
     const currentSupplierBalance = await Ledger.getBalance('supplier', dispatchOrder.supplier._id);
     let creditApplied = 0;
 
+    console.log(`[Confirm Order] Checking supplier balance for credit application:`);
+    console.log(`  - Supplier ID: ${dispatchOrder.supplier._id}`);
+    console.log(`  - Current ledger balance: ${currentSupplierBalance}`);
+    console.log(`  - Order remaining balance (before credit): ${dispatchOrder.paymentDetails.remainingBalance}`);
+
     // If balance is negative, supplier owes admin - we can apply credit
+    // Negative balance in ledger = credits > debits = admin paid more than owed = supplier owes admin
     if (currentSupplierBalance < 0) {
       const availableCredit = Math.abs(currentSupplierBalance);
       const amountNeeded = dispatchOrder.paymentDetails.remainingBalance;
@@ -1652,7 +1658,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
       creditApplied = Math.min(availableCredit, amountNeeded);
 
       if (creditApplied > 0) {
-        console.log(`[Confirm Order] Supplier has €${availableCredit.toFixed(2)} credit (owes admin). Applying €${creditApplied.toFixed(2)} to this order.`);
+        console.log(`[Confirm Order] APPLYING CREDIT:`);
+        console.log(`  - Supplier has €${availableCredit.toFixed(2)} credit (owes admin)`);
+        console.log(`  - Amount needed: €${amountNeeded.toFixed(2)}`);
+        console.log(`  - Credit to apply: €${creditApplied.toFixed(2)}`);
+        console.log(`  - New remaining balance: €${(amountNeeded - creditApplied).toFixed(2)}`);
 
         // Update payment details with credit applied
         dispatchOrder.paymentDetails.creditApplied = creditApplied;
@@ -1668,6 +1678,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
           dispatchOrder.paymentDetails.paymentStatus = 'pending';
         }
       }
+    } else {
+      console.log(`[Confirm Order] No credit to apply (balance >= 0 means admin owes supplier or neutral)`);
     }
 
     // Update prices on items
@@ -1677,7 +1689,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
     });
 
     await dispatchOrder.save();
-    console.log(`[Confirm Order] Order status updated to confirmed`);
+    console.log(`[Confirm Order] Order saved with final remainingBalance: €${dispatchOrder.paymentDetails.remainingBalance.toFixed(2)}`);
+
 
     // ==========================================
     // STEP 3: Create ledger entries
