@@ -169,6 +169,8 @@ router.get("/supplier/:id", auth, async (req, res) => {
 
     // Calculate totals from dispatch orders (same calculation as CRM)
     // Must calculate based on CURRENT confirmed quantities (after returns)
+    // IMPORTANT: Outstanding Balance takes priority - if supplier owes admin,
+    // remaining balance is 0 until outstanding is cleared
     const confirmedOrders = await DispatchOrder.find({
       supplier: req.params.id,
       status: "confirmed",
@@ -206,23 +208,27 @@ router.get("/supplier/:id", auth, async (req, res) => {
       const totalAmountOwed = Math.max(0, currentOrderValue - discount);
 
       // Get total paid from paymentDetails
-      // Example: Cash 12.50 + Bank 20.00 = 32.50 total paid
       const totalPaid =
         (order.paymentDetails?.cashPayment || 0) +
         (order.paymentDetails?.bankPayment || 0);
 
-      // Calculate: Outstanding = Total Paid - Current Order Value (after returns)
-      // Example before returns: 32.50 - 22.50 = 10.00 outstanding
-      // Example after 1 item ($5) returned: 32.50 - 17.50 = 15.00 outstanding
-      const remaining = totalAmountOwed - totalPaid;
+      // Calculate the difference: positive = admin owes, negative = supplier owes
+      const difference = totalAmountOwed - totalPaid;
 
-      if (remaining > 0) {
+      if (difference > 0) {
         // Admin still owes supplier for this order
-        totalRemainingBalance += remaining;
-      } else if (remaining < 0) {
-        // Supplier owes admin (overpayment OR returns after payment increased the debt)
-        totalOutstandingBalance += Math.abs(remaining);
+        totalRemainingBalance += difference;
+      } else if (difference < 0) {
+        // Supplier owes admin (overpayment OR returns after payment)
+        totalOutstandingBalance += Math.abs(difference);
       }
+    }
+
+    // CRITICAL: Outstanding Balance takes priority
+    // If supplier owes admin ANY amount, remaining balance must be 0
+    // Only when outstanding is cleared (0) should remaining balance be shown
+    if (totalOutstandingBalance > 0) {
+      totalRemainingBalance = 0;
     }
 
     res.json({
