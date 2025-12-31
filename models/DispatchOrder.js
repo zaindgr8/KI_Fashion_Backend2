@@ -35,10 +35,7 @@ const dispatchItemSchema = new mongoose.Schema({
   // Product details (for supplier portal entries)
   productName: { type: String },
   productCode: { type: String },
-  productType: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'ProductType'
-  },
+  season: [{ type: String, enum: ['winter', 'summer', 'spring', 'autumn', 'all_season'] }],
   costPrice: { type: Number, min: 0 },
   primaryColor: [{ type: String }],
   size: [{ type: String }],

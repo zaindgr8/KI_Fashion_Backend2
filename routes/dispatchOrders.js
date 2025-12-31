@@ -8,7 +8,6 @@ const Return = require('../models/Return');
 const Ledger = require('../models/Ledger');
 const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
-const ProductType = require('../models/ProductType');
 const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 const { generateDispatchOrderQR, buildDispatchOrderQrPayload } = require('../utils/qrCode');
@@ -211,7 +210,7 @@ const packetSchema = Joi.object({
 const dispatchItemSchema = Joi.object({
   productName: Joi.string().min(1).required(),
   productCode: Joi.string().min(1).required(),
-  productType: Joi.string().required(),
+  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season')).min(1).required(),
   costPrice: Joi.number().min(0).required(),
   primaryColor: Joi.array().items(Joi.string()).optional(),
   size: Joi.array().items(Joi.string()).optional(),
@@ -267,7 +266,7 @@ const manualEntryItemSchema = Joi.object({
   product: Joi.string().optional(), // Product reference
   productName: Joi.string().optional(), // For new products
   productCode: Joi.string().optional(), // For new products
-  productType: Joi.string().optional(), // For new products
+  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season')).min(1).optional(), // For new products
   costPrice: Joi.number().min(0).optional(), // For new products
   primaryColor: Joi.alternatives().try(
     Joi.string().allow(null, ''),
@@ -472,7 +471,6 @@ router.post('/', auth, async (req, res) => {
       { path: 'supplier', select: 'name company' },
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' },
       { path: 'qrCode.generatedBy', select: 'name' }
     ]);
 
@@ -515,7 +513,7 @@ router.post('/manual', auth, async (req, res) => {
     const itemsWithDetails = [];
     for (const item of value.items) {
       let product = null;
-      let productType = null;
+      let season = null;
 
       // If product reference provided, use it
       if (item.product) {
@@ -523,7 +521,7 @@ router.post('/manual', auth, async (req, res) => {
         if (!product) {
           return sendResponse.error(res, `Product not found: ${item.product}`, 400);
         }
-        productType = product.productType;
+        season = product.season;
       } else if (item.productCode) {
         // Try to find existing product by code
         product = await Product.findOne({
@@ -534,12 +532,12 @@ router.post('/manual', auth, async (req, res) => {
         });
 
         if (product) {
-          productType = product.productType;
-        } else if (item.productType) {
-          // New product - use provided productType
-          productType = item.productType;
+          season = product.season;
+        } else if (item.season && Array.isArray(item.season) && item.season.length > 0) {
+          // New product - use provided season
+          season = item.season;
         } else {
-          return sendResponse.error(res, `Product type required for new product: ${item.productCode}`, 400);
+          return sendResponse.error(res, `Season required for new product: ${item.productCode}`, 400);
         }
       } else {
         return sendResponse.error(res, 'Either product reference or productCode is required', 400);
@@ -563,7 +561,7 @@ router.post('/manual', auth, async (req, res) => {
         product: product ? product._id : undefined,
         productName: item.productName || (product ? product.name : undefined),
         productCode: item.productCode || (product ? (product.productCode || product.sku) : undefined),
-        productType: productType,
+        season: season,
         costPrice: costPrice,
         primaryColor: item.primaryColor || (product ? product.color : undefined),
         material: item.material || (product ? product.specifications?.material : undefined),
@@ -779,9 +777,8 @@ router.post('/manual', auth, async (req, res) => {
       for (const item of dispatchOrder.items) {
         if (!item.product) {
           // Create product if it doesn't exist
-          const productType = await ProductType.findById(item.productType);
-          if (!productType) {
-            console.warn(`ProductType not found for item: ${item.productCode}`);
+          if (!item.season || !Array.isArray(item.season) || item.season.length === 0) {
+            console.warn(`Season required for item: ${item.productCode}`);
             continue;
           }
 
@@ -794,8 +791,8 @@ router.post('/manual', auth, async (req, res) => {
             name: item.productName || 'Unknown Product',
             sku: item.productCode?.toUpperCase() || 'UNKNOWN',
             productCode: item.productCode,
-            productType: item.productType,
-            category: productType.category || 'General',
+            season: item.season,
+            category: 'General', // Default category since we no longer use ProductType
             unit: 'piece',
             pricing: {
               costPrice: item.costPrice || (item.landedTotal / item.quantity),
@@ -933,7 +930,6 @@ router.post('/manual', auth, async (req, res) => {
     await dispatchOrder.populate([
       { path: 'supplier', select: 'name company phone email address' },
       { path: 'items.product', select: 'name sku unit images color size productCode pricing' },
-      { path: 'items.productType', select: 'name category' },
       { path: 'createdBy', select: 'name email' },
       { path: 'confirmedBy', select: 'name' }
     ]);
@@ -983,7 +979,6 @@ router.get('/', auth, async (req, res) => {
       .populate('createdBy', 'name')
       .populate('confirmedBy', 'name')
       .populate('items.product', 'name sku unit images color size productCode pricing')
-      .populate('items.productType', 'name category')
       .populate('returnedItems.returnedBy', 'name')
       .populate('qrCode.generatedBy', 'name')
       .sort({ createdAt: -1 })
@@ -1076,7 +1071,6 @@ router.get('/:id', auth, async (req, res) => {
       .populate('createdBy', 'name')
       .populate('confirmedBy', 'name')
       .populate('items.product', 'name sku unit images color size productCode pricing')
-      .populate('items.productType', 'name category')
       .populate('returnedItems.returnedBy', 'name')
       .populate('qrCode.generatedBy', 'name')
       .lean();
@@ -1274,8 +1268,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // Track results for each item
     const inventoryResults = [];
 
-    // Populate productType for items
-    await dispatchOrder.populate('items.productType');
+    // Season is now an array field, no need to populate
 
     for (let index = 0; index < dispatchOrder.items.length; index++) {
       try {
@@ -1310,11 +1303,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
           continue;
         }
 
-        // Extract productType ID (handle both object and ID)
-        const productTypeId = item.productType?._id || item.productType;
+        // Extract season (handle both array and single value for backward compatibility)
+        const season = Array.isArray(item.season) ? item.season : (item.season ? [item.season] : []);
 
-        if (!productTypeId) {
-          const error = 'Missing productType';
+        if (!season || season.length === 0) {
+          const error = 'Missing season';
           console.error(`[Confirm Order] Item ${index} ${error}`);
           inventoryResults.push({
             index,
@@ -1341,22 +1334,6 @@ router.post('/:id/confirm', auth, async (req, res) => {
         });
 
         if (!product) {
-          // Get ProductType for category
-          const productType = await ProductType.findById(productTypeId);
-
-          if (!productType) {
-            const error = `ProductType ${productTypeId} not found`;
-            console.error(`[Confirm Order] Item ${index} ${error}`);
-            inventoryResults.push({
-              index,
-              success: false,
-              error,
-              productCode: item.productCode,
-              productName: item.productName
-            });
-            continue;
-          }
-
           // Create new Product
           // Handle primaryColor: can be array or string
           const colorForProduct = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
@@ -1367,8 +1344,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
             name: item.productName,
             sku: item.productCode.toUpperCase(),
             productCode: item.productCode,
-            productType: productTypeId,  // Use extracted ID
-            category: productType?.category || 'General',
+            season: season,
+            category: 'General', // Default category since we no longer use ProductType
             unit: 'piece',
             pricing: {
               costPrice: landedPrice,
@@ -1570,7 +1547,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
           item: {
             productCode: item.productCode,
             productName: item.productName,
-            productType: item.productType,
+            season: item.season,
             quantity: item.quantity
           }
         });
@@ -1838,8 +1815,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
       { path: 'supplier', select: 'name company' },
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
-      { path: 'confirmedBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' }
+      { path: 'confirmedBy', select: 'name' }
     ]);
 
     // Convert images to signed URLs
@@ -2126,8 +2102,7 @@ router.get('/qr/:qrData', async (req, res) => {
     const dispatchOrder = await DispatchOrder.findById(payload.dispatchOrderId)
       .populate('supplier', 'name company')
       .populate('logisticsCompany', 'name code')
-      .populate('items.productType', 'name category')
-      .populate('items.product', 'name sku code pricing productType category brand');
+      .populate('items.product', 'name sku code pricing season category brand');
 
     if (!dispatchOrder) {
       return sendResponse.error(res, 'Dispatch order not found', 404);
@@ -2382,7 +2357,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       // Track results for each item
       const inventoryResults = [];
 
-      await dispatchOrder.populate('items.productType');
+      // Season is now an array field, no need to populate
 
       for (let index = 0; index < dispatchOrder.items.length; index++) {
         try {
@@ -2415,12 +2390,15 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
             continue;
           }
 
-          if (!item.productType) {
-            console.error(`[Inventory Update - QR] Item ${index} missing productType, skipping`);
+          // Extract season (handle both array and single value for backward compatibility)
+          const season = Array.isArray(item.season) ? item.season : (item.season ? [item.season] : []);
+
+          if (!season || season.length === 0) {
+            console.error(`[Inventory Update - QR] Item ${index} missing season, skipping`);
             inventoryResults.push({
               index,
               success: false,
-              error: 'Missing productType',
+              error: 'Missing season',
               productCode: item.productCode
             });
             continue;
@@ -2436,8 +2414,6 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
           });
 
           if (!product) {
-            const productType = await ProductType.findById(item.productType);
-
             // Handle primaryColor: can be array or string
             const colorForProduct = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
               ? item.primaryColor[0]  // Use first color as main color
@@ -2447,8 +2423,8 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
               name: item.productName,
               sku: item.productCode.toUpperCase(),
               productCode: item.productCode,
-              productType: item.productType,
-              category: productType?.category || 'General',
+              season: season,
+              category: 'General', // Default category since we no longer use ProductType
               unit: 'piece',
               pricing: {
                 costPrice: landedPrice,
@@ -2606,7 +2582,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
             item: {
               productCode: item.productCode,
               productName: item.productName,
-              productType: item.productType,
+              season: item.season,
               quantity: item.quantity
             }
           });
@@ -2665,8 +2641,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       { path: 'supplier', select: 'name company' },
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
-      { path: 'confirmedBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' }
+      { path: 'confirmedBy', select: 'name' }
     ]);
 
     // Convert images to signed URLs
@@ -2733,7 +2708,7 @@ router.put('/:id', auth, async (req, res) => {
         const processedItem = {
           productName: item.productName,
           productCode: item.productCode,
-          productType: item.productType,
+          season: item.season || [],
           costPrice: item.costPrice || 0,
           quantity: item.quantity,
           boxes: item.boxes || [],
