@@ -489,7 +489,7 @@ router.post('/', auth, async (req, res) => {
 router.post('/manual', auth, async (req, res) => {
   try {
     // Only admin/manager can create manual entries
-    if (!['admin', 'manager'].includes(req.user.role)) {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can create manual entries', 403);
     }
 
@@ -1137,12 +1137,181 @@ router.patch('/:id/status', auth, async (req, res) => {
   }
 });
 
-// Confirm dispatch order (Admin only)
+// Submit dispatch order for approval (Admin only)
+router.post('/:id/submit-approval', auth, async (req, res) => {
+  try {
+    // Only admin can submit for approval
+    if (req.user.role !== 'admin') {
+      return sendResponse.error(res, 'Only admin users can submit orders for approval', 403);
+    }
+
+    const { cashPayment = 0, bankPayment = 0, exchangeRate, percentage, discount = 0, items, totalBoxes } = req.body;
+
+    const dispatchOrder = await DispatchOrder.findById(req.params.id)
+      .populate('supplier')
+      .populate('logisticsCompany', 'name rates');
+
+    if (!dispatchOrder) {
+      return sendResponse.error(res, 'Dispatch order not found', 404);
+    }
+
+    if (dispatchOrder.status !== 'pending') {
+      return sendResponse.error(res, 'Only pending dispatch orders can be submitted for approval', 400);
+    }
+
+    // Validate and set exchange rate and percentage from admin input
+    const finalExchangeRate = exchangeRate !== undefined && exchangeRate !== null
+      ? parseFloat(exchangeRate)
+      : dispatchOrder.exchangeRate || 1.0;
+    const finalPercentage = percentage !== undefined && percentage !== null
+      ? parseFloat(percentage)
+      : dispatchOrder.percentage || 0;
+
+    if (isNaN(finalExchangeRate) || finalExchangeRate <= 0) {
+      return sendResponse.error(res, 'Invalid exchange rate. Must be a positive number.', 400);
+    }
+
+    if (isNaN(finalPercentage) || finalPercentage < 0) {
+      return sendResponse.error(res, 'Invalid percentage. Must be a non-negative number.', 400);
+    }
+
+    // Update dispatch order with admin-provided exchange rate and percentage
+    dispatchOrder.exchangeRate = finalExchangeRate;
+    dispatchOrder.percentage = finalPercentage;
+
+    // Update total boxes if provided
+    if (totalBoxes !== undefined && totalBoxes !== null) {
+      dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
+    }
+
+    // Verify req.body.items exists and matching length if provided
+    const requestItems = (Array.isArray(items) && items.length === dispatchOrder.items.length)
+      ? items
+      : null;
+
+    // Update dispatchOrder items with edits from request (if any)
+    if (requestItems) {
+      dispatchOrder.items.forEach((item, index) => {
+        const reqItem = requestItems[index];
+        if (reqItem) {
+          if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
+          if (reqItem.productName) item.productName = reqItem.productName;
+          if (reqItem.productCode) item.productCode = reqItem.productCode.trim();
+          if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
+          if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
+          if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
+          if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
+          if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
+          if (reqItem.packets) item.packets = reqItem.packets;
+          if (reqItem.boxes) item.boxes = reqItem.boxes;
+        }
+      });
+    }
+
+    // Calculate confirmed quantities (same as confirm endpoint)
+    const confirmedQuantities = dispatchOrder.items.map((item, index) => {
+      const returnedItems = dispatchOrder.returnedItems || [];
+      const totalReturned = returnedItems
+        .filter(returned => returned.itemIndex === index)
+        .reduce((sum, returned) => sum + returned.quantity, 0);
+
+      const confirmedQty = Math.max(0, (item.quantity || 0) - totalReturned);
+
+      return {
+        itemIndex: index,
+        quantity: confirmedQty
+      };
+    });
+
+    // Calculate supplier payment amount and landed price for each item
+    let supplierPaymentTotal = 0;
+    let landedPriceTotal = 0;
+    const itemsWithPrices = dispatchOrder.items.map((item, index) => {
+      const costPrice = item.costPrice || 0;
+      const confirmedQty = confirmedQuantities[index].quantity;
+
+      const supplierPaymentAmount = costPrice;
+      const supplierPaymentItemTotal = supplierPaymentAmount * confirmedQty;
+      supplierPaymentTotal += supplierPaymentItemTotal;
+
+      const landedPrice = (costPrice / finalExchangeRate) * (1 + (finalPercentage / 100));
+      const landedPriceItemTotal = landedPrice * confirmedQty;
+      landedPriceTotal += landedPriceItemTotal;
+
+      return {
+        ...item.toObject(),
+        supplierPaymentAmount,
+        landedPrice,
+        confirmedQuantity: confirmedQty
+      };
+    });
+
+    // Get discount from order or from request
+    const totalDiscount = parseFloat(discount) !== undefined && discount !== null
+      ? parseFloat(discount)
+      : (dispatchOrder.totalDiscount || 0);
+
+    // Apply discount to supplierPaymentTotal
+    const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
+
+    const subtotal = landedPriceTotal;
+    const grandTotal = Math.max(0, subtotal - totalDiscount);
+
+    // Update dispatch order status to pending-approval (DO NOT process inventory or ledger)
+    dispatchOrder.status = 'pending-approval';
+    dispatchOrder.submittedForApprovalAt = new Date();
+    dispatchOrder.submittedForApprovalBy = req.user._id;
+    dispatchOrder.exchangeRate = finalExchangeRate;
+    dispatchOrder.percentage = finalPercentage;
+    dispatchOrder.totalDiscount = totalDiscount;
+    dispatchOrder.subtotal = subtotal;
+    dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
+    dispatchOrder.grandTotal = grandTotal;
+    dispatchOrder.paymentDetails = {
+      cashPayment: parseFloat(cashPayment) || 0,
+      bankPayment: parseFloat(bankPayment) || 0,
+      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
+      paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
+        ? 'paid'
+        : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
+          ? 'partial'
+          : 'pending'
+    };
+    dispatchOrder.confirmedQuantities = confirmedQuantities;
+
+    // Update prices on items
+    dispatchOrder.items.forEach((item, index) => {
+      item.supplierPaymentAmount = itemsWithPrices[index].supplierPaymentAmount;
+      item.landedPrice = itemsWithPrices[index].landedPrice;
+    });
+
+    await dispatchOrder.save();
+
+    // Populate for response
+    await dispatchOrder.populate([
+      { path: 'supplier', select: 'name company' },
+      { path: 'logisticsCompany', select: 'name code contactInfo rates' },
+      { path: 'createdBy', select: 'name' },
+      { path: 'submittedForApprovalBy', select: 'name' }
+    ]);
+
+    // Convert images to signed URLs
+    await convertDispatchOrderImages(dispatchOrder);
+
+    return sendResponse.success(res, dispatchOrder, 'Dispatch order submitted for approval successfully');
+
+  } catch (error) {
+    console.error('Submit approval error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
+  }
+});
+
+// Confirm dispatch order (Super-admin only)
 router.post('/:id/confirm', auth, async (req, res) => {
   try {
-    // Only admin/manager can confirm dispatch orders
-    if (!['admin', 'manager'].includes(req.user.role)) {
-      return sendResponse.error(res, 'Only admins and managers can confirm dispatch orders', 403);
+    // Only super-admin can confirm dispatch orders
+    if (req.user.role !== 'super-admin') {
+      return sendResponse.error(res, 'Only super-admin can confirm dispatch orders', 403);
     }
 
     const { cashPayment = 0, bankPayment = 0, exchangeRate, percentage, discount = 0 } = req.body;
@@ -1155,8 +1324,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    if (dispatchOrder.status !== 'pending') {
-      return sendResponse.error(res, 'Only pending dispatch orders can be confirmed', 400);
+    if (!['pending', 'pending-approval'].includes(dispatchOrder.status)) {
+      return sendResponse.error(res, 'Only pending or pending-approval dispatch orders can be confirmed', 400);
     }
 
     // Validate and set exchange rate and percentage from admin input
@@ -1833,7 +2002,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
 router.post('/:id/return', auth, async (req, res) => {
   try {
     // Only admin/manager can return items
-    if (!['admin', 'manager'].includes(req.user.role)) {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can return items', 403);
     }
 
@@ -2122,7 +2291,7 @@ router.get('/qr/:qrData', async (req, res) => {
 router.post('/qr/:qrData/confirm', auth, async (req, res) => {
   try {
     // Only admin/manager can confirm via QR scan
-    if (!['admin', 'manager'].includes(req.user.role)) {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can confirm dispatch orders', 403);
     }
 
@@ -2163,8 +2332,8 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    if (dispatchOrder.status !== 'pending') {
-      return sendResponse.error(res, 'Only pending dispatch orders can be confirmed', 400);
+    if (!['pending', 'pending-approval'].includes(dispatchOrder.status)) {
+      return sendResponse.error(res, 'Only pending or pending-approval dispatch orders can be confirmed', 400);
     }
 
     // Validate and set exchange rate and percentage from admin input
@@ -2676,7 +2845,7 @@ router.put('/:id', auth, async (req, res) => {
       if (!isOrderSupplier && !isCreator) {
         return sendResponse.error(res, 'You do not have permission to update this dispatch order', 403);
       }
-    } else if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+    } else if (req.user.role !== 'super-admin' && req.user.role !== 'admin') {
       return sendResponse.error(res, 'You do not have permission to update dispatch orders', 403);
     }
 
@@ -2782,7 +2951,7 @@ router.delete('/:id', auth, async (req, res) => {
       if (!isOrderSupplier && !isCreator) {
         return sendResponse.error(res, 'You do not have permission to delete this dispatch order', 403);
       }
-    } else if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+    } else if (req.user.role !== 'super-admin' && req.user.role !== 'admin') {
       return sendResponse.error(res, 'You do not have permission to delete dispatch orders', 403);
     }
 

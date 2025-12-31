@@ -87,12 +87,17 @@ const dispatchOrderSchema = new mongoose.Schema({
   estimatedCost: { type: Number, default: 0 }, // Estimated logistics cost
   status: {
     type: String,
-    enum: ['pending', 'confirmed', 'picked_up', 'in_transit', 'delivered', 'cancelled'],
+    enum: ['pending', 'pending-approval', 'confirmed', 'picked_up', 'in_transit', 'delivered', 'cancelled'],
     default: 'pending',
     index: true
   },
   confirmedAt: Date,
   confirmedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  submittedForApprovalAt: Date,
+  submittedForApprovalBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
