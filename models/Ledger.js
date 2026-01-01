@@ -95,11 +95,19 @@ ledgerSchema.index({
   createdAt: -1
 });
 
-ledgerSchema.statics.createEntry = async function (entryData) {
-  const lastEntry = await this.findOne({
+ledgerSchema.statics.createEntry = async function (entryData, session = null) {
+  // Use session if provided to ensure transaction consistency
+  const findOneQuery = this.findOne({
     type: entryData.type,
     entityId: entryData.entityId
   }).sort({ date: -1, createdAt: -1 });
+  
+  // Attach session to query if provided
+  if (session) {
+    findOneQuery.session(session);
+  }
+  
+  const lastEntry = await findOneQuery;
 
   const previousBalance = lastEntry ? lastEntry.balance : 0;
   const newBalance = previousBalance + (entryData.debit || 0) - (entryData.credit || 0);
@@ -109,6 +117,10 @@ ledgerSchema.statics.createEntry = async function (entryData) {
     balance: newBalance
   });
 
+  // Save with session if provided
+  if (session) {
+    return await entry.save({ session });
+  }
   return await entry.save();
 };
 

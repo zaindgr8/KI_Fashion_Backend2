@@ -659,7 +659,7 @@ router.post("/entry", auth, async (req, res) => {
 
       try {
         // Create ledger entry within transaction
-        const entry = await Ledger.createEntry(entryData);
+        const entry = await Ledger.createEntry(entryData, session);
 
         // OPTIMIZED: Use incremental calculation instead of querying all entries
         // Get current payment details from dispatch order
@@ -830,7 +830,7 @@ router.post("/entry", auth, async (req, res) => {
 
       try {
         // Create ledger entry within transaction
-        const entry = await Ledger.createEntry(entryData);
+        const entry = await Ledger.createEntry(entryData, session);
 
         // OPTIMIZED: Use incremental calculation instead of querying all entries
         // Get current payment details from dispatch order
@@ -949,7 +949,7 @@ router.post("/entry", auth, async (req, res) => {
         );
       }
 
-      const entry = await Ledger.createEntry(entryData);
+      const entry = await Ledger.createEntry(entryData, session);
 
       // Commit transaction
       await session.commitTransaction();
