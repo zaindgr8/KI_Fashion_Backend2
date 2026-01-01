@@ -1,6 +1,8 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const DispatchOrder = require('../models/DispatchOrder');
 const Ledger = require('../models/Ledger');
+const Return = require('../models/Return');
 const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 
@@ -50,9 +52,14 @@ const dispatchOrders = await DispatchOrder.find(dispatchOrderQuery)
       // Use supplierPaymentTotal (already has discount applied) if order is confirmed
       // Otherwise calculate from items
       let totalAmount = 0;
+      let originalAmountBeforeDiscount = 0;
+      let discount = order.totalDiscount || 0;
+      
       if (order.status === 'confirmed' && order.supplierPaymentTotal !== undefined) {
         // Use the supplierPaymentTotal which already has discount applied
         totalAmount = order.supplierPaymentTotal;
+        // Calculate original amount before discount by adding discount back
+        originalAmountBeforeDiscount = totalAmount + discount;
       } else {
         // For pending orders, calculate from items (discount will be applied on confirmation)
         const itemsWithDetails = order.items?.map((item, index) => {
@@ -61,10 +68,9 @@ const dispatchOrders = await DispatchOrder.find(dispatchOrderQuery)
           const supplierPaymentAmount = item.supplierPaymentAmount || item.costPrice;
           return supplierPaymentAmount * confirmedQty;
         }) || [];
-        totalAmount = itemsWithDetails.reduce((sum, amount) => sum + amount, 0);
+        originalAmountBeforeDiscount = itemsWithDetails.reduce((sum, amount) => sum + amount, 0);
         // Apply discount if set
-        const discount = order.totalDiscount || 0;
-        totalAmount = Math.max(0, totalAmount - discount);
+        totalAmount = Math.max(0, originalAmountBeforeDiscount - discount);
       }
       
       // Calculate cumulative payments from ledger entries
@@ -83,7 +89,7 @@ const dispatchOrders = await DispatchOrder.find(dispatchOrderQuery)
       const remainingBalance = totalAmount - totalPaid;
       
       // Debug logging for payment tracking
-      console.log(`[Pending Balances] Order ${order.orderNumber}: totalAmount=${totalAmount}, totalPaid=${totalPaid}, remaining=${remainingBalance}, paymentEntries=${paymentEntries.length}`);
+      console.log(`[Pending Balances] Order ${order.orderNumber}: totalAmount=${totalAmount}, discount=${discount}, cashPaid=${cashPaid}, bankPaid=${bankPaid}, returnAmount=${returnAmount}, totalPaid=${totalPaid}, remaining=${remainingBalance}, paymentEntries=${paymentEntries.length}`);
       
       // Include ALL entries regardless of payment status (paid, partial, or pending)
       const paymentDetails = order.paymentDetails || {};
@@ -94,6 +100,16 @@ const dispatchOrders = await DispatchOrder.find(dispatchOrderQuery)
       }, 0);
       const bankPaid = paymentEntries.reduce((sum, entry) => {
         return sum + (entry.paymentMethod === 'bank' ? (entry.credit || 0) : 0);
+      }, 0);
+      
+      // Calculate return amount - find returns linked to this dispatch order
+      const returnDocs = await Return.find({
+        dispatchOrder: order._id,
+        supplier: order.supplier._id
+      });
+      
+      const returnAmount = returnDocs.reduce((sum, returnDoc) => {
+        return sum + (returnDoc.totalReturnValue || 0);
       }, 0);
       
       // Determine cashPending and bankPending based on payment history
@@ -160,8 +176,14 @@ const dispatchOrders = await DispatchOrder.find(dispatchOrderQuery)
         paymentType: paymentType,
         status: status,
         reference: order.orderNumber,
+        referenceId: order._id,
+        referenceModel: 'DispatchOrder',
         cashPending: cashPending,
-        bankPending: bankPending
+        bankPending: bankPending,
+        cashPaid: cashPaid,
+        bankPaid: bankPaid,
+        returnAmount: returnAmount,
+        discount: discount
       };
         })
     );
@@ -205,6 +227,19 @@ const dispatchOrders = await DispatchOrder.find(dispatchOrderQuery)
           const bankPaid = paymentEntries.reduce((sum, entry) => {
             return sum + (entry.paymentMethod === 'bank' ? (entry.credit || 0) : 0);
           }, 0);
+          
+          // Calculate return amount - find returns linked to this dispatch order
+          const returnDocs = await Return.find({
+            dispatchOrder: order._id,
+            supplier: order.supplier._id
+          });
+          
+          const returnAmount = returnDocs.reduce((sum, returnDoc) => {
+            return sum + (returnDoc.totalReturnValue || 0);
+          }, 0);
+          
+          // Get discount amount
+          const discount = order.totalDiscount || 0;
           
           // Determine cashPending and bankPending based on payment history
           let cashPending = 0;
@@ -261,8 +296,14 @@ const dispatchOrders = await DispatchOrder.find(dispatchOrderQuery)
             paymentType: paymentType,
             status: status,
             reference: order.orderNumber,
+            referenceId: order._id,
+            referenceModel: 'DispatchOrder',
             cashPending: cashPending,
-            bankPending: bankPending
+            bankPending: bankPending,
+            cashPaid: cashPaid,
+            bankPaid: bankPaid,
+            returnAmount: returnAmount,
+            discount: discount
           };
         })
     );
