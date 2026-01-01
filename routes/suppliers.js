@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const Supplier = require('../models/Supplier');
 const User = require('../models/User');
+const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
 
 const router = express.Router();
@@ -129,9 +130,33 @@ router.get('/', auth, async (req, res) => {
 
     const total = await Supplier.countDocuments(query);
 
+    // Calculate balance from ledger for each supplier (source of truth)
+    const suppliersWithBalance = await Promise.all(
+      suppliers.map(async (supplier) => {
+        try {
+          const ledgerBalance = await Ledger.getBalance('supplier', supplier._id);
+          
+          // Convert supplier to plain object to add balance field
+          const supplierObj = supplier.toObject();
+          return {
+            ...supplierObj,
+            balance: ledgerBalance
+          };
+        } catch (error) {
+          console.error(`Error calculating balance for supplier ${supplier._id}:`, error);
+          // Fallback to supplier's currentBalance if ledger calculation fails
+          const supplierObj = supplier.toObject();
+          return {
+            ...supplierObj,
+            balance: supplierObj.currentBalance || 0
+          };
+        }
+      })
+    );
+
     res.json({
       success: true,
-      data: suppliers,
+      data: suppliersWithBalance,
       pagination: {
         currentPage: page,
         totalPages: Math.ceil(total / limit),
