@@ -2185,7 +2185,7 @@ router.post('/:id/return', auth, async (req, res) => {
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
       { path: 'confirmedBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' },
+      { path: 'items.product', select: 'name sku unit images color size productCode pricing' },
       { path: 'returnedItems.returnedBy', select: 'name' }
     ]);
 
@@ -2915,7 +2915,7 @@ router.put('/:id', auth, async (req, res) => {
       { path: 'supplier', select: 'name company' },
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' }
+      { path: 'items.product', select: 'name sku unit images color size productCode pricing' }
     ]);
 
     // Convert images to signed URLs
