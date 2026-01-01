@@ -445,7 +445,7 @@ router.get('/', auth, async (req, res) => {
     const limitNum = Math.min(parseInt(limit) || 20, 100); // Safety cap
     const pageNum = parseInt(page) || 1;
 
-    // Build unified query
+    // Build unified query - always show confirmed orders
     const query = { status: 'confirmed' };
 
     // Apply source filter if present
@@ -453,14 +453,6 @@ router.get('/', auth, async (req, res) => {
       query.supplierUser = null;
     } else if (source === 'dispatch_order') {
       query.supplierUser = { $ne: null };
-    }
-
-    // Apply Search
-    if (search) {
-      query.$or = [
-        { orderNumber: { $regex: search, $options: 'i' } },
-        { invoiceNumber: { $regex: search, $options: 'i' } }
-      ];
     }
 
     // Apply Filters
@@ -471,13 +463,33 @@ router.get('/', auth, async (req, res) => {
       query.status = 'confirmed'; // All confirmed are delivered in this context
     }
 
+    // Build $and array for complex conditions
+    const andConditions = [];
+
+    // Apply Search
+    if (search) {
+      andConditions.push({
+        $or: [
+          { orderNumber: { $regex: search, $options: 'i' } },
+          { invoiceNumber: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+
     // Payment Status - mapped to correct field
     if (paymentStatus) {
       // Check both top-level and nested structure for compatibility
-      query.$or = [
-        { paymentStatus: paymentStatus },
-        { 'paymentDetails.paymentStatus': paymentStatus }
-      ];
+      andConditions.push({
+        $or: [
+          { paymentStatus: paymentStatus },
+          { 'paymentDetails.paymentStatus': paymentStatus }
+        ]
+      });
+    }
+
+    // If we have any $and conditions, add them to the query
+    if (andConditions.length > 0) {
+      query.$and = andConditions;
     }
 
     // Date Range
@@ -504,7 +516,6 @@ router.get('/', auth, async (req, res) => {
         .populate('supplier', 'name company phone email address')
         // Only populate essential nested product fields
         .populate('items.product', 'name sku productCode color size images')
-        .populate('items.productType', 'name category images')
         .sort({ dispatchDate: -1, createdAt: -1 })
         .limit(limitNum)
         .skip((pageNum - 1) * limitNum)
