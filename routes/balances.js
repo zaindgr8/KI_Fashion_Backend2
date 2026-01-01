@@ -88,9 +88,6 @@ const dispatchOrders = await DispatchOrder.find(dispatchOrderQuery)
       
       const remainingBalance = totalAmount - totalPaid;
       
-      // Debug logging for payment tracking
-      console.log(`[Pending Balances] Order ${order.orderNumber}: totalAmount=${totalAmount}, discount=${discount}, cashPaid=${cashPaid}, bankPaid=${bankPaid}, returnAmount=${returnAmount}, totalPaid=${totalPaid}, remaining=${remainingBalance}, paymentEntries=${paymentEntries.length}`);
-      
       // Include ALL entries regardless of payment status (paid, partial, or pending)
       const paymentDetails = order.paymentDetails || {};
       
@@ -111,6 +108,9 @@ const dispatchOrders = await DispatchOrder.find(dispatchOrderQuery)
       const returnAmount = returnDocs.reduce((sum, returnDoc) => {
         return sum + (returnDoc.totalReturnValue || 0);
       }, 0);
+      
+      // Debug logging for payment tracking (after all calculations)
+      console.log(`[Pending Balances] Order ${order.orderNumber}: totalAmount=${totalAmount}, discount=${discount}, cashPaid=${cashPaid}, bankPaid=${bankPaid}, returnAmount=${returnAmount}, totalPaid=${totalPaid}, remaining=${remainingBalance}, paymentEntries=${paymentEntries.length}`);
       
       // Determine cashPending and bankPending based on payment history
       let cashPending = 0;

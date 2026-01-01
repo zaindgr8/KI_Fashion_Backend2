@@ -856,7 +856,7 @@ router.delete('/:id/images', auth, async (req, res) => {
 // Enable variant tracking for a product (Admin only)
 router.patch('/:id/enable-variants', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admins can enable variant tracking'
@@ -926,7 +926,7 @@ router.patch('/:id/enable-variants', auth, async (req, res) => {
 // Disable variant tracking for a product (Admin only)
 router.patch('/:id/disable-variants', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admins can disable variant tracking'
@@ -1035,7 +1035,7 @@ router.get('/:id/variants', auth, async (req, res) => {
 // Adjust variant stock (Admin only)
 router.post('/:id/variants/adjust', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admins can adjust variant stock'

@@ -812,7 +812,7 @@ router.get('/:productId/variants', auth, async (req, res) => {
 // Adjust variant stock (Admin only)
 router.post('/adjust-variant', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admins can adjust variant stock'

@@ -21,7 +21,7 @@ const generatePassword = () => {
 router.get('/', auth, async (req, res) => {
   try {
     // Check if requester is admin
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admin can view password reset requests'
@@ -73,7 +73,7 @@ router.get('/', auth, async (req, res) => {
 router.get('/:id', auth, async (req, res) => {
   try {
     // Check if requester is admin
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admin can view password reset requests'
@@ -109,7 +109,7 @@ router.get('/:id', auth, async (req, res) => {
 router.patch('/:id/complete', auth, async (req, res) => {
   try {
     // Check if requester is admin
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admin can complete password reset requests'
@@ -175,7 +175,7 @@ router.patch('/:id/complete', auth, async (req, res) => {
 router.patch('/:id/cancel', auth, async (req, res) => {
   try {
     // Check if requester is admin
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admin can cancel password reset requests'
@@ -220,7 +220,7 @@ router.patch('/:id/cancel', auth, async (req, res) => {
 router.delete('/:id', auth, async (req, res) => {
   try {
     // Check if requester is admin
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admin can delete password reset requests'

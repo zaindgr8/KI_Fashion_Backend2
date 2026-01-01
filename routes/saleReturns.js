@@ -98,7 +98,7 @@ router.post('/', auth, async (req, res) => {
 
     // Check if user is buyer or admin
     const isBuyer = req.user.role === 'distributor' || req.user.role === 'buyer';
-    const isAdmin = ['admin', 'manager'].includes(req.user.role);
+    const isAdmin = ['super-admin', 'admin'].includes(req.user.role);
 
     if (isBuyer) {
       const buyerId = await getBuyerIdForUser(req.user);
@@ -420,7 +420,7 @@ router.get('/sale/:id', auth, async (req, res) => {
 router.patch('/:id/approve', auth, async (req, res) => {
   try {
     // Only admin/manager can approve returns
-    if (!['admin', 'manager'].includes(req.user.role)) {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can approve returns', 403);
     }
 
@@ -468,7 +468,7 @@ router.patch('/:id/approve', auth, async (req, res) => {
 router.patch('/:id/reject', auth, async (req, res) => {
   try {
     // Only admin/manager can reject returns
-    if (!['admin', 'manager'].includes(req.user.role)) {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can reject returns', 403);
     }
 

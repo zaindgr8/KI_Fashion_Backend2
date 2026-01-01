@@ -39,7 +39,7 @@ const logisticsCompanySchema = Joi.object({
 // Create logistics company (Admin only)
 router.post('/', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return sendResponse.error(res, 'Only admins can create logistics companies', 403);
     }
 
@@ -128,7 +128,7 @@ router.get('/:id', auth, async (req, res) => {
 // Update logistics company (Admin only)
 router.put('/:id', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return sendResponse.error(res, 'Only admins can update logistics companies', 403);
     }
 
@@ -158,7 +158,7 @@ router.put('/:id', auth, async (req, res) => {
 // Toggle active status (Admin only)
 router.patch('/:id/toggle-status', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return sendResponse.error(res, 'Only admins can toggle logistics company status', 403);
     }
 
