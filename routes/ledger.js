@@ -723,7 +723,13 @@ router.post("/entry", auth, async (req, res) => {
         await session.abortTransaction();
         console.error(
           `[Payment Transaction] Rolled back payment for dispatch order ${referenceId}:`,
-          transactionError
+          {
+            message: transactionError.message,
+            stack: transactionError.stack,
+            name: transactionError.name,
+            referenceId: referenceId,
+            entryData: entryData
+          }
         );
 
         // Handle version errors (optimistic locking conflicts)
@@ -902,7 +908,13 @@ router.post("/entry", auth, async (req, res) => {
         await session.abortTransaction();
         console.error(
           `[Payment Transaction] Rolled back payment for purchase ${referenceId}:`,
-          transactionError
+          {
+            message: transactionError.message,
+            stack: transactionError.stack,
+            name: transactionError.name,
+            referenceId: referenceId,
+            entryData: entryData
+          }
         );
 
         // Handle version errors (optimistic locking conflicts)
@@ -966,17 +978,32 @@ router.post("/entry", auth, async (req, res) => {
       await session.abortTransaction();
       console.error(
         "[Payment Transaction] Rolled back regular payment:",
-        transactionError
+        {
+          message: transactionError.message,
+          stack: transactionError.stack,
+          name: transactionError.name,
+          entryData: entryData
+        }
       );
       throw transactionError;
     } finally {
       session.endSession();
     }
   } catch (error) {
-    console.error("Create ledger entry error:", error);
+    console.error("Create ledger entry error:", {
+      message: error.message,
+      stack: error.stack,
+      name: error.name,
+      entryData: req.body,
+      user: req.user?._id
+    });
     res.status(500).json({
       success: false,
       message: error.message || "Server error",
+      error: process.env.NODE_ENV === 'development' ? {
+        name: error.name,
+        stack: error.stack
+      } : undefined
     });
   }
 });

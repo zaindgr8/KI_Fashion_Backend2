@@ -96,21 +96,30 @@ ledgerSchema.index({
 });
 
 ledgerSchema.statics.createEntry = async function (entryData, session = null) {
+  // Validate entryData
+  if (!entryData || !entryData.type || !entryData.entityId) {
+    throw new Error('Invalid entryData: type and entityId are required');
+  }
+
   // Use session if provided to ensure transaction consistency
-  const findOneQuery = this.findOne({
+  // Mongoose .session() returns a new query, so we need to chain it properly
+  let findOneQuery = this.findOne({
     type: entryData.type,
     entityId: entryData.entityId
   }).sort({ date: -1, createdAt: -1 });
   
-  // Attach session to query if provided
+  // Attach session to query if provided (session() returns a new query object)
   if (session) {
-    findOneQuery.session(session);
+    // Mongoose will throw an error if session is invalid, so we don't need strict validation
+    findOneQuery = findOneQuery.session(session);
   }
   
   const lastEntry = await findOneQuery;
 
   const previousBalance = lastEntry ? lastEntry.balance : 0;
-  const newBalance = previousBalance + (entryData.debit || 0) - (entryData.credit || 0);
+  const debit = Number(entryData.debit) || 0;
+  const credit = Number(entryData.credit) || 0;
+  const newBalance = previousBalance + debit - credit;
 
   const entry = new this({
     ...entryData,
