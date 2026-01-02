@@ -219,6 +219,7 @@ router.get("/suppliers", auth, async (req, res) => {
                   orderNumber: refDoc.orderNumber,
                   items: refDoc.items,
                   confirmedQuantities: refDoc.confirmedQuantities,
+                  totalDiscount: refDoc.totalDiscount,
                 };
             } else if (entry.referenceModel === "Purchase") {
               // Legacy Purchase references - now use DispatchOrder (manual entries have supplierUser: null)
@@ -234,6 +235,7 @@ router.get("/suppliers", auth, async (req, res) => {
                   purchaseNumber: refDoc.purchaseNumber,
                   items: refDoc.items,
                   confirmedQuantities: refDoc.confirmedQuantities,
+                  totalDiscount: refDoc.totalDiscount,
                 };
             } else if (entry.referenceModel === "Return") {
               refDoc = await Return.findById(entry.referenceId)
