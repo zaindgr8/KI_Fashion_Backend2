@@ -252,19 +252,14 @@ router.get("/suppliers", auth, async (req, res) => {
 
     const total = await Ledger.countDocuments(query);
 
-    // Calculate total balance for all suppliers or specific supplier
+    // Calculate total balance using BalanceService (SSOT)
     let totalBalance = 0;
     if (supplierId && supplierId !== "all") {
-      totalBalance = await Ledger.getBalance("supplier", supplierId);
+      // Single supplier balance
+      totalBalance = await BalanceService.getSupplierBalance(supplierId);
     } else {
-      // Get balance for all suppliers - get the latest balance entry for each supplier
-      const supplierIds = await Ledger.distinct("entityId", {
-        type: "supplier",
-      });
-      const balances = await Promise.all(
-        supplierIds.map((id) => Ledger.getBalance("supplier", id))
-      );
-      totalBalance = balances.reduce((sum, balance) => sum + (balance || 0), 0);
+      // Total balance across all suppliers
+      totalBalance = await BalanceService.getTotalSupplierBalance();
     }
 
     res.json({

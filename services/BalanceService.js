@@ -284,6 +284,59 @@ class BalanceService {
   }
 
   // =====================================================
+  // AGGREGATE BALANCE METHODS
+  // =====================================================
+
+  /**
+   * Get total balance across all suppliers
+   * Uses aggregation to sum: SUM(debit - credit) for all suppliers
+   * @returns {number} Total balance across all suppliers (positive = admin owes suppliers)
+   */
+  static async getTotalSupplierBalance() {
+    const supplierIds = await Ledger.distinct("entityId", {
+      type: "supplier"
+    });
+    
+    const balances = await Promise.all(
+      supplierIds.map(id => this.getSupplierBalance(id))
+    );
+    
+    return balances.reduce((sum, balance) => sum + (balance || 0), 0);
+  }
+
+  /**
+   * Get total balance across all buyers
+   * @returns {number} Total balance across all buyers (positive = buyers owe admin)
+   */
+  static async getTotalBuyerBalance() {
+    const buyerIds = await Ledger.distinct("entityId", {
+      type: "buyer"
+    });
+    
+    const balances = await Promise.all(
+      buyerIds.map(id => this.getBuyerBalance(id))
+    );
+    
+    return balances.reduce((sum, balance) => sum + (balance || 0), 0);
+  }
+
+  /**
+   * Get total balance across all logistics companies
+   * @returns {number} Total balance across all logistics companies (positive = admin owes logistics)
+   */
+  static async getTotalLogisticsBalance() {
+    const logisticsIds = await Ledger.distinct("entityId", {
+      type: "logistics"
+    });
+    
+    const balances = await Promise.all(
+      logisticsIds.map(id => this.getLogisticsBalance(id))
+    );
+    
+    return balances.reduce((sum, balance) => sum + (balance || 0), 0);
+  }
+
+  // =====================================================
   // TRANSACTION RECORDING METHODS (SUPPLIER)
   // =====================================================
 
