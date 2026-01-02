@@ -580,8 +580,7 @@ router.post('/manual', auth, async (req, res) => {
     // Formula: (cost price / exchange rate) × quantity
     const supplierPaymentTotal = itemsWithDetails.reduce((sum, item) => {
       const costPrice = item.costPrice || 0;
-      const exchangeRate = value.exchangeRate || 1.0;
-      return sum + ((costPrice / exchangeRate) * item.quantity);
+      return sum + (costPrice * item.quantity);
     }, 0);
 
     // Landed total (for inventory valuation - WITH profit margin)
