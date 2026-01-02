@@ -971,7 +971,13 @@ router.get('/', auth, async (req, res) => {
     }
 
     if (status) {
-      query.status = status;
+      // Support comma-separated statuses for multiple status filtering
+      const statusArray = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statusArray.length === 1) {
+        query.status = statusArray[0];
+      } else if (statusArray.length > 1) {
+        query.status = { $in: statusArray };
+      }
     }
 
     const orders = await DispatchOrder.find(query)
