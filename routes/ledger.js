@@ -223,7 +223,7 @@ router.get("/suppliers", auth, async (req, res) => {
             } else if (entry.referenceModel === "Purchase") {
               // Legacy Purchase references - now use DispatchOrder (manual entries have supplierUser: null)
               refDoc = await DispatchOrder.findById(entry.referenceId)
-                .select("orderNumber items confirmedQuantities")
+                .select("orderNumber items confirmedQuantities totalDiscount")
                 .lean();
               if (refDoc) {
                 refDoc.purchaseNumber = refDoc.orderNumber; // For compatibility
