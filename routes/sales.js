@@ -13,6 +13,7 @@ const { generateSaleQR } = require('../utils/qrCode');
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
 const { sendInvoiceEmails } = require('../utils/emailService');
 const { generateSignedUrls } = require('../utils/imageUpload');
+const BalanceService = require('../services/BalanceService');
 
 const router = express.Router();
 

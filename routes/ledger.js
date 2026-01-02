@@ -6,6 +6,7 @@ const DispatchOrder = require("../models/DispatchOrder");
 const Supplier = require("../models/Supplier");
 const Buyer = require("../models/Buyer");
 const auth = require("../middleware/auth");
+const BalanceService = require("../services/BalanceService");
 
 const router = express.Router();
 
@@ -98,14 +99,14 @@ router.get("/supplier/:id", auth, async (req, res) => {
       .lean();
 
     // Populate referenceId for DispatchOrder references (same as /suppliers endpoint)
-    const DispatchOrder = require("../models/DispatchOrder");
+    const DispatchOrderModel = require("../models/DispatchOrder");
     entries = await Promise.all(
       entries.map(async (entry) => {
         if (entry.referenceId && entry.referenceModel) {
           try {
             let refDoc;
             if (entry.referenceModel === "DispatchOrder") {
-              refDoc = await DispatchOrder.findById(entry.referenceId)
+              refDoc = await DispatchOrderModel.findById(entry.referenceId)
                 .select("orderNumber items confirmedQuantities")
                 .lean();
               if (refDoc)
@@ -116,7 +117,7 @@ router.get("/supplier/:id", auth, async (req, res) => {
                   confirmedQuantities: refDoc.confirmedQuantities,
                 };
             } else if (entry.referenceModel === "Purchase") {
-              refDoc = await DispatchOrder.findById(entry.referenceId)
+              refDoc = await DispatchOrderModel.findById(entry.referenceId)
                 .select("orderNumber items confirmedQuantities")
                 .lean();
               if (refDoc) {
@@ -138,116 +139,20 @@ router.get("/supplier/:id", auth, async (req, res) => {
     );
 
     const total = await Ledger.countDocuments(query);
-    const balance = await Ledger.getBalance("supplier", req.params.id);
-
-    // Calculate total cash and bank payments for the supplier
-    const allPayments = await Ledger.find({
-      type: "supplier",
-      entityId: req.params.id,
-      transactionType: "payment",
-    })
-      .select("paymentDetails paymentMethod credit")
-      .lean();
-
-    const totalCashPayment = allPayments.reduce((sum, p) => {
-      // Priority 1: Check paymentDetails (set by DispatchOrder specific payment logic)
-      if (p.paymentDetails?.cashPayment)
-        return sum + p.paymentDetails.cashPayment;
-      // Priority 2: Check top-level paymentMethod and credit (set by general SupplierPaymentModal)
-      if (p.paymentMethod === "cash") return sum + (p.credit || 0);
-      return sum;
-    }, 0);
-
-    const totalBankPayment = allPayments.reduce((sum, p) => {
-      // Priority 1: Check paymentDetails
-      if (p.paymentDetails?.bankPayment)
-        return sum + p.paymentDetails.bankPayment;
-      // Priority 2: Check top-level paymentMethod and credit
-      if (p.paymentMethod === "bank") return sum + (p.credit || 0);
-      return sum;
-    }, 0);
-
-    // Calculate totals from dispatch orders (same calculation as CRM)
-    // Must calculate based on CURRENT confirmed quantities (after returns)
-    // IMPORTANT: Use outstandingBalance from ledger entries (stored by CRM) for accuracy
-    const confirmedOrders = await DispatchOrder.find({
-      supplier: req.params.id,
-      status: "confirmed",
-    })
-      .select(
-        "items confirmedQuantities returnedItems paymentDetails totalDiscount supplierPaymentTotal"
-      )
-      .lean();
-
-    // Calculate remaining and outstanding balance dynamically (same as CRM calculation)
-    // For each order:
-    // - remaining = totalAmountOwed - totalPaid (if positive, admin owes supplier)
-    // - outstanding = totalPaid - totalAmountOwed (if positive, supplier owes admin)
-    let totalRemainingBalance = 0;
-    let totalOutstandingBalance = 0;
-
-    for (const order of confirmedOrders) {
-      // Calculate supplier payment based on CURRENT confirmed quantities (after returns)
-      let currentOrderValue = 0;
-      let originalOrderValue = 0;
-
-      if (order.items && order.items.length > 0) {
-        order.items.forEach((item, index) => {
-          const costPrice = item.costPrice || 0;
-          const originalQty = item.quantity || 0;
-          originalOrderValue += costPrice * originalQty;
-
-          const confirmedQtyObj = order.confirmedQuantities?.find(
-            (cq) => cq.itemIndex === index
-          );
-          const confirmedQty = confirmedQtyObj?.quantity ?? item.quantity;
-          currentOrderValue += costPrice * confirmedQty;
-        });
-      } else {
-        currentOrderValue = order.supplierPaymentTotal || 0;
-        originalOrderValue = currentOrderValue;
-      }
-
-      // Calculate proportional discount if items were returned
-      let discount = 0;
-      const originalDiscount = order.totalDiscount || 0;
-
-      if (originalOrderValue > 0 && currentOrderValue !== originalOrderValue) {
-        const discountPercentage = originalDiscount / originalOrderValue;
-        discount = currentOrderValue * discountPercentage;
-      } else {
-        discount = originalDiscount;
-      }
-
-      const totalAmountOwed = Math.max(0, currentOrderValue - discount);
-
-      // Get total paid from ledger entries (most accurate, includes all payments)
-      const totalPaid = await calculateDispatchOrderPayments(
-        order._id,
-        req.params.id
-      );
-
-      // Calculate remaining: positive = admin owes supplier
-      const remaining = totalAmountOwed - totalPaid;
-
-      if (remaining > 0) {
-        totalRemainingBalance += remaining;
-      } else if (remaining < 0) {
-        // Negative remaining means overpayment = outstanding balance
-        totalOutstandingBalance += Math.abs(remaining);
-      }
-    }
+    
+    // Use BalanceService for all stats calculations (SSOT)
+    const stats = await BalanceService.getSupplierDashboardStats(req.params.id);
 
     res.json({
       success: true,
       data: {
         entries,
-        currentBalance: balance,
-        totalBalance: balance,
-        totalCashPayment,
-        totalBankPayment,
-        totalRemainingBalance,
-        totalOutstandingBalance,
+        currentBalance: stats.currentBalance,
+        totalBalance: stats.totalBalance,
+        totalCashPayment: stats.totalCashPayment,
+        totalBankPayment: stats.totalBankPayment,
+        totalRemainingBalance: stats.totalRemainingBalance,
+        totalOutstandingBalance: stats.totalOutstandingBalance,
         supplierCount: 1,
       },
       pagination: {
@@ -1179,6 +1084,174 @@ router.get("/logistics", auth, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to fetch logistics ledgers",
+    });
+  }
+});
+
+// =====================================================
+// NEW ENDPOINTS - Universal Payment Distribution (SSOT)
+// =====================================================
+
+/**
+ * POST /ledger/supplier/:id/distribute-payment
+ * Distribute a bulk payment across pending orders for a supplier
+ */
+router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
+  try {
+    const { amount, paymentMethod, date, description } = req.body;
+    
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount must be greater than 0"
+      });
+    }
+    
+    if (!paymentMethod || !['cash', 'bank'].includes(paymentMethod)) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment method must be 'cash' or 'bank'"
+      });
+    }
+    
+    const result = await BalanceService.distributeUniversalPayment({
+      supplierId: req.params.id,
+      amount: parseFloat(amount),
+      paymentMethod,
+      date: date ? new Date(date) : new Date(),
+      description,
+      createdBy: req.user._id
+    });
+    
+    res.json({
+      success: true,
+      message: `Payment distributed to ${result.distributions.length} orders`,
+      data: result
+    });
+  } catch (error) {
+    console.error("Distribute supplier payment error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to distribute payment"
+    });
+  }
+});
+
+/**
+ * POST /ledger/supplier/:id/debit-adjustment
+ * Create a manual debit adjustment for a supplier
+ */
+router.post("/supplier/:id/debit-adjustment", auth, async (req, res) => {
+  try {
+    const { amount, date, description } = req.body;
+    
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount must be greater than 0"
+      });
+    }
+    
+    const entry = await BalanceService.recordDebitAdjustment({
+      supplierId: req.params.id,
+      amount: parseFloat(amount),
+      date: date ? new Date(date) : new Date(),
+      description,
+      createdBy: req.user._id
+    });
+    
+    res.json({
+      success: true,
+      message: "Debit adjustment recorded",
+      data: entry
+    });
+  } catch (error) {
+    console.error("Record debit adjustment error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to record adjustment"
+    });
+  }
+});
+
+/**
+ * POST /ledger/logistics/:id/distribute-payment
+ * Distribute a bulk payment across pending charges for a logistics company
+ */
+router.post("/logistics/:id/distribute-payment", auth, async (req, res) => {
+  try {
+    const { amount, paymentMethod, date, description } = req.body;
+    
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount must be greater than 0"
+      });
+    }
+    
+    if (!paymentMethod || !['cash', 'bank'].includes(paymentMethod)) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment method must be 'cash' or 'bank'"
+      });
+    }
+    
+    const result = await BalanceService.distributeLogisticsPayment({
+      logisticsCompanyId: req.params.id,
+      amount: parseFloat(amount),
+      paymentMethod,
+      date: date ? new Date(date) : new Date(),
+      description,
+      createdBy: req.user._id
+    });
+    
+    res.json({
+      success: true,
+      message: `Payment distributed to ${result.distributions.length} orders`,
+      data: result
+    });
+  } catch (error) {
+    console.error("Distribute logistics payment error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to distribute payment"
+    });
+  }
+});
+
+/**
+ * POST /ledger/logistics/:id/debit-adjustment
+ * Create a manual debit adjustment for a logistics company
+ */
+router.post("/logistics/:id/debit-adjustment", auth, async (req, res) => {
+  try {
+    const { amount, date, description } = req.body;
+    
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount must be greater than 0"
+      });
+    }
+    
+    const entry = await BalanceService.recordLogisticsDebitAdjustment({
+      logisticsCompanyId: req.params.id,
+      amount: parseFloat(amount),
+      date: date ? new Date(date) : new Date(),
+      description,
+      createdBy: req.user._id
+    });
+    
+    res.json({
+      success: true,
+      message: "Debit adjustment recorded",
+      data: entry
+    });
+  } catch (error) {
+    console.error("Record logistics debit adjustment error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to record adjustment"
     });
   }
 });

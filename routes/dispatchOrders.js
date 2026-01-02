@@ -12,6 +12,7 @@ const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 const { generateDispatchOrderQR, buildDispatchOrderQrPayload } = require('../utils/qrCode');
 const { validateImageFile, uploadImage, generateSignedUrl, generateSignedUrls, generateSignedUploadUrl, verifyFileExists, deleteImage } = require('../utils/imageUpload');
+const BalanceService = require('../services/BalanceService');
 
 const router = express.Router();
 

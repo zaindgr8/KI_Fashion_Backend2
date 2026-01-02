@@ -101,16 +101,19 @@ const dispatchOrderSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
+  // DEPRECATED: These fields are kept for backward compatibility.
+  // All balance calculations should use BalanceService and Ledger aggregations (SSOT).
+  // These fields will be removed in a future version after migration is complete.
   paymentDetails: {
-    cashPayment: { type: Number, default: 0 },
-    bankPayment: { type: Number, default: 0 },
+    cashPayment: { type: Number, default: 0 }, // DEPRECATED: Use Ledger.getOrderPayments()
+    bankPayment: { type: Number, default: 0 }, // DEPRECATED: Use Ledger.getOrderPayments()
     creditApplied: { type: Number, default: 0 }, // Credit automatically applied from supplier's debt to admin
-    remainingBalance: { type: Number, default: 0 },
+    remainingBalance: { type: Number, default: 0 }, // DEPRECATED: Use BalanceService.getOrderRemainingBalance()
     paymentStatus: {
       type: String,
       enum: ['pending', 'partial', 'paid'],
       default: 'pending'
-    }
+    } // DEPRECATED: Use BalanceService.enrichOrderWithPaymentStatus()
   },
   confirmedQuantities: [{
     itemIndex: { type: Number, required: true },
@@ -184,15 +187,16 @@ const dispatchOrderSchema = new mongoose.Schema({
   shippingCost: { type: Number, default: 0, min: 0 },
   supplierPaymentTotal: { type: Number, default: 0, min: 0 }, // Total amount to pay supplier (cost × exchange rate, NO profit)
   grandTotal: { type: Number, default: 0, min: 0 }, // Landed total (for inventory valuation)
-  // Flat payment fields (in addition to nested paymentDetails)
-  cashPayment: { type: Number, default: 0, min: 0 },
-  bankPayment: { type: Number, default: 0, min: 0 },
-  remainingBalance: { type: Number, default: 0 },
+  // DEPRECATED: Flat payment fields (legacy - use BalanceService for all balance operations)
+  // These fields are kept for backward compatibility and will be removed after migration.
+  cashPayment: { type: Number, default: 0, min: 0 }, // DEPRECATED: Use Ledger.getOrderPayments()
+  bankPayment: { type: Number, default: 0, min: 0 }, // DEPRECATED: Use Ledger.getOrderPayments()
+  remainingBalance: { type: Number, default: 0 }, // DEPRECATED: Use BalanceService.getOrderRemainingBalance()
   paymentStatus: {
     type: String,
     enum: ['pending', 'partial', 'paid', 'overdue'],
     default: 'pending'
-  },
+  }, // DEPRECATED: Use BalanceService.enrichOrderWithPaymentStatus()
   // Quality checks, fulfillment, delivery confirmations, attachments
   qualityChecks: [{
     qaStatus: {
