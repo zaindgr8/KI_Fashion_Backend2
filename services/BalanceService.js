@@ -84,19 +84,19 @@ class BalanceService {
   static async enrichOrderWithPaymentStatus(order) {
     const payments = await Ledger.getOrderPayments(order._id);
     const returnTotal = await Ledger.getOrderReturnTotal(order._id);
-    
+
     // Calculate the current order value considering returns
     const currentOrderValue = await this.calculateCurrentOrderValue(order);
     const totalPaid = payments.total;
     const remaining = currentOrderValue - totalPaid - returnTotal;
-    
+
     let paymentStatus = 'pending';
     if (remaining <= 0 && totalPaid > 0) {
       paymentStatus = 'paid';
     } else if (totalPaid > 0) {
       paymentStatus = 'partial';
     }
-    
+
     return {
       ...order,
       computedPaymentDetails: {
@@ -116,7 +116,7 @@ class BalanceService {
    */
   static calculateCurrentOrderValue(order) {
     let currentOrderValue = 0;
-    
+
     if (order.items && order.items.length > 0) {
       order.items.forEach((item, index) => {
         const costPrice = item.costPrice || item.supplierPaymentAmount || 0;
@@ -127,7 +127,7 @@ class BalanceService {
     } else {
       currentOrderValue = order.supplierPaymentTotal || 0;
     }
-    
+
     const discount = order.totalDiscount || 0;
     return Math.max(0, currentOrderValue - discount);
   }
@@ -141,14 +141,14 @@ class BalanceService {
       supplier: supplierId,
       status: 'confirmed'
     }).select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount').lean();
-    
+
     const ordersWithBalances = await Promise.all(
       orders.map(async (order) => {
         const currentValue = this.calculateCurrentOrderValue(order);
         const payments = await Ledger.getOrderPayments(order._id);
         const returnTotal = await Ledger.getOrderReturnTotal(order._id);
         const remainingBalance = currentValue - payments.total - returnTotal;
-        
+
         return {
           _id: order._id,
           orderNumber: order.orderNumber,
@@ -159,7 +159,7 @@ class BalanceService {
         };
       })
     );
-    
+
     // Return only orders with positive remaining balance, sorted descending
     return ordersWithBalances
       .filter(o => o.remainingBalance > 0)
@@ -173,18 +173,18 @@ class BalanceService {
     const LogisticsCompany = require('../models/LogisticsCompany');
     const company = await LogisticsCompany.findById(logisticsCompanyId);
     const boxRate = company?.rates?.boxRate || 0;
-    
+
     const orders = await DispatchOrder.find({
       logisticsCompany: logisticsCompanyId,
       status: 'confirmed'
     }).select('_id orderNumber totalBoxes').lean();
-    
+
     const chargesWithBalances = await Promise.all(
       orders.map(async (order) => {
         const totalAmount = (order.totalBoxes || 0) * boxRate;
         const payments = await Ledger.getOrderPayments(order._id);
         const remainingBalance = totalAmount - payments.total;
-        
+
         return {
           orderId: order._id,
           orderNumber: order.orderNumber,
@@ -196,7 +196,7 @@ class BalanceService {
         };
       })
     );
-    
+
     // Return only charges with positive remaining balance, sorted descending
     return chargesWithBalances
       .filter(c => c.remainingBalance > 0)
@@ -213,20 +213,20 @@ class BalanceService {
   static async getSupplierDashboardStats(supplierId) {
     // Get current ledger balance
     const currentBalance = await this.getSupplierBalance(supplierId);
-    
+
     // Get payment totals by method
     const paymentTotals = await Ledger.getPaymentTotalsByMethod('supplier', supplierId);
-    
+
     // Calculate remaining and outstanding from confirmed orders
     const pendingOrders = await this.getPendingOrdersForSupplier(supplierId);
     const totalRemainingBalance = pendingOrders.reduce((sum, o) => sum + Math.max(0, o.remainingBalance), 0);
-    
+
     // Outstanding balance = overpayments (when remaining is negative)
     const allOrders = await DispatchOrder.find({
       supplier: supplierId,
       status: 'confirmed'
     }).select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount').lean();
-    
+
     let totalOutstandingBalance = 0;
     for (const order of allOrders) {
       const currentValue = this.calculateCurrentOrderValue(order);
@@ -237,7 +237,7 @@ class BalanceService {
         totalOutstandingBalance += Math.abs(remaining);
       }
     }
-    
+
     return {
       currentBalance,
       totalBalance: currentBalance, // Alias for backward compatibility
@@ -255,7 +255,7 @@ class BalanceService {
   static async getBuyerDashboardStats(buyerId) {
     const currentBalance = await this.getBuyerBalance(buyerId);
     const paymentTotals = await Ledger.getPaymentTotalsByMethod('buyer', buyerId);
-    
+
     return {
       currentBalance,
       totalBalance: currentBalance,
@@ -270,11 +270,11 @@ class BalanceService {
   static async getLogisticsDashboardStats(logisticsCompanyId) {
     const currentBalance = await this.getLogisticsBalance(logisticsCompanyId);
     const paymentTotals = await Ledger.getPaymentTotalsByMethod('logistics', logisticsCompanyId);
-    
+
     // Calculate pending from confirmed orders
     const pendingCharges = await this.getPendingLogisticsCharges(logisticsCompanyId);
     const totalRemainingBalance = pendingCharges.reduce((sum, c) => sum + c.remainingBalance, 0);
-    
+
     return {
       currentBalance,
       totalRemainingBalance,
@@ -296,11 +296,11 @@ class BalanceService {
     const supplierIds = await Ledger.distinct("entityId", {
       type: "supplier"
     });
-    
+
     const balances = await Promise.all(
       supplierIds.map(id => this.getSupplierBalance(id))
     );
-    
+
     return balances.reduce((sum, balance) => sum + (balance || 0), 0);
   }
 
@@ -312,11 +312,11 @@ class BalanceService {
     const buyerIds = await Ledger.distinct("entityId", {
       type: "buyer"
     });
-    
+
     const balances = await Promise.all(
       buyerIds.map(id => this.getBuyerBalance(id))
     );
-    
+
     return balances.reduce((sum, balance) => sum + (balance || 0), 0);
   }
 
@@ -328,11 +328,11 @@ class BalanceService {
     const logisticsIds = await Ledger.distinct("entityId", {
       type: "logistics"
     });
-    
+
     const balances = await Promise.all(
       logisticsIds.map(id => this.getLogisticsBalance(id))
     );
-    
+
     return balances.reduce((sum, balance) => sum + (balance || 0), 0);
   }
 
@@ -343,13 +343,13 @@ class BalanceService {
   /**
    * Record purchase and initial payments when confirming a dispatch order
    */
-  static async confirmDispatchOrder({ 
-    dispatchOrderId, 
-    supplierId, 
-    supplierPaymentTotal, 
+  static async confirmDispatchOrder({
+    dispatchOrderId,
+    supplierId,
+    supplierPaymentTotal,
     discount = 0,
-    cashPayment = 0, 
-    bankPayment = 0, 
+    cashPayment = 0,
+    bankPayment = 0,
     createdBy,
     description,
     session = null
@@ -357,7 +357,7 @@ class BalanceService {
     const discountedTotal = Math.max(0, supplierPaymentTotal - discount);
     const entryDate = new Date();
     const entries = [];
-    
+
     // 1. Create purchase entry (debit - what we owe supplier)
     const purchaseEntry = await Ledger.createEntry({
       type: 'supplier',
@@ -378,7 +378,7 @@ class BalanceService {
       createdBy
     }, session);
     entries.push(purchaseEntry);
-    
+
     // 2. Create cash payment entry if applicable
     if (cashPayment > 0) {
       const cashEntry = await Ledger.createEntry({
@@ -397,7 +397,7 @@ class BalanceService {
       }, session);
       entries.push(cashEntry);
     }
-    
+
     // 3. Create bank payment entry if applicable
     if (bankPayment > 0) {
       const bankEntry = await Ledger.createEntry({
@@ -416,7 +416,7 @@ class BalanceService {
       }, session);
       entries.push(bankEntry);
     }
-    
+
     return {
       purchaseEntry: entries[0],
       paymentEntries: entries.slice(1),
@@ -429,13 +429,13 @@ class BalanceService {
   /**
    * Record a payment for a specific order
    */
-  static async recordOrderPayment({ 
-    supplierId, 
+  static async recordOrderPayment({
+    supplierId,
     referenceId,
     referenceModel = 'DispatchOrder',
-    amount, 
-    paymentMethod, 
-    createdBy, 
+    amount,
+    paymentMethod,
+    createdBy,
     description,
     date = new Date(),
     session = null
@@ -459,12 +459,12 @@ class BalanceService {
   /**
    * Record a return that reduces what admin owes supplier
    */
-  static async recordReturn({ 
-    supplierId, 
-    dispatchOrderId, 
-    returnValue, 
+  static async recordReturn({
+    supplierId,
+    dispatchOrderId,
+    returnValue,
     returnId,
-    createdBy, 
+    createdBy,
     description,
     date = new Date(),
     session = null
@@ -487,28 +487,32 @@ class BalanceService {
   /**
    * Distribute a universal payment across pending orders (descending by amount)
    */
-  static async distributeUniversalPayment({ 
-    supplierId, 
-    amount, 
-    paymentMethod, 
-    createdBy, 
+  static async distributeUniversalPayment({
+    supplierId,
+    amount,
+    paymentMethod,
+    createdBy,
     description,
     date = new Date(),
     session = null
   }) {
     // 1. Get pending orders sorted by remaining balance descending
     const pendingOrders = await this.getPendingOrdersForSupplier(supplierId);
-    
+
     let remainingAmount = amount;
     const distributions = [];
-    
+
     // 2. Distribute across orders
-    for (const order of pendingOrders) {
+    for (let i = 0; i < pendingOrders.length; i++) {
       if (remainingAmount <= 0) break;
-      
+
+      const order = pendingOrders[i];
+      const isLastOrder = (i === pendingOrders.length - 1);
       const orderRemaining = order.remainingBalance;
-      const paymentForOrder = Math.min(remainingAmount, orderRemaining);
-      
+
+      // If it's the last order, it takes all remaining amount (Scenario: More/Equal/Less)
+      const paymentForOrder = isLastOrder ? remainingAmount : Math.min(remainingAmount, orderRemaining);
+
       if (paymentForOrder > 0) {
         // Create ledger entry linked to this order
         await Ledger.createEntry({
@@ -525,7 +529,7 @@ class BalanceService {
           description: description || `Distributed payment from bulk payment`,
           createdBy
         }, session);
-        
+
         distributions.push({
           orderId: order._id,
           orderNumber: order.orderNumber,
@@ -533,11 +537,11 @@ class BalanceService {
           previousRemaining: orderRemaining,
           newRemaining: orderRemaining - paymentForOrder
         });
-        
+
         remainingAmount -= paymentForOrder;
       }
     }
-    
+
     // 3. If excess payment (all orders paid), create unlinked credit entry
     if (remainingAmount > 0) {
       await Ledger.createEntry({
@@ -552,7 +556,7 @@ class BalanceService {
         description: description || `Excess payment (credit to supplier account)`,
         createdBy
       }, session);
-      
+
       distributions.push({
         orderId: null,
         orderNumber: 'CREDIT',
@@ -561,7 +565,7 @@ class BalanceService {
         newRemaining: -remainingAmount // Negative = supplier has credit
       });
     }
-    
+
     return {
       totalDistributed: amount,
       distributions,
@@ -572,10 +576,10 @@ class BalanceService {
   /**
    * Record a debit adjustment (manual charge to increase what we owe supplier)
    */
-  static async recordDebitAdjustment({ 
-    supplierId, 
-    amount, 
-    description, 
+  static async recordDebitAdjustment({
+    supplierId,
+    amount,
+    description,
     createdBy,
     date = new Date(),
     session = null
@@ -596,21 +600,21 @@ class BalanceService {
   /**
    * Apply supplier credit to a new order (when supplier has negative balance)
    */
-  static async applySupplierCreditToOrder({ 
-    supplierId, 
-    orderId, 
-    orderTotal, 
+  static async applySupplierCreditToOrder({
+    supplierId,
+    orderId,
+    orderTotal,
     createdBy,
     session = null
   }) {
     const currentBalance = await this.getSupplierBalance(supplierId);
-    
+
     // Only apply if balance is negative (supplier has credit)
     if (currentBalance >= 0) return { creditApplied: 0 };
-    
+
     const availableCredit = Math.abs(currentBalance);
     const creditToApply = Math.min(availableCredit, orderTotal);
-    
+
     if (creditToApply > 0) {
       await Ledger.createEntry({
         type: 'supplier',
@@ -626,7 +630,7 @@ class BalanceService {
         createdBy
       }, session);
     }
-    
+
     return { creditApplied: creditToApply };
   }
 
@@ -637,11 +641,11 @@ class BalanceService {
   /**
    * Record a sale to a buyer (debit - buyer owes us)
    */
-  static async recordSale({ 
-    buyerId, 
-    saleId, 
-    amount, 
-    createdBy, 
+  static async recordSale({
+    buyerId,
+    saleId,
+    amount,
+    createdBy,
     description,
     date = new Date(),
     session = null
@@ -664,12 +668,12 @@ class BalanceService {
   /**
    * Record a receipt from a buyer (credit - buyer paid us)
    */
-  static async recordReceipt({ 
-    buyerId, 
-    saleId, 
-    amount, 
+  static async recordReceipt({
+    buyerId,
+    saleId,
+    amount,
     paymentMethod,
-    createdBy, 
+    createdBy,
     description,
     date = new Date(),
     session = null
@@ -697,20 +701,20 @@ class BalanceService {
   /**
    * Record logistics charge when confirming an order
    */
-  static async recordLogisticsCharge({ 
-    logisticsCompanyId, 
-    dispatchOrderId, 
-    totalBoxes, 
-    boxRate, 
-    createdBy, 
+  static async recordLogisticsCharge({
+    logisticsCompanyId,
+    dispatchOrderId,
+    totalBoxes,
+    boxRate,
+    createdBy,
     description,
     date = new Date(),
     session = null
   }) {
     const logisticsCharge = totalBoxes * boxRate;
-    
+
     if (logisticsCharge <= 0) return null;
-    
+
     return await Ledger.createEntry({
       type: 'logistics',
       entityId: logisticsCompanyId,
@@ -729,12 +733,12 @@ class BalanceService {
   /**
    * Record a payment to logistics company for a specific order
    */
-  static async recordLogisticsPayment({ 
-    logisticsCompanyId, 
-    referenceId, 
-    amount, 
-    paymentMethod, 
-    createdBy, 
+  static async recordLogisticsPayment({
+    logisticsCompanyId,
+    referenceId,
+    amount,
+    paymentMethod,
+    createdBy,
     description,
     date = new Date(),
     session = null
@@ -758,27 +762,31 @@ class BalanceService {
   /**
    * Distribute a universal payment across pending logistics charges
    */
-  static async distributeLogisticsPayment({ 
-    logisticsCompanyId, 
-    amount, 
-    paymentMethod, 
-    createdBy, 
+  static async distributeLogisticsPayment({
+    logisticsCompanyId,
+    amount,
+    paymentMethod,
+    createdBy,
     description,
     date = new Date(),
     session = null
   }) {
     // Get pending charges sorted by remaining descending
     const pendingCharges = await this.getPendingLogisticsCharges(logisticsCompanyId);
-    
+
     let remainingAmount = amount;
     const distributions = [];
-    
-    for (const charge of pendingCharges) {
+
+    for (let i = 0; i < pendingCharges.length; i++) {
       if (remainingAmount <= 0) break;
-      
+
+      const charge = pendingCharges[i];
+      const isLastCharge = (i === pendingCharges.length - 1);
       const chargeRemaining = charge.remainingBalance;
-      const paymentForCharge = Math.min(remainingAmount, chargeRemaining);
-      
+
+      // If it's the last charge, it takes all remaining amount
+      const paymentForCharge = isLastCharge ? remainingAmount : Math.min(remainingAmount, chargeRemaining);
+
       if (paymentForCharge > 0) {
         await Ledger.createEntry({
           type: 'logistics',
@@ -794,18 +802,18 @@ class BalanceService {
           description: description || `Distributed payment`,
           createdBy
         }, session);
-        
+
         distributions.push({
           orderId: charge.orderId,
           orderNumber: charge.orderNumber,
           amountApplied: paymentForCharge
         });
-        
+
         remainingAmount -= paymentForCharge;
       }
     }
-    
-    // Excess payment creates credit
+
+    // Excess payment creates unlinked credit (only if no pending charges existed)
     if (remainingAmount > 0) {
       await Ledger.createEntry({
         type: 'logistics',
@@ -819,18 +827,24 @@ class BalanceService {
         description: `Excess payment (credit)`,
         createdBy
       }, session);
+
+      distributions.push({
+        orderId: null,
+        orderNumber: 'CREDIT',
+        amountApplied: remainingAmount
+      });
     }
-    
+
     return { totalDistributed: amount, distributions };
   }
 
   /**
    * Record a debit adjustment for logistics (manual charge)
    */
-  static async recordLogisticsDebitAdjustment({ 
-    logisticsCompanyId, 
-    amount, 
-    description, 
+  static async recordLogisticsDebitAdjustment({
+    logisticsCompanyId,
+    amount,
+    description,
     createdBy,
     date = new Date(),
     session = null
@@ -859,23 +873,23 @@ class BalanceService {
   static async getPendingSupplierBalances(supplierId = null) {
     const query = { status: 'confirmed' };
     if (supplierId) query.supplier = supplierId;
-    
+
     const orders = await DispatchOrder.find(query)
       .populate('supplier', 'name company')
       .select('orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount dispatchDate createdAt supplier supplierUser')
       .lean();
-    
+
     const balances = await Promise.all(
       orders.map(async (order) => {
         const currentValue = this.calculateCurrentOrderValue(order);
         const payments = await Ledger.getOrderPayments(order._id);
         const returnTotal = await Ledger.getOrderReturnTotal(order._id);
         const remainingBalance = currentValue - payments.total - returnTotal;
-        
+
         // Determine cash/bank pending based on payment history
         let cashPending = 0;
         let bankPending = 0;
-        
+
         if (payments.total === 0) {
           cashPending = remainingBalance; // Default to cash
         } else {
@@ -889,14 +903,14 @@ class BalanceService {
             bankPending = remainingBalance * (1 - cashRatio);
           }
         }
-        
+
         let status = 'pending';
         if (remainingBalance <= 0 && payments.total > 0) {
           status = 'paid';
         } else if (payments.total > 0) {
           status = 'partial';
         }
-        
+
         return {
           id: order._id,
           type: order.supplierUser ? 'dispatchOrder' : 'purchase',
@@ -918,7 +932,7 @@ class BalanceService {
         };
       })
     );
-    
+
     return balances.sort((a, b) => new Date(b.date) - new Date(a.date));
   }
 
@@ -927,30 +941,30 @@ class BalanceService {
    */
   static async getPendingLogisticsBalances(logisticsCompanyId = null) {
     const LogisticsCompany = require('../models/LogisticsCompany');
-    
-    const query = { 
+
+    const query = {
       status: 'confirmed',
       logisticsCompany: { $exists: true, $ne: null }
     };
     if (logisticsCompanyId) query.logisticsCompany = logisticsCompanyId;
-    
+
     const orders = await DispatchOrder.find(query)
       .populate('logisticsCompany', 'name rates')
       .select('orderNumber totalBoxes dispatchDate createdAt logisticsCompany')
       .lean();
-    
+
     const balances = await Promise.all(
       orders.map(async (order) => {
         if (!order.logisticsCompany) return null;
-        
+
         const boxRate = order.logisticsCompany.rates?.boxRate || 0;
         const totalAmount = (order.totalBoxes || 0) * boxRate;
         const payments = await Ledger.getOrderPayments(order._id);
         const remainingBalance = totalAmount - payments.total;
-        
+
         let cashPending = 0;
         let bankPending = 0;
-        
+
         if (payments.total === 0) {
           cashPending = remainingBalance;
         } else {
@@ -964,14 +978,14 @@ class BalanceService {
             bankPending = remainingBalance * (1 - cashRatio);
           }
         }
-        
+
         let status = 'pending';
         if (remainingBalance <= 0 && payments.total > 0) {
           status = 'paid';
         } else if (payments.total > 0) {
           status = 'partial';
         }
-        
+
         return {
           id: order._id,
           type: 'dispatchOrder',
@@ -990,7 +1004,7 @@ class BalanceService {
         };
       })
     );
-    
+
     return balances.filter(b => b !== null).sort((a, b) => new Date(b.date) - new Date(a.date));
   }
 }

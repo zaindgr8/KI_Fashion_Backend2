@@ -1006,7 +1006,7 @@ router.get("/logistics", auth, async (req, res) => {
     // Find entries
     let entries = await Ledger.find(query)
       .populate("createdBy", "name")
-      .populate("entityId", "name") // Populate logistics company info
+      .populate("entityId", "name rates") // Populate logistics company info and rates
       .lean() // Use lean for better performance
       .sort({ date: -1, createdAt: -1 })
       .limit(limit * 1)
