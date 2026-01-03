@@ -107,7 +107,7 @@ router.get("/supplier/:id", auth, async (req, res) => {
             let refDoc;
             if (entry.referenceModel === "DispatchOrder") {
               refDoc = await DispatchOrderModel.findById(entry.referenceId)
-                .select("orderNumber items confirmedQuantities")
+                .select("orderNumber items confirmedQuantities totalDiscount discount")
                 .lean();
               if (refDoc)
                 entry.referenceId = {
@@ -115,10 +115,11 @@ router.get("/supplier/:id", auth, async (req, res) => {
                   orderNumber: refDoc.orderNumber,
                   items: refDoc.items,
                   confirmedQuantities: refDoc.confirmedQuantities,
+                  totalDiscount: refDoc.totalDiscount || refDoc.discount || 0
                 };
             } else if (entry.referenceModel === "Purchase") {
               refDoc = await DispatchOrderModel.findById(entry.referenceId)
-                .select("orderNumber items confirmedQuantities")
+                .select("orderNumber items confirmedQuantities totalDiscount discount")
                 .lean();
               if (refDoc) {
                 refDoc.purchaseNumber = refDoc.orderNumber;
@@ -127,6 +128,7 @@ router.get("/supplier/:id", auth, async (req, res) => {
                   purchaseNumber: refDoc.purchaseNumber,
                   items: refDoc.items,
                   confirmedQuantities: refDoc.confirmedQuantities,
+                  totalDiscount: refDoc.totalDiscount || refDoc.discount || 0
                 };
               }
             }
@@ -139,7 +141,7 @@ router.get("/supplier/:id", auth, async (req, res) => {
     );
 
     const total = await Ledger.countDocuments(query);
-    
+
     // Use BalanceService for all stats calculations (SSOT)
     const stats = await BalanceService.getSupplierDashboardStats(req.params.id);
 
@@ -211,7 +213,7 @@ router.get("/suppliers", auth, async (req, res) => {
             let refDoc;
             if (entry.referenceModel === "DispatchOrder") {
               refDoc = await DispatchOrder.findById(entry.referenceId)
-                .select("orderNumber items confirmedQuantities")
+                .select("orderNumber items confirmedQuantities totalDiscount discount")
                 .lean();
               if (refDoc)
                 entry.referenceId = {
@@ -219,11 +221,12 @@ router.get("/suppliers", auth, async (req, res) => {
                   orderNumber: refDoc.orderNumber,
                   items: refDoc.items,
                   confirmedQuantities: refDoc.confirmedQuantities,
+                  totalDiscount: refDoc.totalDiscount || refDoc.discount || 0
                 };
             } else if (entry.referenceModel === "Purchase") {
               // Legacy Purchase references - now use DispatchOrder (manual entries have supplierUser: null)
               refDoc = await DispatchOrder.findById(entry.referenceId)
-                .select("orderNumber items confirmedQuantities")
+                .select("orderNumber items confirmedQuantities totalDiscount discount")
                 .lean();
               if (refDoc) {
                 refDoc.purchaseNumber = refDoc.orderNumber; // For compatibility
@@ -234,6 +237,7 @@ router.get("/suppliers", auth, async (req, res) => {
                   purchaseNumber: refDoc.purchaseNumber,
                   items: refDoc.items,
                   confirmedQuantities: refDoc.confirmedQuantities,
+                  totalDiscount: refDoc.totalDiscount || refDoc.discount || 0
                 };
             } else if (entry.referenceModel === "Return") {
               refDoc = await Return.findById(entry.referenceId)
@@ -271,8 +275,8 @@ router.get("/suppliers", auth, async (req, res) => {
           supplierId && supplierId !== "all"
             ? 1
             : await Ledger.distinct("entityId", { type: "supplier" }).then(
-                (ids) => ids.length
-              ),
+              (ids) => ids.length
+            ),
       },
       pagination: {
         currentPage: page,
@@ -533,8 +537,8 @@ router.post("/entry", auth, async (req, res) => {
         paymentDetails?.outstandingBalance !== undefined
           ? paymentDetails.outstandingBalance
           : remainingAfterPayment < 0
-          ? Math.abs(remainingAfterPayment)
-          : 0;
+            ? Math.abs(remainingAfterPayment)
+            : 0;
 
       // Ensure paymentDetails is populated for the ledger entry (preserve outstandingBalance)
       entryData.paymentDetails = {
@@ -1064,8 +1068,8 @@ router.get("/logistics", auth, async (req, res) => {
           logisticsCompanyId && logisticsCompanyId !== "all"
             ? 1
             : await Ledger.distinct("entityId", { type: "logistics" }).then(
-                (ids) => ids.length
-              ),
+              (ids) => ids.length
+            ),
       },
       pagination: {
         currentPage: page,
@@ -1094,21 +1098,21 @@ router.get("/logistics", auth, async (req, res) => {
 router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
   try {
     const { amount, paymentMethod, date, description } = req.body;
-    
+
     if (!amount || amount <= 0) {
       return res.status(400).json({
         success: false,
         message: "Amount must be greater than 0"
       });
     }
-    
+
     if (!paymentMethod || !['cash', 'bank'].includes(paymentMethod)) {
       return res.status(400).json({
         success: false,
         message: "Payment method must be 'cash' or 'bank'"
       });
     }
-    
+
     const result = await BalanceService.distributeUniversalPayment({
       supplierId: req.params.id,
       amount: parseFloat(amount),
@@ -1117,7 +1121,7 @@ router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
       description,
       createdBy: req.user._id
     });
-    
+
     res.json({
       success: true,
       message: `Payment distributed to ${result.distributions.length} orders`,
@@ -1139,14 +1143,14 @@ router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
 router.post("/supplier/:id/debit-adjustment", auth, async (req, res) => {
   try {
     const { amount, date, description } = req.body;
-    
+
     if (!amount || amount <= 0) {
       return res.status(400).json({
         success: false,
         message: "Amount must be greater than 0"
       });
     }
-    
+
     const entry = await BalanceService.recordDebitAdjustment({
       supplierId: req.params.id,
       amount: parseFloat(amount),
@@ -1154,7 +1158,7 @@ router.post("/supplier/:id/debit-adjustment", auth, async (req, res) => {
       description,
       createdBy: req.user._id
     });
-    
+
     res.json({
       success: true,
       message: "Debit adjustment recorded",
@@ -1176,21 +1180,21 @@ router.post("/supplier/:id/debit-adjustment", auth, async (req, res) => {
 router.post("/logistics/:id/distribute-payment", auth, async (req, res) => {
   try {
     const { amount, paymentMethod, date, description } = req.body;
-    
+
     if (!amount || amount <= 0) {
       return res.status(400).json({
         success: false,
         message: "Amount must be greater than 0"
       });
     }
-    
+
     if (!paymentMethod || !['cash', 'bank'].includes(paymentMethod)) {
       return res.status(400).json({
         success: false,
         message: "Payment method must be 'cash' or 'bank'"
       });
     }
-    
+
     const result = await BalanceService.distributeLogisticsPayment({
       logisticsCompanyId: req.params.id,
       amount: parseFloat(amount),
@@ -1199,7 +1203,7 @@ router.post("/logistics/:id/distribute-payment", auth, async (req, res) => {
       description,
       createdBy: req.user._id
     });
-    
+
     res.json({
       success: true,
       message: `Payment distributed to ${result.distributions.length} orders`,
@@ -1221,14 +1225,14 @@ router.post("/logistics/:id/distribute-payment", auth, async (req, res) => {
 router.post("/logistics/:id/debit-adjustment", auth, async (req, res) => {
   try {
     const { amount, date, description } = req.body;
-    
+
     if (!amount || amount <= 0) {
       return res.status(400).json({
         success: false,
         message: "Amount must be greater than 0"
       });
     }
-    
+
     const entry = await BalanceService.recordLogisticsDebitAdjustment({
       logisticsCompanyId: req.params.id,
       amount: parseFloat(amount),
@@ -1236,7 +1240,7 @@ router.post("/logistics/:id/debit-adjustment", auth, async (req, res) => {
       description,
       createdBy: req.user._id
     });
-    
+
     res.json({
       success: true,
       message: "Debit adjustment recorded",
