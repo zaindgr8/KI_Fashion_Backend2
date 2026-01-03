@@ -140,9 +140,26 @@ router.get('/', auth, async (req, res) => {
         if (!item.product || !item.product.name || !item.product.sku) {
           return false;
         }
-        return item.product.name.toLowerCase().includes(search.toLowerCase()) ||
-          item.product.sku.toLowerCase().includes(search.toLowerCase()) ||
-          (item.product.brand && item.product.brand.toLowerCase().includes(search.toLowerCase()));
+
+        const searchLower = search.toLowerCase();
+
+        // Check product name, SKU, and brand
+        const matchesProduct = item.product.name.toLowerCase().includes(searchLower) ||
+          item.product.sku.toLowerCase().includes(searchLower) ||
+          (item.product.brand && item.product.brand.toLowerCase().includes(searchLower));
+
+        // Check supplier name
+        let matchesSupplier = false;
+        if (Array.isArray(item.product.suppliers) && item.product.suppliers.length > 0) {
+          matchesSupplier = item.product.suppliers.some(s => {
+            const supplier = s.supplier;
+            if (!supplier) return false;
+            const supplierName = supplier.companyName || supplier.name || '';
+            return supplierName.toLowerCase().includes(searchLower);
+          });
+        }
+
+        return matchesProduct || matchesSupplier;
       });
     }
 
