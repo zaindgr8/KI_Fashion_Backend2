@@ -576,35 +576,46 @@ router.post('/manual', auth, async (req, res) => {
     }
 
     // Calculate totals
-    // Supplier payment total (what admin owes supplier - NO profit margin)
-    // Formula: (cost price / exchange rate) × quantity
+    // 1. Supplier payment total (what admin owes supplier - NO profit margin)
+    // Formula: cost price × quantity (Raw Currency)
     const supplierPaymentTotal = itemsWithDetails.reduce((sum, item) => {
       const costPrice = item.costPrice || 0;
       return sum + (costPrice * item.quantity);
     }, 0);
 
-    // Landed total (for inventory valuation - WITH profit margin)
-    const calculatedLandedSubtotal = itemsWithDetails.reduce((sum, item) => sum + (item.landedTotal || 0), 0);
-    const subtotal = value.subtotal !== undefined ? value.subtotal : calculatedLandedSubtotal;
+    // 2. Landed Subtotal (for inventory valuation - WITH profit margin)
+    const subtotal = itemsWithDetails.reduce((sum, item) => sum + (item.landedTotal || 0), 0);
+
     const totalDiscount = value.totalDiscount || 0;
     const totalTax = value.totalTax || 0;
     const shippingCost = value.shippingCost || 0;
-    const grandTotal = value.grandTotal !== undefined
-      ? value.grandTotal
-      : Math.max(0, subtotal - totalDiscount + totalTax + shippingCost);
+
+    // Apply discount to both totals (matching confirmation logic)
+    const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
+    const grandTotal = Math.max(0, subtotal - totalDiscount + totalTax + shippingCost);
 
     const cashPayment = Number(value.cashPayment || 0);
     const bankPayment = Number(value.bankPayment || 0);
-    const paidAmount = cashPayment + bankPayment;
-    // Remaining balance should be based on supplierPaymentTotal (what admin owes supplier)
-    const remainingBalance = value.remainingBalance !== undefined
-      ? Number(value.remainingBalance)
-      : Math.max(0, supplierPaymentTotal - paidAmount);
+    const initialPaidAmount = cashPayment + bankPayment;
+
+    // ==========================================
+    // CREDIT APPLICATION: Check if supplier owes admin and auto-apply credit
+    // ==========================================
+    const currentSupplierBalance = await Ledger.getBalance('supplier', supplier._id);
+    let creditApplied = 0;
+    let finalRemainingBalance = Math.max(0, discountedSupplierPaymentTotal - initialPaidAmount);
+
+    // If balance is negative, supplier owes admin - apply credit
+    if (currentSupplierBalance < 0) {
+      const availableCredit = Math.abs(currentSupplierBalance);
+      creditApplied = Math.min(availableCredit, finalRemainingBalance);
+      finalRemainingBalance = Math.max(0, finalRemainingBalance - creditApplied);
+    }
 
     const paymentStatus = value.paymentStatus || (
-      remainingBalance <= 0
+      finalRemainingBalance <= 0
         ? 'paid'
-        : paidAmount > 0
+        : (initialPaidAmount + creditApplied) > 0
           ? 'partial'
           : 'pending'
     );
@@ -627,17 +638,18 @@ router.post('/manual', auth, async (req, res) => {
       totalDiscount,
       totalTax,
       shippingCost,
-      supplierPaymentTotal: supplierPaymentTotal, // What admin owes supplier (NO profit margin)
-      grandTotal: grandTotal, // Landed total (for inventory valuation, WITH profit margin)
+      supplierPaymentTotal: discountedSupplierPaymentTotal, // What admin owes supplier (after discount)
+      grandTotal: grandTotal, // Landed total (for inventory valuation)
       cashPayment,
       bankPayment,
-      remainingBalance,
+      remainingBalance: finalRemainingBalance,
       paymentStatus,
       // Payment details (nested)
       paymentDetails: {
         cashPayment,
         bankPayment,
-        remainingBalance,
+        creditApplied, // Track credit applied
+        remainingBalance: finalRemainingBalance,
         paymentStatus
       },
       // Purchase-specific fields
@@ -659,14 +671,14 @@ router.post('/manual', auth, async (req, res) => {
         transactionType: 'purchase',
         referenceId: dispatchOrder._id,
         referenceModel: 'DispatchOrder',
-        debit: supplierPaymentTotal, // What admin owes supplier (cost × exchange rate, NO profit)
+        debit: discountedSupplierPaymentTotal,
         credit: 0,
         date: dispatchOrder.dispatchDate,
-        description: `Manual Purchase ${dispatchOrder.orderNumber} - Supplier Payment: €${supplierPaymentTotal.toFixed(2)} (Cost ÷ Exchange Rate × Qty), Ledger shows: €${grandTotal.toFixed(2)} ((Cost ÷ Exchange Rate + ${value.percentage || 0}%) × Qty), Discount: €${totalDiscount.toFixed(2)}, Cash: €${cashPayment.toFixed(2)}, Bank: €${bankPayment.toFixed(2)}, Remaining: €${remainingBalance.toFixed(2)}`,
+        description: `Manual Purchase ${dispatchOrder.orderNumber} - Supplier Debt: €${discountedSupplierPaymentTotal.toFixed(2)} (Subtotal: €${supplierPaymentTotal.toFixed(2)}, Discount: €${totalDiscount.toFixed(2)}), Valuation: €${grandTotal.toFixed(2)}, Cash: €${cashPayment.toFixed(2)}, Bank: €${bankPayment.toFixed(2)}, Credit: €${creditApplied.toFixed(2)}, Remaining: €${finalRemainingBalance.toFixed(2)}`,
         paymentDetails: {
           cashPayment: cashPayment,
           bankPayment: bankPayment,
-          remainingBalance: remainingBalance
+          remainingBalance: finalRemainingBalance
         },
         createdBy: req.user._id
       });
@@ -727,6 +739,28 @@ router.post('/manual', auth, async (req, res) => {
       }
     }
 
+    // Create credit application entry if credit was applied
+    if (creditApplied > 0) {
+      try {
+        await Ledger.createEntry({
+          type: 'supplier',
+          entityId: supplier._id,
+          entityModel: 'Supplier',
+          transactionType: 'credit_application',
+          referenceId: dispatchOrder._id,
+          referenceModel: 'DispatchOrder',
+          debit: 0,
+          credit: creditApplied,
+          date: dispatchOrder.dispatchDate,
+          description: `Credit application for Manual Purchase ${dispatchOrder.orderNumber} from existing supplier overpayment`,
+          createdBy: req.user._id
+        });
+        console.log(`[Manual Entry] Created credit application ledger entry: €${creditApplied}`);
+      } catch (creditError) {
+        console.error(`Error creating credit application ledger entry:`, creditError);
+      }
+    }
+
     // Create logistics charge entry (debit) if logistics company and boxes exist
     try {
       if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {
@@ -764,7 +798,7 @@ router.post('/manual', auth, async (req, res) => {
     try {
       await Supplier.findByIdAndUpdate(
         supplier._id,
-        { $inc: { totalPurchases: supplierPaymentTotal, currentBalance: remainingBalance } }
+        { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: finalRemainingBalance } }
       );
     } catch (supplierError) {
       console.error(`Error updating supplier balance:`, supplierError);
