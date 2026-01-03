@@ -16,9 +16,23 @@ const expenseSchema = new mongoose.Schema({
     ref: 'CostType',
     required: true
   },
+  dispatchOrder: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'DispatchOrder'
+  },
   amount: {
     type: Number,
     required: true,
+    min: 0
+  },
+  cashAmount: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  bankAmount: {
+    type: Number,
+    default: 0,
     min: 0
   },
   paymentMethod: {
@@ -82,7 +96,7 @@ const expenseSchema = new mongoose.Schema({
   timestamps: true
 });
 
-expenseSchema.virtual('totalAmount').get(function() {
+expenseSchema.virtual('totalAmount').get(function () {
   return this.amount + (this.taxAmount || 0);
 });
 

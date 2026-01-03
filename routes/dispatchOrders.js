@@ -982,7 +982,7 @@ router.post('/manual', auth, async (req, res) => {
 // Get dispatch orders
 router.get('/', auth, async (req, res) => {
   try {
-    const { page = 1, limit = 20, status, supplier: supplierId, supplierUser } = req.query;
+    const { page = 1, limit = 20, status, supplier: supplierId, supplierUser, search } = req.query;
 
     let query = {};
 
@@ -993,6 +993,25 @@ router.get('/', auth, async (req, res) => {
       query.supplier = supplierId;
     }
     // Admin and other roles can view all dispatch orders
+
+    if (search) {
+      const searchRegex = new RegExp(search, 'i');
+
+      // Find suppliers matching the search query to search by supplier name
+      const matchingSuppliers = await Supplier.find({
+        $or: [
+          { name: searchRegex },
+          { company: searchRegex }
+        ]
+      }).select('_id');
+      const supplierIds = matchingSuppliers.map(s => s._id);
+
+      query.$or = [
+        { orderNumber: searchRegex },
+        { invoiceNumber: searchRegex },
+        { supplier: { $in: supplierIds } }
+      ];
+    }
 
     // Filter by supplierUser (null for manual entries, or specific ID for supplier portal entries)
     if (supplierUser !== undefined) {

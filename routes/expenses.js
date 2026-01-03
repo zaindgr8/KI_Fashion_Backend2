@@ -9,8 +9,11 @@ const router = express.Router();
 const expenseSchema = Joi.object({
   description: Joi.string().min(5).max(200).required(),
   costType: Joi.string().required(),
-  amount: Joi.number().min(0).required(),
-  paymentMethod: Joi.string().valid('cash', 'card', 'bank_transfer', 'cheque', 'online').required(),
+  dispatchOrder: Joi.string().allow(null, '').optional(),
+  amount: Joi.number().min(0).optional(),
+  cashAmount: Joi.number().min(0).optional(),
+  bankAmount: Joi.number().min(0).optional(),
+  paymentMethod: Joi.string().valid('cash', 'card', 'bank_transfer', 'cheque', 'online', 'split').required(),
   expenseDate: Joi.date().default(Date.now),
   vendor: Joi.string().optional(),
   invoiceNumber: Joi.string().optional(),
@@ -65,8 +68,25 @@ router.post('/', auth, async (req, res) => {
 
     const expenseNumber = await generateExpenseNumber();
 
+    const cashAmount = Number(req.body.cashAmount || 0);
+    const bankAmount = Number(req.body.bankAmount || 0);
+    const amount = req.body.amount || (cashAmount + bankAmount);
+
+    let status = 'pending';
+    let approvedBy = undefined;
+
+    if (req.user.role === 'super_admin') {
+      status = 'approved';
+      approvedBy = req.user._id;
+    }
+
     const expense = new Expense({
       ...req.body,
+      amount,
+      cashAmount,
+      bankAmount,
+      status,
+      approvedBy,
       expenseNumber,
       createdBy: req.user._id
     });
@@ -75,6 +95,7 @@ router.post('/', auth, async (req, res) => {
 
     const populatedExpense = await Expense.findById(expense._id)
       .populate('costType', 'id name category')
+      .populate('dispatchOrder', 'orderNumber')
       .populate('createdBy', 'name');
 
     res.status(201).json({
@@ -129,6 +150,7 @@ router.get('/', auth, async (req, res) => {
 
     const expenses = await Expense.find(query)
       .populate('costType', 'id name category')
+      .populate('dispatchOrder', 'orderNumber')
       .populate('createdBy', 'name')
       .populate('approvedBy', 'name')
       .sort({ expenseDate: -1 })
@@ -215,9 +237,23 @@ router.put('/:id', auth, async (req, res) => {
       }
     }
 
+    const cashAmount = req.body.cashAmount !== undefined ? Number(req.body.cashAmount) : undefined;
+    const bankAmount = req.body.bankAmount !== undefined ? Number(req.body.bankAmount) : undefined;
+
+    const updateData = { ...req.body };
+    if (cashAmount !== undefined && bankAmount !== undefined) {
+      updateData.amount = cashAmount + bankAmount;
+    } else if (cashAmount !== undefined || bankAmount !== undefined) {
+      // Need to fetch original to calculate total if only one is provided
+      const existing = await Expense.findById(req.params.id);
+      const finalCash = cashAmount !== undefined ? cashAmount : existing.cashAmount;
+      const finalBank = bankAmount !== undefined ? bankAmount : existing.bankAmount;
+      updateData.amount = finalCash + finalBank;
+    }
+
     const expense = await Expense.findByIdAndUpdate(
       req.params.id,
-      req.body,
+      updateData,
       { new: true, runValidators: true }
     )
       .populate('costType', 'id name category')
