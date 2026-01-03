@@ -68,9 +68,10 @@ router.post('/', auth, async (req, res) => {
 
     const expenseNumber = await generateExpenseNumber();
 
-    const cashAmount = Number(req.body.cashAmount || 0);
-    const bankAmount = Number(req.body.bankAmount || 0);
-    const amount = req.body.amount || (cashAmount + bankAmount);
+    const amount = Number(req.body.amount || 0);
+    const paymentMethod = req.body.paymentMethod;
+    const cashAmount = paymentMethod === 'cash' ? amount : 0;
+    const bankAmount = (paymentMethod !== 'cash' && paymentMethod !== 'split') ? amount : 0;
 
     let status = 'pending';
     let approvedBy = undefined;
@@ -95,7 +96,14 @@ router.post('/', auth, async (req, res) => {
 
     const populatedExpense = await Expense.findById(expense._id)
       .populate('costType', 'id name category')
-      .populate('dispatchOrder', 'orderNumber')
+      .populate({
+        path: 'dispatchOrder',
+        select: 'orderNumber supplier',
+        populate: {
+          path: 'supplier',
+          select: 'name company'
+        }
+      })
       .populate('createdBy', 'name');
 
     res.status(201).json({
@@ -150,7 +158,14 @@ router.get('/', auth, async (req, res) => {
 
     const expenses = await Expense.find(query)
       .populate('costType', 'id name category')
-      .populate('dispatchOrder', 'orderNumber')
+      .populate({
+        path: 'dispatchOrder',
+        select: 'orderNumber supplier',
+        populate: {
+          path: 'supplier',
+          select: 'name company'
+        }
+      })
       .populate('createdBy', 'name')
       .populate('approvedBy', 'name')
       .sort({ expenseDate: -1 })
@@ -237,18 +252,14 @@ router.put('/:id', auth, async (req, res) => {
       }
     }
 
-    const cashAmount = req.body.cashAmount !== undefined ? Number(req.body.cashAmount) : undefined;
-    const bankAmount = req.body.bankAmount !== undefined ? Number(req.body.bankAmount) : undefined;
-
     const updateData = { ...req.body };
-    if (cashAmount !== undefined && bankAmount !== undefined) {
-      updateData.amount = cashAmount + bankAmount;
-    } else if (cashAmount !== undefined || bankAmount !== undefined) {
-      // Need to fetch original to calculate total if only one is provided
-      const existing = await Expense.findById(req.params.id);
-      const finalCash = cashAmount !== undefined ? cashAmount : existing.cashAmount;
-      const finalBank = bankAmount !== undefined ? bankAmount : existing.bankAmount;
-      updateData.amount = finalCash + finalBank;
+
+    if (req.body.amount !== undefined && req.body.paymentMethod !== undefined) {
+      const amount = Number(req.body.amount);
+      const paymentMethod = req.body.paymentMethod;
+      updateData.cashAmount = paymentMethod === 'cash' ? amount : 0;
+      updateData.bankAmount = (paymentMethod !== 'cash' && paymentMethod !== 'split') ? amount : 0;
+      updateData.amount = amount;
     }
 
     const expense = await Expense.findByIdAndUpdate(
