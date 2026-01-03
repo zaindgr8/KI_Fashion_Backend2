@@ -46,13 +46,13 @@ async function convertInventoryProductImages(inventoryItems, usePublicUrls = fal
       if (!item.product.images) {
         item.product.images = [];
       }
-      
+
       // Ensure images is an array
       if (!Array.isArray(item.product.images)) {
         console.warn(`[Inventory] Product ${item.product.name || item.product._id} has non-array images:`, typeof item.product.images);
         item.product.images = [];
       }
-      
+
       if (item.product.images.length > 0) {
         if (usePublicUrls) {
           // Use public URLs directly (bucket is public)
@@ -89,6 +89,9 @@ router.get('/', auth, async (req, res) => {
       page = 1,
       limit = 20,
       search,
+      searchSku,
+      searchProduct,
+      searchSupplier,
       lowStock,
       needsReorder,
       category
@@ -99,10 +102,14 @@ router.get('/', auth, async (req, res) => {
     let inventoryQuery = Inventory.find(query)
       .populate({
         path: 'product',
-        select: 'name sku category brand unit pricing inventory images',
+        select: 'name sku category brand unit pricing inventory images suppliers',
         // Only populate if product exists - this filters out null products
         match: { _id: { $exists: true } },
-        options: { lean: false }
+        options: { lean: false },
+        populate: {
+          path: 'suppliers.supplier',
+          select: 'name companyName'
+        }
       })
       .sort({ 'product.name': 1 });
 
@@ -134,8 +141,44 @@ router.get('/', auth, async (req, res) => {
           return false;
         }
         return item.product.name.toLowerCase().includes(search.toLowerCase()) ||
-               item.product.sku.toLowerCase().includes(search.toLowerCase()) ||
-               (item.product.brand && item.product.brand.toLowerCase().includes(search.toLowerCase()));
+          item.product.sku.toLowerCase().includes(search.toLowerCase()) ||
+          (item.product.brand && item.product.brand.toLowerCase().includes(search.toLowerCase()));
+      });
+    }
+
+    // Filter by SKU
+    if (searchSku) {
+      filteredInventory = filteredInventory.filter(item => {
+        if (!item.product || !item.product.sku) {
+          return false;
+        }
+        return item.product.sku.toLowerCase().includes(searchSku.toLowerCase());
+      });
+    }
+
+    // Filter by product name
+    if (searchProduct) {
+      filteredInventory = filteredInventory.filter(item => {
+        if (!item.product || !item.product.name) {
+          return false;
+        }
+        return item.product.name.toLowerCase().includes(searchProduct.toLowerCase());
+      });
+    }
+
+    // Filter by supplier name
+    if (searchSupplier) {
+      filteredInventory = filteredInventory.filter(item => {
+        if (!item.product || !Array.isArray(item.product.suppliers) || item.product.suppliers.length === 0) {
+          return false;
+        }
+        // Check if any supplier matches the search term
+        return item.product.suppliers.some(s => {
+          const supplier = s.supplier;
+          if (!supplier) return false;
+          const supplierName = supplier.companyName || supplier.name || '';
+          return supplierName.toLowerCase().includes(searchSupplier.toLowerCase());
+        });
       });
     }
 
@@ -153,7 +196,7 @@ router.get('/', auth, async (req, res) => {
     // We need to count after filtering out null products, so we'll use the filtered count
     // Note: This is an approximation since we can't easily count populated nulls in MongoDB
     // A more accurate count would require aggregating, but for pagination this should be close enough
-    const total = filteredInventory.length < limit 
+    const total = filteredInventory.length < limit
       ? filteredInventory.length + ((page - 1) * limit)
       : await Inventory.countDocuments(query);
 
@@ -190,7 +233,7 @@ router.get('/', auth, async (req, res) => {
     // Set GCS_USE_PUBLIC_URLS=false to use signed URLs instead
     const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS !== 'false'; // Default to true (use public URLs for public bucket)
     await convertInventoryProductImages(inventoryData, usePublicUrls);
-    
+
     // Debug: Log sample inventory item after image conversion
     if (inventoryData.length > 0) {
       const sample = inventoryData[0];
@@ -722,7 +765,7 @@ router.get('/catalog-qr', auth, async (req, res) => {
     // Get buyer/distributor info from user
     const user = req.user;
     let buyerId = null;
-    
+
     // Try to get buyer ID from user
     if (user.buyer) {
       buyerId = user.buyer._id || user.buyer;
@@ -754,7 +797,7 @@ router.get('/catalog-qr', auth, async (req, res) => {
 router.get('/:productId/variants', auth, async (req, res) => {
   try {
     const Product = require('../models/Product');
-    
+
     const product = await Product.findById(req.params.productId);
     if (!product) {
       return res.status(404).json({
