@@ -1630,12 +1630,12 @@ router.post('/:id/confirm', auth, async (req, res) => {
           // Create new Product
           // Extract all colors (handle both array and string)
           const colors = Array.isArray(item.primaryColor)
-            ? item.primaryColor.filter(c => c && c.trim()) // Remove empty values
+            ? item.primaryColor.filter(c => c && c.trim())
             : (item.primaryColor ? [item.primaryColor] : []);
 
           // Extract all sizes (handle both array and string)
           const sizes = Array.isArray(item.size)
-            ? item.size.filter(s => s && s.trim()) // Remove empty values
+            ? item.size.filter(s => s && s.trim())
             : (item.size ? [item.size] : []);
 
           // Primary color for specifications (backward compatibility with single string)
@@ -1646,22 +1646,23 @@ router.post('/:id/confirm', auth, async (req, res) => {
             sku: item.productCode.toUpperCase(),
             productCode: item.productCode,
             season: season,
-            category: 'General', // Default category since we no longer use ProductType
+            category: 'General',
             unit: 'piece',
             pricing: {
               costPrice: landedPrice,
-              sellingPrice: landedPrice * 1.2 // Default 20% markup
+              sellingPrice: landedPrice * 1.2
             },
-            color: colors,  // All colors as array
-            size: sizes,    // All sizes as array
+            // Only set color and size if arrays have values
+            ...(colors.length > 0 && { color: colors }),
+            ...(sizes.length > 0 && { size: sizes }),
             specifications: {
-              color: primaryColor,  // First color as string for backward compatibility
+              color: primaryColor,
               material: item.material || undefined
             },
             variantTracking: {
-              enabled: colors.length > 1 || sizes.length > 1, // Enable if multiple variants
-              availableColors: colors,  // All colors
-              availableSizes: sizes     // All sizes
+              enabled: colors.length > 1 || sizes.length > 1,
+              ...(colors.length > 0 && { availableColors: colors }),
+              ...(sizes.length > 0 && { availableSizes: sizes })
             },
             createdBy: req.user._id
           });
