@@ -84,6 +84,7 @@ const dispatchOrderSchema = new mongoose.Schema({
   totalQuantity: { type: Number, default: 0 }, // Made optional with default (calculated in pre-save)
   totalBoxes: { type: Number, default: 0 }, // Made optional with default (calculated in pre-save)
   totalWeight: { type: Number, default: 0 }, // Total weight of entire order
+  isTotalBoxesConfirmed: { type: Boolean, default: false }, // Persist box confirmation status
   estimatedCost: { type: Number, default: 0 }, // Estimated logistics cost
   status: {
     type: String,

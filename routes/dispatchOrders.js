@@ -1204,7 +1204,18 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
       return sendResponse.error(res, 'Only admin users can submit orders for approval', 403);
     }
 
-    const { cashPayment = 0, bankPayment = 0, exchangeRate, percentage, discount = 0, items, totalBoxes } = req.body;
+    const {
+      cashPayment = 0,
+      bankPayment = 0,
+      exchangeRate,
+      percentage,
+      discount = 0,
+      items,
+      totalBoxes,
+      logisticsCompany,
+      dispatchDate,
+      isTotalBoxesConfirmed
+    } = req.body;
 
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
       .populate('supplier')
@@ -1243,28 +1254,45 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
       dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
     }
 
-    // Verify req.body.items exists and matching length if provided
-    const requestItems = (Array.isArray(items) && items.length === dispatchOrder.items.length)
-      ? items
-      : null;
+    // Update logistics and date if provided
+    if (logisticsCompany) {
+      dispatchOrder.logisticsCompany = logisticsCompany;
+      dispatchOrder.markModified('logisticsCompany');
+    }
+    if (dispatchDate) {
+      dispatchOrder.dispatchDate = new Date(dispatchDate);
+      dispatchOrder.markModified('dispatchDate');
+    }
+    if (isTotalBoxesConfirmed !== undefined) {
+      dispatchOrder.isTotalBoxesConfirmed = !!isTotalBoxesConfirmed;
+      dispatchOrder.markModified('isTotalBoxesConfirmed');
+    }
 
-    // Update dispatchOrder items with edits from request (if any)
-    if (requestItems) {
-      dispatchOrder.items.forEach((item, index) => {
-        const reqItem = requestItems[index];
-        if (reqItem) {
-          if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
-          if (reqItem.productName) item.productName = reqItem.productName;
-          if (reqItem.productCode) item.productCode = reqItem.productCode.trim();
-          if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
-          if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
-          if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
-          if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
-          if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
-          if (reqItem.packets) item.packets = reqItem.packets;
-          if (reqItem.boxes) item.boxes = reqItem.boxes;
-        }
-      });
+    // Update items - handle structural changes (add/remove)
+    if (Array.isArray(items)) {
+      if (items.length === dispatchOrder.items.length) {
+        // Standard mapping if length matches (preserves item IDs)
+        dispatchOrder.items.forEach((item, index) => {
+          const reqItem = items[index];
+          if (reqItem) {
+            if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
+            if (reqItem.productName) item.productName = reqItem.productName;
+            if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
+            if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
+            if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
+            if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
+            if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
+            if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
+            if (reqItem.packets) item.packets = reqItem.packets;
+            if (reqItem.boxes) item.boxes = reqItem.boxes;
+          }
+        });
+        dispatchOrder.markModified('items');
+      } else {
+        // If items were added or removed, replace the array
+        dispatchOrder.items = items;
+        dispatchOrder.markModified('items');
+      }
     }
 
     // Calculate confirmed quantities (same as confirm endpoint)
@@ -1373,7 +1401,18 @@ router.post('/:id/confirm', auth, async (req, res) => {
       return sendResponse.error(res, 'Only super-admin can confirm dispatch orders', 403);
     }
 
-    const { cashPayment = 0, bankPayment = 0, exchangeRate, percentage, discount = 0 } = req.body;
+    const {
+      cashPayment = 0,
+      bankPayment = 0,
+      exchangeRate,
+      percentage,
+      discount = 0,
+      items,
+      totalBoxes,
+      logisticsCompany,
+      dispatchDate,
+      isTotalBoxesConfirmed
+    } = req.body;
 
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
       .populate('supplier')
@@ -1407,23 +1446,49 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.exchangeRate = finalExchangeRate;
     dispatchOrder.percentage = finalPercentage;
 
-    // Verify req.body.items exists and matching length if provided
-    const requestItems = (Array.isArray(req.body.items) && req.body.items.length === dispatchOrder.items.length)
-      ? req.body.items
-      : null;
+    // Update logistics and date if provided (Super-admin can refine these during confirmation)
+    if (logisticsCompany) {
+      dispatchOrder.logisticsCompany = logisticsCompany;
+      dispatchOrder.markModified('logisticsCompany');
+    }
+    if (dispatchDate) {
+      dispatchOrder.dispatchDate = new Date(dispatchDate);
+      dispatchOrder.markModified('dispatchDate');
+    }
+    if (isTotalBoxesConfirmed !== undefined) {
+      dispatchOrder.isTotalBoxesConfirmed = !!isTotalBoxesConfirmed;
+      dispatchOrder.markModified('isTotalBoxesConfirmed');
+    }
+    if (totalBoxes !== undefined) {
+      dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
+      dispatchOrder.markModified('totalBoxes');
+    }
 
-    // Update dispatchOrder items with edits from request (if any) BEFORE processing
-    if (requestItems) {
-      dispatchOrder.items.forEach((item, index) => {
-        const reqItem = requestItems[index];
-        if (reqItem) {
-          if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
-          if (reqItem.productName) item.productName = reqItem.productName;
-          if (reqItem.productCode) item.productCode = reqItem.productCode.trim(); // Sanitize code here!
-          if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
-          // Update other fields as needed
-        }
-      });
+    // Update items - handle structural changes (add/remove)
+    if (Array.isArray(items)) {
+      if (items.length === dispatchOrder.items.length) {
+        // Standard mapping if length matches (preserves item IDs)
+        dispatchOrder.items.forEach((item, index) => {
+          const reqItem = items[index];
+          if (reqItem) {
+            if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
+            if (reqItem.productName) item.productName = reqItem.productName;
+            if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
+            if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
+            if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
+            if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
+            if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
+            if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
+            if (reqItem.packets) item.packets = reqItem.packets;
+            if (reqItem.boxes) item.boxes = reqItem.boxes;
+          }
+        });
+        dispatchOrder.markModified('items');
+      } else {
+        // If items were added or removed, replace the array
+        dispatchOrder.items = items;
+        dispatchOrder.markModified('items');
+      }
       // Save these updates so the order reflects what was confirmed
       await dispatchOrder.save();
     }
