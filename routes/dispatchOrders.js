@@ -1628,10 +1628,19 @@ router.post('/:id/confirm', auth, async (req, res) => {
 
         if (!product) {
           // Create new Product
-          // Handle primaryColor: can be array or string
-          const colorForProduct = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
-            ? item.primaryColor[0]  // Use first color as main color
-            : (typeof item.primaryColor === 'string' ? item.primaryColor : undefined);
+          // Extract all colors (handle both array and string)
+          const colors = Array.isArray(item.primaryColor)
+            ? item.primaryColor.filter(c => c && c.trim()) // Remove empty values
+            : (item.primaryColor ? [item.primaryColor] : []);
+
+          // Extract all sizes (handle both array and string)
+          const sizes = Array.isArray(item.size)
+            ? item.size.filter(s => s && s.trim()) // Remove empty values
+            : (item.size ? [item.size] : []);
+
+          // Primary color and size for simple fields (backward compatibility)
+          const primaryColor = colors.length > 0 ? colors[0] : undefined;
+          const primarySize = sizes.length > 0 ? sizes[0] : undefined;
 
           product = new Product({
             name: item.productName,
@@ -1644,10 +1653,16 @@ router.post('/:id/confirm', auth, async (req, res) => {
               costPrice: landedPrice,
               sellingPrice: landedPrice * 1.2 // Default 20% markup
             },
-            color: colorForProduct,  // Single color for main field
+            color: primaryColor,  // First color for simple field
+            size: primarySize,    // First size for simple field
             specifications: {
-              color: colorForProduct,  // Single color string (Product model expects string, not array)
+              color: primaryColor,
               material: item.material || undefined
+            },
+            variantTracking: {
+              enabled: colors.length > 1 || sizes.length > 1, // Enable if multiple variants
+              availableColors: colors,  // All colors
+              availableSizes: sizes     // All sizes
             },
             createdBy: req.user._id
           });
