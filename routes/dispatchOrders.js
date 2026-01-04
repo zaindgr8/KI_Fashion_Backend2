@@ -1225,8 +1225,8 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    if (dispatchOrder.status !== 'pending') {
-      return sendResponse.error(res, 'Only pending dispatch orders can be submitted for approval', 400);
+    if (dispatchOrder.status !== 'pending' && dispatchOrder.status !== 'pending-approval') {
+      return sendResponse.error(res, 'Only pending or pending-approval dispatch orders can be submitted for approval', 400);
     }
 
     // Validate and set exchange rate and percentage from admin input
