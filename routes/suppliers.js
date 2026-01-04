@@ -179,7 +179,30 @@ router.get('/:id', auth, async (req, res) => {
 // Update supplier
 router.put('/:id', auth, async (req, res) => {
   try {
-    const { error } = supplierSchema.validate(req.body);
+    // Use a more flexible schema for updates (all fields optional)
+    const updateSupplierSchema = Joi.object({
+      name: Joi.string().min(2).max(100).optional(),
+      company: Joi.string().max(100).optional(),
+      email: Joi.string().email().optional(),
+      phone: Joi.string().optional(),
+      phoneAreaCode: Joi.string().max(5).optional(),
+      alternatePhone: Joi.string().optional(),
+      alternatePhoneAreaCode: Joi.string().max(5).optional(),
+      address: Joi.object({
+        street: Joi.string().optional(),
+        city: Joi.string().optional(),
+        state: Joi.string().optional(),
+        zipCode: Joi.string().optional(),
+        country: Joi.string().default('Pakistan')
+      }).optional(),
+      taxNumber: Joi.string().optional(),
+      paymentTerms: Joi.string().valid('cash', 'net15', 'net30', 'net45', 'net60').optional(),
+      creditLimit: Joi.number().min(0).optional(),
+      rating: Joi.number().min(1).max(5).optional(),
+      notes: Joi.string().optional()
+    });
+
+    const { error } = updateSupplierSchema.validate(req.body);
     if (error) {
       return res.status(400).json({
         success: false,

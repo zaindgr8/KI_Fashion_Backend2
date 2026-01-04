@@ -390,6 +390,7 @@ function buildUserPayload(userDoc) {
     role: user.role,
     permissions: user.permissions,
     phone: user.phone,
+    phoneAreaCode: user.phoneAreaCode,
     address: user.address,
     portalAccess: user.portalAccess || [],
     supplierId: user.supplier?._id || user.supplier,
@@ -411,8 +412,138 @@ function simplifyRelated(related) {
     name: obj.name,
     company: obj.company,
     email: obj.email,
-    phone: obj.phone
+    phone: obj.phone,
+    phoneAreaCode: obj.phoneAreaCode
   };
 }
+
+// Update user (self-update or admin update)
+router.put('/users/:id', auth, async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const requestingUserId = req.user._id.toString();
+    
+    // Users can only update themselves unless they're admin
+    if (userId !== requestingUserId && req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only update your own profile'
+      });
+    }
+
+    const updateSchema = Joi.object({
+      name: Joi.string().min(2).max(100).optional(),
+      email: Joi.string().email().optional(),
+      phone: Joi.string().optional(),
+      phoneAreaCode: Joi.string().max(5).optional(),
+      address: Joi.string().optional()
+    });
+
+    const { error } = updateSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message
+      });
+    }
+
+    // Check if email is being changed and if it's already taken
+    if (req.body.email) {
+      const existingUser = await User.findOne({ 
+        email: req.body.email.toLowerCase(),
+        _id: { $ne: userId }
+      });
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email already in use'
+        });
+      }
+      req.body.email = req.body.email.toLowerCase();
+    }
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      req.body,
+      { new: true, runValidators: true }
+    )
+      .populate(['supplier', 'buyer'])
+      .select('-password');
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'User updated successfully',
+      data: buildUserPayload(user)
+    });
+
+  } catch (error) {
+    console.error('Update user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Change password
+router.post('/change-password', auth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password and new password are required'
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'New password must be at least 6 characters long'
+      });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Verify current password
+    const isMatch = await user.comparePassword(currentPassword);
+    if (!isMatch) {
+      return res.status(400).json({
+        success: false,
+        message: 'Current password is incorrect'
+      });
+    }
+
+    // Update password
+    user.password = newPassword;
+    await user.save();
+
+    res.json({
+      success: true,
+      message: 'Password changed successfully'
+    });
+
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
 
 module.exports = router;
