@@ -1,8 +1,8 @@
 // Application Constants
 
 const USER_ROLES = {
-  ADMIN: 'admin',
-  MANAGER: 'manager',
+  ADMIN: 'super-admin',
+  MANAGER: 'admin',
   EMPLOYEE: 'employee',
   ACCOUNTANT: 'accountant'
 };

@@ -29,7 +29,7 @@ const productSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
   sku: Joi.string().required().uppercase(),
   description: Joi.string().optional(),
-  productType: Joi.string().required(),
+  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season')).min(1).required(),
   category: Joi.string().required(),
   brand: Joi.string().optional(),
   unit: Joi.string().valid('piece', 'kg', 'g', 'liter', 'ml', 'meter', 'cm', 'dozen', 'box', 'pack').default('piece'),
@@ -114,7 +114,6 @@ async function attachQrCode(product, userId) {
 }
 
 const PRODUCT_POPULATE_PATHS = [
-  { path: 'productType', select: 'name attributes' },
   { path: 'suppliers.supplier', select: 'name company phone email' },
   { path: 'createdBy', select: 'name' },
   { path: 'qrCode.generatedBy', select: 'name' }
@@ -263,11 +262,10 @@ router.get('/public', async (req, res) => {
 
     // Select only public fields (exclude pricing)
     // Note: _id is included by default in MongoDB, but explicitly including it for clarity
-    const selectFields = '_id name sku description category brand images productType unit isActive createdAt';
+    const selectFields = '_id name sku description category brand images season unit isActive createdAt';
 
     let productsQuery = Product.find(query)
       .select(selectFields)
-      .populate('productType', 'name')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
@@ -335,7 +333,7 @@ router.get('/', auth, async (req, res) => {
       limit = 20,
       search,
       category,
-      productType,
+      season,
       isActive,
       lowStock,
       supplier,
@@ -355,7 +353,11 @@ router.get('/', auth, async (req, res) => {
     }
 
     if (category) query.category = category;
-    if (productType) query.productType = productType;
+    if (season) {
+      // Handle both single season and array of seasons
+      const seasonArray = Array.isArray(season) ? season : [season];
+      query.season = { $in: seasonArray };
+    }
     if (isActive !== undefined) query.isActive = isActive === 'true';
 
     // Support filtering by supplier (multiple ways)
@@ -854,7 +856,7 @@ router.delete('/:id/images', auth, async (req, res) => {
 // Enable variant tracking for a product (Admin only)
 router.patch('/:id/enable-variants', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admins can enable variant tracking'
@@ -924,7 +926,7 @@ router.patch('/:id/enable-variants', auth, async (req, res) => {
 // Disable variant tracking for a product (Admin only)
 router.patch('/:id/disable-variants', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admins can disable variant tracking'
@@ -1033,7 +1035,7 @@ router.get('/:id/variants', auth, async (req, res) => {
 // Adjust variant stock (Admin only)
 router.post('/:id/variants/adjust', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admins can adjust variant stock'

@@ -8,11 +8,11 @@ const Return = require('../models/Return');
 const Ledger = require('../models/Ledger');
 const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
-const ProductType = require('../models/ProductType');
 const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 const { generateDispatchOrderQR, buildDispatchOrderQrPayload } = require('../utils/qrCode');
 const { validateImageFile, uploadImage, generateSignedUrl, generateSignedUrls, generateSignedUploadUrl, verifyFileExists, deleteImage } = require('../utils/imageUpload');
+const BalanceService = require('../services/BalanceService');
 
 const router = express.Router();
 
@@ -211,7 +211,7 @@ const packetSchema = Joi.object({
 const dispatchItemSchema = Joi.object({
   productName: Joi.string().min(1).required(),
   productCode: Joi.string().min(1).required(),
-  productType: Joi.string().required(),
+  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season')).min(1).required(),
   costPrice: Joi.number().min(0).required(),
   primaryColor: Joi.array().items(Joi.string()).optional(),
   size: Joi.array().items(Joi.string()).optional(),
@@ -267,7 +267,7 @@ const manualEntryItemSchema = Joi.object({
   product: Joi.string().optional(), // Product reference
   productName: Joi.string().optional(), // For new products
   productCode: Joi.string().optional(), // For new products
-  productType: Joi.string().optional(), // For new products
+  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season')).min(1).optional(), // For new products
   costPrice: Joi.number().min(0).optional(), // For new products
   primaryColor: Joi.alternatives().try(
     Joi.string().allow(null, ''),
@@ -472,7 +472,6 @@ router.post('/', auth, async (req, res) => {
       { path: 'supplier', select: 'name company' },
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' },
       { path: 'qrCode.generatedBy', select: 'name' }
     ]);
 
@@ -491,7 +490,7 @@ router.post('/', auth, async (req, res) => {
 router.post('/manual', auth, async (req, res) => {
   try {
     // Only admin/manager can create manual entries
-    if (!['admin', 'manager'].includes(req.user.role)) {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can create manual entries', 403);
     }
 
@@ -515,7 +514,7 @@ router.post('/manual', auth, async (req, res) => {
     const itemsWithDetails = [];
     for (const item of value.items) {
       let product = null;
-      let productType = null;
+      let season = null;
 
       // If product reference provided, use it
       if (item.product) {
@@ -523,7 +522,7 @@ router.post('/manual', auth, async (req, res) => {
         if (!product) {
           return sendResponse.error(res, `Product not found: ${item.product}`, 400);
         }
-        productType = product.productType;
+        season = product.season;
       } else if (item.productCode) {
         // Try to find existing product by code
         product = await Product.findOne({
@@ -534,12 +533,12 @@ router.post('/manual', auth, async (req, res) => {
         });
 
         if (product) {
-          productType = product.productType;
-        } else if (item.productType) {
-          // New product - use provided productType
-          productType = item.productType;
+          season = product.season;
+        } else if (item.season && Array.isArray(item.season) && item.season.length > 0) {
+          // New product - use provided season
+          season = item.season;
         } else {
-          return sendResponse.error(res, `Product type required for new product: ${item.productCode}`, 400);
+          return sendResponse.error(res, `Season required for new product: ${item.productCode}`, 400);
         }
       } else {
         return sendResponse.error(res, 'Either product reference or productCode is required', 400);
@@ -563,7 +562,7 @@ router.post('/manual', auth, async (req, res) => {
         product: product ? product._id : undefined,
         productName: item.productName || (product ? product.name : undefined),
         productCode: item.productCode || (product ? (product.productCode || product.sku) : undefined),
-        productType: productType,
+        season: season,
         costPrice: costPrice,
         primaryColor: item.primaryColor || (product ? product.color : undefined),
         material: item.material || (product ? product.specifications?.material : undefined),
@@ -577,36 +576,46 @@ router.post('/manual', auth, async (req, res) => {
     }
 
     // Calculate totals
-    // Supplier payment total (what admin owes supplier - NO profit margin)
-    // Formula: (cost price / exchange rate) × quantity
+    // 1. Supplier payment total (what admin owes supplier - NO profit margin)
+    // Formula: cost price × quantity (Raw Currency)
     const supplierPaymentTotal = itemsWithDetails.reduce((sum, item) => {
       const costPrice = item.costPrice || 0;
-      const exchangeRate = value.exchangeRate || 1.0;
-      return sum + ((costPrice / exchangeRate) * item.quantity);
+      return sum + (costPrice * item.quantity);
     }, 0);
 
-    // Landed total (for inventory valuation - WITH profit margin)
-    const calculatedLandedSubtotal = itemsWithDetails.reduce((sum, item) => sum + (item.landedTotal || 0), 0);
-    const subtotal = value.subtotal !== undefined ? value.subtotal : calculatedLandedSubtotal;
+    // 2. Landed Subtotal (for inventory valuation - WITH profit margin)
+    const subtotal = itemsWithDetails.reduce((sum, item) => sum + (item.landedTotal || 0), 0);
+
     const totalDiscount = value.totalDiscount || 0;
     const totalTax = value.totalTax || 0;
     const shippingCost = value.shippingCost || 0;
-    const grandTotal = value.grandTotal !== undefined
-      ? value.grandTotal
-      : Math.max(0, subtotal - totalDiscount + totalTax + shippingCost);
+
+    // Apply discount to both totals (matching confirmation logic)
+    const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
+    const grandTotal = Math.max(0, subtotal - totalDiscount + totalTax + shippingCost);
 
     const cashPayment = Number(value.cashPayment || 0);
     const bankPayment = Number(value.bankPayment || 0);
-    const paidAmount = cashPayment + bankPayment;
-    // Remaining balance should be based on supplierPaymentTotal (what admin owes supplier)
-    const remainingBalance = value.remainingBalance !== undefined
-      ? Number(value.remainingBalance)
-      : Math.max(0, supplierPaymentTotal - paidAmount);
+    const initialPaidAmount = cashPayment + bankPayment;
+
+    // ==========================================
+    // CREDIT APPLICATION: Check if supplier owes admin and auto-apply credit
+    // ==========================================
+    const currentSupplierBalance = await Ledger.getBalance('supplier', supplier._id);
+    let creditApplied = 0;
+    let finalRemainingBalance = Math.max(0, discountedSupplierPaymentTotal - initialPaidAmount);
+
+    // If balance is negative, supplier owes admin - apply credit
+    if (currentSupplierBalance < 0) {
+      const availableCredit = Math.abs(currentSupplierBalance);
+      creditApplied = Math.min(availableCredit, finalRemainingBalance);
+      finalRemainingBalance = Math.max(0, finalRemainingBalance - creditApplied);
+    }
 
     const paymentStatus = value.paymentStatus || (
-      remainingBalance <= 0
+      finalRemainingBalance <= 0
         ? 'paid'
-        : paidAmount > 0
+        : (initialPaidAmount + creditApplied) > 0
           ? 'partial'
           : 'pending'
     );
@@ -629,17 +638,18 @@ router.post('/manual', auth, async (req, res) => {
       totalDiscount,
       totalTax,
       shippingCost,
-      supplierPaymentTotal: supplierPaymentTotal, // What admin owes supplier (NO profit margin)
-      grandTotal: grandTotal, // Landed total (for inventory valuation, WITH profit margin)
+      supplierPaymentTotal: discountedSupplierPaymentTotal, // What admin owes supplier (after discount)
+      grandTotal: grandTotal, // Landed total (for inventory valuation)
       cashPayment,
       bankPayment,
-      remainingBalance,
+      remainingBalance: finalRemainingBalance,
       paymentStatus,
       // Payment details (nested)
       paymentDetails: {
         cashPayment,
         bankPayment,
-        remainingBalance,
+        creditApplied, // Track credit applied
+        remainingBalance: finalRemainingBalance,
         paymentStatus
       },
       // Purchase-specific fields
@@ -661,14 +671,14 @@ router.post('/manual', auth, async (req, res) => {
         transactionType: 'purchase',
         referenceId: dispatchOrder._id,
         referenceModel: 'DispatchOrder',
-        debit: supplierPaymentTotal, // What admin owes supplier (cost × exchange rate, NO profit)
+        debit: discountedSupplierPaymentTotal,
         credit: 0,
         date: dispatchOrder.dispatchDate,
-        description: `Manual Purchase ${dispatchOrder.orderNumber} - Supplier Payment: €${supplierPaymentTotal.toFixed(2)} (Cost ÷ Exchange Rate × Qty), Ledger shows: €${grandTotal.toFixed(2)} ((Cost ÷ Exchange Rate + ${value.percentage || 0}%) × Qty), Discount: €${totalDiscount.toFixed(2)}, Cash: €${cashPayment.toFixed(2)}, Bank: €${bankPayment.toFixed(2)}, Remaining: €${remainingBalance.toFixed(2)}`,
+        description: `Manual Purchase ${dispatchOrder.orderNumber} - Supplier Debt: €${discountedSupplierPaymentTotal.toFixed(2)} (Subtotal: €${supplierPaymentTotal.toFixed(2)}, Discount: €${totalDiscount.toFixed(2)}), Valuation: €${grandTotal.toFixed(2)}, Cash: €${cashPayment.toFixed(2)}, Bank: €${bankPayment.toFixed(2)}, Credit: €${creditApplied.toFixed(2)}, Remaining: €${finalRemainingBalance.toFixed(2)}`,
         paymentDetails: {
           cashPayment: cashPayment,
           bankPayment: bankPayment,
-          remainingBalance: remainingBalance
+          remainingBalance: finalRemainingBalance
         },
         createdBy: req.user._id
       });
@@ -729,6 +739,28 @@ router.post('/manual', auth, async (req, res) => {
       }
     }
 
+    // Create credit application entry if credit was applied
+    if (creditApplied > 0) {
+      try {
+        await Ledger.createEntry({
+          type: 'supplier',
+          entityId: supplier._id,
+          entityModel: 'Supplier',
+          transactionType: 'credit_application',
+          referenceId: dispatchOrder._id,
+          referenceModel: 'DispatchOrder',
+          debit: 0,
+          credit: creditApplied,
+          date: dispatchOrder.dispatchDate,
+          description: `Credit application for Manual Purchase ${dispatchOrder.orderNumber} from existing supplier overpayment`,
+          createdBy: req.user._id
+        });
+        console.log(`[Manual Entry] Created credit application ledger entry: €${creditApplied}`);
+      } catch (creditError) {
+        console.error(`Error creating credit application ledger entry:`, creditError);
+      }
+    }
+
     // Create logistics charge entry (debit) if logistics company and boxes exist
     try {
       if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {
@@ -766,7 +798,7 @@ router.post('/manual', auth, async (req, res) => {
     try {
       await Supplier.findByIdAndUpdate(
         supplier._id,
-        { $inc: { totalPurchases: supplierPaymentTotal, currentBalance: remainingBalance } }
+        { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: finalRemainingBalance } }
       );
     } catch (supplierError) {
       console.error(`Error updating supplier balance:`, supplierError);
@@ -779,9 +811,8 @@ router.post('/manual', auth, async (req, res) => {
       for (const item of dispatchOrder.items) {
         if (!item.product) {
           // Create product if it doesn't exist
-          const productType = await ProductType.findById(item.productType);
-          if (!productType) {
-            console.warn(`ProductType not found for item: ${item.productCode}`);
+          if (!item.season || !Array.isArray(item.season) || item.season.length === 0) {
+            console.warn(`Season required for item: ${item.productCode}`);
             continue;
           }
 
@@ -794,8 +825,8 @@ router.post('/manual', auth, async (req, res) => {
             name: item.productName || 'Unknown Product',
             sku: item.productCode?.toUpperCase() || 'UNKNOWN',
             productCode: item.productCode,
-            productType: item.productType,
-            category: productType.category || 'General',
+            season: item.season,
+            category: 'General', // Default category since we no longer use ProductType
             unit: 'piece',
             pricing: {
               costPrice: item.costPrice || (item.landedTotal / item.quantity),
@@ -933,7 +964,6 @@ router.post('/manual', auth, async (req, res) => {
     await dispatchOrder.populate([
       { path: 'supplier', select: 'name company phone email address' },
       { path: 'items.product', select: 'name sku unit images color size productCode pricing' },
-      { path: 'items.productType', select: 'name category' },
       { path: 'createdBy', select: 'name email' },
       { path: 'confirmedBy', select: 'name' }
     ]);
@@ -952,7 +982,7 @@ router.post('/manual', auth, async (req, res) => {
 // Get dispatch orders
 router.get('/', auth, async (req, res) => {
   try {
-    const { page = 1, limit = 20, status, supplier: supplierId, supplierUser } = req.query;
+    const { page = 1, limit = 20, status, supplier: supplierId, supplierUser, search } = req.query;
 
     let query = {};
 
@@ -964,6 +994,25 @@ router.get('/', auth, async (req, res) => {
     }
     // Admin and other roles can view all dispatch orders
 
+    if (search) {
+      const searchRegex = new RegExp(search, 'i');
+
+      // Find suppliers matching the search query to search by supplier name
+      const matchingSuppliers = await Supplier.find({
+        $or: [
+          { name: searchRegex },
+          { company: searchRegex }
+        ]
+      }).select('_id');
+      const supplierIds = matchingSuppliers.map(s => s._id);
+
+      query.$or = [
+        { orderNumber: searchRegex },
+        { invoiceNumber: searchRegex },
+        { supplier: { $in: supplierIds } }
+      ];
+    }
+
     // Filter by supplierUser (null for manual entries, or specific ID for supplier portal entries)
     if (supplierUser !== undefined) {
       if (supplierUser === 'null' || supplierUser === null) {
@@ -974,7 +1023,13 @@ router.get('/', auth, async (req, res) => {
     }
 
     if (status) {
-      query.status = status;
+      // Support comma-separated statuses for multiple status filtering
+      const statusArray = status.split(',').map(s => s.trim()).filter(Boolean);
+      if (statusArray.length === 1) {
+        query.status = statusArray[0];
+      } else if (statusArray.length > 1) {
+        query.status = { $in: statusArray };
+      }
     }
 
     const orders = await DispatchOrder.find(query)
@@ -983,7 +1038,6 @@ router.get('/', auth, async (req, res) => {
       .populate('createdBy', 'name')
       .populate('confirmedBy', 'name')
       .populate('items.product', 'name sku unit images color size productCode pricing')
-      .populate('items.productType', 'name category')
       .populate('returnedItems.returnedBy', 'name')
       .populate('qrCode.generatedBy', 'name')
       .sort({ createdAt: -1 })
@@ -1076,7 +1130,6 @@ router.get('/:id', auth, async (req, res) => {
       .populate('createdBy', 'name')
       .populate('confirmedBy', 'name')
       .populate('items.product', 'name sku unit images color size productCode pricing')
-      .populate('items.productType', 'name category')
       .populate('returnedItems.returnedBy', 'name')
       .populate('qrCode.generatedBy', 'name')
       .lean();
@@ -1143,15 +1196,26 @@ router.patch('/:id/status', auth, async (req, res) => {
   }
 });
 
-// Confirm dispatch order (Admin only)
-router.post('/:id/confirm', auth, async (req, res) => {
+// Submit dispatch order for approval (Admin only)
+router.post('/:id/submit-approval', auth, async (req, res) => {
   try {
-    // Only admin/manager can confirm dispatch orders
-    if (!['admin', 'manager'].includes(req.user.role)) {
-      return sendResponse.error(res, 'Only admins and managers can confirm dispatch orders', 403);
+    // Only admin can submit for approval
+    if (req.user.role !== 'admin') {
+      return sendResponse.error(res, 'Only admin users can submit orders for approval', 403);
     }
 
-    const { cashPayment = 0, bankPayment = 0, exchangeRate, percentage, discount = 0 } = req.body;
+    const {
+      cashPayment = 0,
+      bankPayment = 0,
+      exchangeRate,
+      percentage,
+      discount = 0,
+      items,
+      totalBoxes,
+      logisticsCompany,
+      dispatchDate,
+      isTotalBoxesConfirmed
+    } = req.body;
 
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
       .populate('supplier')
@@ -1161,8 +1225,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    if (dispatchOrder.status !== 'pending') {
-      return sendResponse.error(res, 'Only pending dispatch orders can be confirmed', 400);
+    if (dispatchOrder.status !== 'pending' && dispatchOrder.status !== 'pending-approval') {
+      return sendResponse.error(res, 'Only pending or pending-approval dispatch orders can be submitted for approval', 400);
     }
 
     // Validate and set exchange rate and percentage from admin input
@@ -1185,23 +1249,246 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.exchangeRate = finalExchangeRate;
     dispatchOrder.percentage = finalPercentage;
 
-    // Verify req.body.items exists and matching length if provided
-    const requestItems = (Array.isArray(req.body.items) && req.body.items.length === dispatchOrder.items.length)
-      ? req.body.items
-      : null;
+    // Update total boxes if provided
+    if (totalBoxes !== undefined && totalBoxes !== null) {
+      dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
+    }
 
-    // Update dispatchOrder items with edits from request (if any) BEFORE processing
-    if (requestItems) {
-      dispatchOrder.items.forEach((item, index) => {
-        const reqItem = requestItems[index];
-        if (reqItem) {
-          if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
-          if (reqItem.productName) item.productName = reqItem.productName;
-          if (reqItem.productCode) item.productCode = reqItem.productCode.trim(); // Sanitize code here!
-          if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
-          // Update other fields as needed
-        }
-      });
+    // Update logistics and date if provided
+    if (logisticsCompany) {
+      dispatchOrder.logisticsCompany = logisticsCompany;
+      dispatchOrder.markModified('logisticsCompany');
+    }
+    if (dispatchDate) {
+      dispatchOrder.dispatchDate = new Date(dispatchDate);
+      dispatchOrder.markModified('dispatchDate');
+    }
+    if (isTotalBoxesConfirmed !== undefined) {
+      dispatchOrder.isTotalBoxesConfirmed = !!isTotalBoxesConfirmed;
+      dispatchOrder.markModified('isTotalBoxesConfirmed');
+    }
+
+    // Update items - handle structural changes (add/remove)
+    if (Array.isArray(items)) {
+      if (items.length === dispatchOrder.items.length) {
+        // Standard mapping if length matches (preserves item IDs)
+        dispatchOrder.items.forEach((item, index) => {
+          const reqItem = items[index];
+          if (reqItem) {
+            if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
+            if (reqItem.productName) item.productName = reqItem.productName;
+            if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
+            if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
+            if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
+            if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
+            if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
+            if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
+            if (reqItem.packets) item.packets = reqItem.packets;
+            if (reqItem.boxes) item.boxes = reqItem.boxes;
+          }
+        });
+        dispatchOrder.markModified('items');
+      } else {
+        // If items were added or removed, replace the array
+        dispatchOrder.items = items;
+        dispatchOrder.markModified('items');
+      }
+    }
+
+    // Calculate confirmed quantities (same as confirm endpoint)
+    const confirmedQuantities = dispatchOrder.items.map((item, index) => {
+      const returnedItems = dispatchOrder.returnedItems || [];
+      const totalReturned = returnedItems
+        .filter(returned => returned.itemIndex === index)
+        .reduce((sum, returned) => sum + returned.quantity, 0);
+
+      const confirmedQty = Math.max(0, (item.quantity || 0) - totalReturned);
+
+      return {
+        itemIndex: index,
+        quantity: confirmedQty
+      };
+    });
+
+    // Calculate supplier payment amount and landed price for each item
+    let supplierPaymentTotal = 0;
+    let landedPriceTotal = 0;
+    const itemsWithPrices = dispatchOrder.items.map((item, index) => {
+      const costPrice = item.costPrice || 0;
+      const confirmedQty = confirmedQuantities[index].quantity;
+
+      const supplierPaymentAmount = costPrice;
+      const supplierPaymentItemTotal = supplierPaymentAmount * confirmedQty;
+      supplierPaymentTotal += supplierPaymentItemTotal;
+
+      const landedPrice = (costPrice / finalExchangeRate) * (1 + (finalPercentage / 100));
+      const landedPriceItemTotal = landedPrice * confirmedQty;
+      landedPriceTotal += landedPriceItemTotal;
+
+      return {
+        ...item.toObject(),
+        supplierPaymentAmount,
+        landedPrice,
+        confirmedQuantity: confirmedQty
+      };
+    });
+
+    // Get discount from order or from request
+    const totalDiscount = parseFloat(discount) !== undefined && discount !== null
+      ? parseFloat(discount)
+      : (dispatchOrder.totalDiscount || 0);
+
+    // Apply discount to supplierPaymentTotal
+    const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
+
+    const subtotal = landedPriceTotal;
+    const grandTotal = Math.max(0, subtotal - totalDiscount);
+
+    // Update dispatch order status to pending-approval (DO NOT process inventory or ledger)
+    dispatchOrder.status = 'pending-approval';
+    dispatchOrder.submittedForApprovalAt = new Date();
+    dispatchOrder.submittedForApprovalBy = req.user._id;
+    dispatchOrder.exchangeRate = finalExchangeRate;
+    dispatchOrder.percentage = finalPercentage;
+    dispatchOrder.totalDiscount = totalDiscount;
+    dispatchOrder.subtotal = subtotal;
+    dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
+    dispatchOrder.grandTotal = grandTotal;
+    dispatchOrder.paymentDetails = {
+      cashPayment: (parseFloat(cashPayment) || 0) / finalExchangeRate,
+      bankPayment: (parseFloat(bankPayment) || 0) / finalExchangeRate,
+      remainingBalance: (discountedSupplierPaymentTotal / finalExchangeRate) - ((parseFloat(cashPayment) || 0) / finalExchangeRate) - ((parseFloat(bankPayment) || 0) / finalExchangeRate),
+      paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
+        ? 'paid'
+        : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
+          ? 'partial'
+          : 'pending'
+    };
+    dispatchOrder.confirmedQuantities = confirmedQuantities;
+
+    // Update prices on items
+    dispatchOrder.items.forEach((item, index) => {
+      item.supplierPaymentAmount = itemsWithPrices[index].supplierPaymentAmount;
+      item.landedPrice = itemsWithPrices[index].landedPrice;
+    });
+
+    await dispatchOrder.save();
+
+    // Populate for response
+    await dispatchOrder.populate([
+      { path: 'supplier', select: 'name company' },
+      { path: 'logisticsCompany', select: 'name code contactInfo rates' },
+      { path: 'createdBy', select: 'name' },
+      { path: 'submittedForApprovalBy', select: 'name' }
+    ]);
+
+    // Convert images to signed URLs
+    await convertDispatchOrderImages(dispatchOrder);
+
+    return sendResponse.success(res, dispatchOrder, 'Dispatch order submitted for approval successfully');
+
+  } catch (error) {
+    console.error('Submit approval error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
+  }
+});
+
+// Confirm dispatch order (Super-admin only)
+router.post('/:id/confirm', auth, async (req, res) => {
+  try {
+    // Only super-admin can confirm dispatch orders
+    if (req.user.role !== 'super-admin') {
+      return sendResponse.error(res, 'Only super-admin can confirm dispatch orders', 403);
+    }
+
+    const {
+      cashPayment = 0,
+      bankPayment = 0,
+      exchangeRate,
+      percentage,
+      discount = 0,
+      items,
+      totalBoxes,
+      logisticsCompany,
+      dispatchDate,
+      isTotalBoxesConfirmed
+    } = req.body;
+
+    const dispatchOrder = await DispatchOrder.findById(req.params.id)
+      .populate('supplier')
+      .populate('logisticsCompany', 'name rates');
+
+    if (!dispatchOrder) {
+      return sendResponse.error(res, 'Dispatch order not found', 404);
+    }
+
+    if (!['pending', 'pending-approval'].includes(dispatchOrder.status)) {
+      return sendResponse.error(res, 'Only pending or pending-approval dispatch orders can be confirmed', 400);
+    }
+
+    // Validate and set exchange rate and percentage from admin input
+    const finalExchangeRate = exchangeRate !== undefined && exchangeRate !== null
+      ? parseFloat(exchangeRate)
+      : dispatchOrder.exchangeRate || 1.0;
+    const finalPercentage = percentage !== undefined && percentage !== null
+      ? parseFloat(percentage)
+      : dispatchOrder.percentage || 0;
+
+    if (isNaN(finalExchangeRate) || finalExchangeRate <= 0) {
+      return sendResponse.error(res, 'Invalid exchange rate. Must be a positive number.', 400);
+    }
+
+    if (isNaN(finalPercentage) || finalPercentage < 0) {
+      return sendResponse.error(res, 'Invalid percentage. Must be a non-negative number.', 400);
+    }
+
+    // Update dispatch order with admin-provided exchange rate and percentage
+    dispatchOrder.exchangeRate = finalExchangeRate;
+    dispatchOrder.percentage = finalPercentage;
+
+    // Update logistics and date if provided (Super-admin can refine these during confirmation)
+    if (logisticsCompany) {
+      dispatchOrder.logisticsCompany = logisticsCompany;
+      dispatchOrder.markModified('logisticsCompany');
+    }
+    if (dispatchDate) {
+      dispatchOrder.dispatchDate = new Date(dispatchDate);
+      dispatchOrder.markModified('dispatchDate');
+    }
+    if (isTotalBoxesConfirmed !== undefined) {
+      dispatchOrder.isTotalBoxesConfirmed = !!isTotalBoxesConfirmed;
+      dispatchOrder.markModified('isTotalBoxesConfirmed');
+    }
+    if (totalBoxes !== undefined) {
+      dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
+      dispatchOrder.markModified('totalBoxes');
+    }
+
+    // Update items - handle structural changes (add/remove)
+    if (Array.isArray(items)) {
+      if (items.length === dispatchOrder.items.length) {
+        // Standard mapping if length matches (preserves item IDs)
+        dispatchOrder.items.forEach((item, index) => {
+          const reqItem = items[index];
+          if (reqItem) {
+            if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
+            if (reqItem.productName) item.productName = reqItem.productName;
+            if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
+            if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
+            if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
+            if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
+            if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
+            if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
+            if (reqItem.packets) item.packets = reqItem.packets;
+            if (reqItem.boxes) item.boxes = reqItem.boxes;
+          }
+        });
+        dispatchOrder.markModified('items');
+      } else {
+        // If items were added or removed, replace the array
+        dispatchOrder.items = items;
+        dispatchOrder.markModified('items');
+      }
       // Save these updates so the order reflects what was confirmed
       await dispatchOrder.save();
     }
@@ -1274,8 +1561,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // Track results for each item
     const inventoryResults = [];
 
-    // Populate productType for items
-    await dispatchOrder.populate('items.productType');
+    // Season is now an array field, no need to populate
 
     for (let index = 0; index < dispatchOrder.items.length; index++) {
       try {
@@ -1310,11 +1596,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
           continue;
         }
 
-        // Extract productType ID (handle both object and ID)
-        const productTypeId = item.productType?._id || item.productType;
+        // Extract season (handle both array and single value for backward compatibility)
+        const season = Array.isArray(item.season) ? item.season : (item.season ? [item.season] : []);
 
-        if (!productTypeId) {
-          const error = 'Missing productType';
+        if (!season || season.length === 0) {
+          const error = 'Missing season';
           console.error(`[Confirm Order] Item ${index} ${error}`);
           inventoryResults.push({
             index,
@@ -1341,22 +1627,6 @@ router.post('/:id/confirm', auth, async (req, res) => {
         });
 
         if (!product) {
-          // Get ProductType for category
-          const productType = await ProductType.findById(productTypeId);
-
-          if (!productType) {
-            const error = `ProductType ${productTypeId} not found`;
-            console.error(`[Confirm Order] Item ${index} ${error}`);
-            inventoryResults.push({
-              index,
-              success: false,
-              error,
-              productCode: item.productCode,
-              productName: item.productName
-            });
-            continue;
-          }
-
           // Create new Product
           // Handle primaryColor: can be array or string
           const colorForProduct = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
@@ -1367,8 +1637,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
             name: item.productName,
             sku: item.productCode.toUpperCase(),
             productCode: item.productCode,
-            productType: productTypeId,  // Use extracted ID
-            category: productType?.category || 'General',
+            season: season,
+            category: 'General', // Default category since we no longer use ProductType
             unit: 'piece',
             pricing: {
               costPrice: landedPrice,
@@ -1570,7 +1840,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
           item: {
             productCode: item.productCode,
             productName: item.productName,
-            productType: item.productType,
+            season: item.season,
             quantity: item.quantity
           }
         });
@@ -1624,9 +1894,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal; // Use discounted amount
     dispatchOrder.grandTotal = grandTotal; // Landed total after discount (for inventory valuation)
     dispatchOrder.paymentDetails = {
-      cashPayment: parseFloat(cashPayment) || 0,
-      bankPayment: parseFloat(bankPayment) || 0,
-      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
+      cashPayment: (parseFloat(cashPayment) || 0) / finalExchangeRate,
+      bankPayment: (parseFloat(bankPayment) || 0) / finalExchangeRate,
+      remainingBalance: (discountedSupplierPaymentTotal / finalExchangeRate) - ((parseFloat(cashPayment) || 0) / finalExchangeRate) - ((parseFloat(bankPayment) || 0) / finalExchangeRate),
       paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
         ? 'paid'
         : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
@@ -1838,8 +2108,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
       { path: 'supplier', select: 'name company' },
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
-      { path: 'confirmedBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' }
+      { path: 'confirmedBy', select: 'name' }
     ]);
 
     // Convert images to signed URLs
@@ -1857,7 +2126,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
 router.post('/:id/return', auth, async (req, res) => {
   try {
     // Only admin/manager can return items
-    if (!['admin', 'manager'].includes(req.user.role)) {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can return items', 403);
     }
 
@@ -2040,7 +2309,7 @@ router.post('/:id/return', auth, async (req, res) => {
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
       { path: 'confirmedBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' },
+      { path: 'items.product', select: 'name sku unit images color size productCode pricing' },
       { path: 'returnedItems.returnedBy', select: 'name' }
     ]);
 
@@ -2126,8 +2395,7 @@ router.get('/qr/:qrData', async (req, res) => {
     const dispatchOrder = await DispatchOrder.findById(payload.dispatchOrderId)
       .populate('supplier', 'name company')
       .populate('logisticsCompany', 'name code')
-      .populate('items.productType', 'name category')
-      .populate('items.product', 'name sku code pricing productType category brand');
+      .populate('items.product', 'name sku code pricing season category brand');
 
     if (!dispatchOrder) {
       return sendResponse.error(res, 'Dispatch order not found', 404);
@@ -2147,7 +2415,7 @@ router.get('/qr/:qrData', async (req, res) => {
 router.post('/qr/:qrData/confirm', auth, async (req, res) => {
   try {
     // Only admin/manager can confirm via QR scan
-    if (!['admin', 'manager'].includes(req.user.role)) {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can confirm dispatch orders', 403);
     }
 
@@ -2188,8 +2456,8 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    if (dispatchOrder.status !== 'pending') {
-      return sendResponse.error(res, 'Only pending dispatch orders can be confirmed', 400);
+    if (!['pending', 'pending-approval'].includes(dispatchOrder.status)) {
+      return sendResponse.error(res, 'Only pending or pending-approval dispatch orders can be confirmed', 400);
     }
 
     // Validate and set exchange rate and percentage from admin input
@@ -2382,7 +2650,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       // Track results for each item
       const inventoryResults = [];
 
-      await dispatchOrder.populate('items.productType');
+      // Season is now an array field, no need to populate
 
       for (let index = 0; index < dispatchOrder.items.length; index++) {
         try {
@@ -2415,12 +2683,15 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
             continue;
           }
 
-          if (!item.productType) {
-            console.error(`[Inventory Update - QR] Item ${index} missing productType, skipping`);
+          // Extract season (handle both array and single value for backward compatibility)
+          const season = Array.isArray(item.season) ? item.season : (item.season ? [item.season] : []);
+
+          if (!season || season.length === 0) {
+            console.error(`[Inventory Update - QR] Item ${index} missing season, skipping`);
             inventoryResults.push({
               index,
               success: false,
-              error: 'Missing productType',
+              error: 'Missing season',
               productCode: item.productCode
             });
             continue;
@@ -2436,8 +2707,6 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
           });
 
           if (!product) {
-            const productType = await ProductType.findById(item.productType);
-
             // Handle primaryColor: can be array or string
             const colorForProduct = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
               ? item.primaryColor[0]  // Use first color as main color
@@ -2447,8 +2716,8 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
               name: item.productName,
               sku: item.productCode.toUpperCase(),
               productCode: item.productCode,
-              productType: item.productType,
-              category: productType?.category || 'General',
+              season: season,
+              category: 'General', // Default category since we no longer use ProductType
               unit: 'piece',
               pricing: {
                 costPrice: landedPrice,
@@ -2606,7 +2875,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
             item: {
               productCode: item.productCode,
               productName: item.productName,
-              productType: item.productType,
+              season: item.season,
               quantity: item.quantity
             }
           });
@@ -2665,8 +2934,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       { path: 'supplier', select: 'name company' },
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
-      { path: 'confirmedBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' }
+      { path: 'confirmedBy', select: 'name' }
     ]);
 
     // Convert images to signed URLs
@@ -2701,7 +2969,7 @@ router.put('/:id', auth, async (req, res) => {
       if (!isOrderSupplier && !isCreator) {
         return sendResponse.error(res, 'You do not have permission to update this dispatch order', 403);
       }
-    } else if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+    } else if (req.user.role !== 'super-admin' && req.user.role !== 'admin') {
       return sendResponse.error(res, 'You do not have permission to update dispatch orders', 403);
     }
 
@@ -2733,7 +3001,7 @@ router.put('/:id', auth, async (req, res) => {
         const processedItem = {
           productName: item.productName,
           productCode: item.productCode,
-          productType: item.productType,
+          season: item.season || [],
           costPrice: item.costPrice || 0,
           quantity: item.quantity,
           boxes: item.boxes || [],
@@ -2771,7 +3039,7 @@ router.put('/:id', auth, async (req, res) => {
       { path: 'supplier', select: 'name company' },
       { path: 'logisticsCompany', select: 'name code contactInfo rates' },
       { path: 'createdBy', select: 'name' },
-      { path: 'items.productType', select: 'name category' }
+      { path: 'items.product', select: 'name sku unit images color size productCode pricing' }
     ]);
 
     // Convert images to signed URLs
@@ -2807,7 +3075,7 @@ router.delete('/:id', auth, async (req, res) => {
       if (!isOrderSupplier && !isCreator) {
         return sendResponse.error(res, 'You do not have permission to delete this dispatch order', 403);
       }
-    } else if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+    } else if (req.user.role !== 'super-admin' && req.user.role !== 'admin') {
       return sendResponse.error(res, 'You do not have permission to delete dispatch orders', 403);
     }
 

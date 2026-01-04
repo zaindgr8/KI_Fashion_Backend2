@@ -46,13 +46,13 @@ async function convertInventoryProductImages(inventoryItems, usePublicUrls = fal
       if (!item.product.images) {
         item.product.images = [];
       }
-      
+
       // Ensure images is an array
       if (!Array.isArray(item.product.images)) {
         console.warn(`[Inventory] Product ${item.product.name || item.product._id} has non-array images:`, typeof item.product.images);
         item.product.images = [];
       }
-      
+
       if (item.product.images.length > 0) {
         if (usePublicUrls) {
           // Use public URLs directly (bucket is public)
@@ -89,127 +89,150 @@ router.get('/', auth, async (req, res) => {
       page = 1,
       limit = 20,
       search,
+      searchSku,
+      searchProduct,
+      searchSupplier,
       lowStock,
       needsReorder,
       category
     } = req.query;
 
-    const query = { isActive: true };
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
 
-    let inventoryQuery = Inventory.find(query)
-      .populate({
-        path: 'product',
-        select: 'name sku category brand unit pricing inventory images',
-        // Only populate if product exists - this filters out null products
-        match: { _id: { $exists: true } },
-        options: { lean: false }
-      })
-      .sort({ 'product.name': 1 });
+    // Build Aggregation Pipeline
+    const pipeline = [];
 
-    if (lowStock === 'true') {
-      inventoryQuery = inventoryQuery.where('currentStock').lte('reorderLevel');
-    }
-
+    // 1. Initial Match (Inventory level)
+    const match = { isActive: true };
     if (needsReorder === 'true') {
-      inventoryQuery = inventoryQuery.where('needsReorder').equals(true);
+      match.needsReorder = true;
+    }
+    pipeline.push({ $match: match });
+
+    // Handle lowStock field comparison
+    if (lowStock === 'true') {
+      pipeline.push({
+        $match: {
+          $expr: { $lte: ['$currentStock', '$reorderLevel'] }
+        }
+      });
     }
 
-    const inventory = await inventoryQuery
-      .limit(limit * 1)
-      .skip((page - 1) * limit);
-
-    // Filter out inventory items where product is null (invalid product reference)
-    let filteredInventory = inventory.filter(item => {
-      if (!item.product || !item.product._id) {
-        console.warn(`[Inventory] Filtering out inventory item with invalid product reference: ${item._id}`);
-        return false;
+    // 2. Lookup Product
+    pipeline.push({
+      $lookup: {
+        from: 'products',
+        localField: 'product',
+        foreignField: '_id',
+        as: 'product'
       }
-      return true;
     });
 
-    if (search) {
-      filteredInventory = filteredInventory.filter(item => {
-        // Add null checks to prevent errors
-        if (!item.product || !item.product.name || !item.product.sku) {
-          return false;
-        }
-        return item.product.name.toLowerCase().includes(search.toLowerCase()) ||
-               item.product.sku.toLowerCase().includes(search.toLowerCase()) ||
-               (item.product.brand && item.product.brand.toLowerCase().includes(search.toLowerCase()));
-      });
-    }
+    // 3. Unwind Product (ensure it exists and is active)
+    pipeline.push({ $unwind: '$product' });
+    pipeline.push({ $match: { 'product.isActive': true } });
 
+    // 4. Product Fields Filters
     if (category) {
-      filteredInventory = filteredInventory.filter(item => {
-        // Add null check to prevent errors
-        if (!item.product || !item.product.category) {
-          return false;
-        }
-        return item.product.category.toLowerCase().includes(category.toLowerCase());
-      });
+      pipeline.push({ $match: { 'product.category': { $regex: category, $options: 'i' } } });
+    }
+    if (searchSku) {
+      pipeline.push({ $match: { 'product.sku': { $regex: searchSku, $options: 'i' } } });
+    }
+    if (searchProduct) {
+      pipeline.push({ $match: { 'product.name': { $regex: searchProduct, $options: 'i' } } });
     }
 
-    // Count only inventory records with valid product references
-    // We need to count after filtering out null products, so we'll use the filtered count
-    // Note: This is an approximation since we can't easily count populated nulls in MongoDB
-    // A more accurate count would require aggregating, but for pagination this should be close enough
-    const total = filteredInventory.length < limit 
-      ? filteredInventory.length + ((page - 1) * limit)
-      : await Inventory.countDocuments(query);
+    // 5. Lookup Suppliers from batches
+    // We join with suppliers collection using the supplierId in purchaseBatches
+    pipeline.push({
+      $lookup: {
+        from: 'suppliers',
+        localField: 'purchaseBatches.supplierId',
+        foreignField: '_id',
+        as: 'batchSuppliers'
+      }
+    });
 
-    // Convert Mongoose documents to plain objects to ensure proper serialization
-    const inventoryData = filteredInventory
-      .filter(item => {
-        // Final safety check - filter out any items with null products
-        if (!item.product || !item.product._id) {
-          console.warn(`[Inventory] Final filter: Removing inventory item ${item._id} with invalid product reference`);
-          return false;
-        }
-        return true;
-      })
-      .map(item => {
-        const itemObj = item.toObject ? item.toObject() : item;
-        // Ensure product is also a plain object
-        if (itemObj.product) {
-          if (itemObj.product.toObject) {
-            itemObj.product = itemObj.product.toObject();
-          }
-          // Debug: Log if product has images
-          if (itemObj.product && (!itemObj.product.images || itemObj.product.images.length === 0)) {
-            console.log(`[Inventory] Product ${itemObj.product.name || itemObj.product._id} has no images`);
-          }
-        } else {
-          // This shouldn't happen after filtering, but log if it does
-          console.error(`[Inventory] Unexpected null product in inventory item ${itemObj._id} after filtering`);
-        }
-        return itemObj;
-      });
+    // 6. Unified Search and Supplier Search
+    if (search || searchSupplier) {
+      const searchConditions = [];
 
-    // Convert product images to signed URLs (or use public URLs if bucket is public)
-    // Since bucket has allUsers access and objects are made public, we can use public URLs directly
-    // Set GCS_USE_PUBLIC_URLS=false to use signed URLs instead
-    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS !== 'false'; // Default to true (use public URLs for public bucket)
+      if (search) {
+        const searchRegex = { $regex: search, $options: 'i' };
+        searchConditions.push(
+          { 'product.name': searchRegex },
+          { 'product.sku': searchRegex },
+          { 'product.brand': searchRegex },
+          { 'batchSuppliers.name': searchRegex },
+          { 'batchSuppliers.company': searchRegex }
+        );
+      }
+
+      if (searchSupplier) {
+        const supRegex = { $regex: searchSupplier, $options: 'i' };
+        searchConditions.push(
+          { 'batchSuppliers.name': supRegex },
+          { 'batchSuppliers.company': supRegex }
+        );
+      }
+
+      if (searchConditions.length > 0) {
+        pipeline.push({ $match: { $or: searchConditions } });
+      }
+    }
+
+    // 7. Add Supplier Info to Product (to maintain compatibility with frontend)
+    pipeline.push({
+      $addFields: {
+        'product.suppliers': {
+          $map: {
+            input: '$batchSuppliers',
+            as: 'sup',
+            in: {
+              supplier: {
+                _id: '$$sup._id',
+                name: '$$sup.name',
+                company: '$$sup.company',
+                companyName: '$$sup.company' // Alias for frontend compatibility
+              },
+              isPrimary: false
+            }
+          }
+        }
+      }
+    });
+
+    // 8. Sorting
+    pipeline.push({ $sort: { 'product.name': 1 } });
+
+    // 9. Faceting for Total Count and Paginated Data
+    pipeline.push({
+      $facet: {
+        metadata: [{ $count: 'total' }],
+        data: [{ $skip: skip }, { $limit: limitNum }]
+      }
+    });
+
+    const result = await Inventory.aggregate(pipeline);
+
+    const total = result[0].metadata[0]?.total || 0;
+    const inventoryData = result[0].data;
+
+    // Convert product images to signed URLs
+    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS !== 'false';
     await convertInventoryProductImages(inventoryData, usePublicUrls);
-    
-    // Debug: Log sample inventory item after image conversion
-    if (inventoryData.length > 0) {
-      const sample = inventoryData[0];
-      console.log(`[Inventory] Sample item after conversion:`, {
-        productName: sample.product?.name,
-        hasImages: !!sample.product?.images,
-        imagesCount: sample.product?.images?.length || 0,
-        firstImage: sample.product?.images?.[0] || 'none'
-      });
-    }
 
     res.json({
       success: true,
       data: inventoryData,
       pagination: {
-        currentPage: page,
-        totalPages: Math.ceil(total / limit),
+        currentPage: pageNum,
+        totalPages: Math.ceil(total / limitNum),
         totalItems: total,
-        itemsPerPage: limit
+        itemsPerPage: limitNum
       }
     });
 
@@ -722,7 +745,7 @@ router.get('/catalog-qr', auth, async (req, res) => {
     // Get buyer/distributor info from user
     const user = req.user;
     let buyerId = null;
-    
+
     // Try to get buyer ID from user
     if (user.buyer) {
       buyerId = user.buyer._id || user.buyer;
@@ -754,7 +777,7 @@ router.get('/catalog-qr', auth, async (req, res) => {
 router.get('/:productId/variants', auth, async (req, res) => {
   try {
     const Product = require('../models/Product');
-    
+
     const product = await Product.findById(req.params.productId);
     if (!product) {
       return res.status(404).json({
@@ -812,7 +835,7 @@ router.get('/:productId/variants', auth, async (req, res) => {
 // Adjust variant stock (Admin only)
 router.post('/adjust-variant', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admins can adjust variant stock'

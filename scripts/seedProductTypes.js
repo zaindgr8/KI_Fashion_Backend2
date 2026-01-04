@@ -135,7 +135,7 @@ async function seedProductTypes() {
     console.log('MongoDB connected successfully');
 
     // Find an admin user or create a system user
-    let adminUser = await User.findOne({ role: 'admin' });
+    let adminUser = await User.findOne({ role: 'super-admin' });
     
     if (!adminUser) {
       console.log('No admin user found. Creating system user for seeding...');
@@ -143,7 +143,7 @@ async function seedProductTypes() {
         name: 'System Admin',
         email: 'admin@klfashion.com',
         password: 'Admin@123', // This will be hashed automatically
-        role: 'admin',
+        role: 'super-admin',
         permissions: ['users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery']
       });
       await adminUser.save();

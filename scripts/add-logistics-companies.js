@@ -3,7 +3,7 @@
 // Or run: mongosh "mongodb://localhost:27017/erp_database" < add-logistics-companies.js
 
 // Get an admin user ID (required for createdBy field)
-const adminUser = db.users.findOne({ role: 'admin' });
+const adminUser = db.users.findOne({ role: 'super-admin' });
 
 if (!adminUser) {
   print('Error: No admin user found. Please create an admin user first.');

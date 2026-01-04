@@ -8,7 +8,7 @@ const router = express.Router();
 const userSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
   email: Joi.string().email().required(),
-  role: Joi.string().valid('admin', 'manager', 'employee', 'accountant').default('employee'),
+  role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant').default('employee'),
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
@@ -19,7 +19,7 @@ const userSchema = Joi.object({
 const updateUserSchema = Joi.object({
   name: Joi.string().min(2).max(100).optional(),
   email: Joi.string().email().optional(),
-  role: Joi.string().valid('admin', 'manager', 'employee', 'accountant').optional(),
+  role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant').optional(),
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
@@ -177,7 +177,7 @@ router.patch('/:id/deactivate', auth, async (req, res) => {
 router.patch('/:id/regenerate-password', auth, async (req, res) => {
   try {
     // Check if requester is admin
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admin can regenerate passwords'

@@ -35,10 +35,7 @@ const dispatchItemSchema = new mongoose.Schema({
   // Product details (for supplier portal entries)
   productName: { type: String },
   productCode: { type: String },
-  productType: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'ProductType'
-  },
+  season: [{ type: String, enum: ['winter', 'summer', 'spring', 'autumn', 'all_season'] }],
   costPrice: { type: Number, min: 0 },
   primaryColor: [{ type: String }],
   size: [{ type: String }],
@@ -87,10 +84,11 @@ const dispatchOrderSchema = new mongoose.Schema({
   totalQuantity: { type: Number, default: 0 }, // Made optional with default (calculated in pre-save)
   totalBoxes: { type: Number, default: 0 }, // Made optional with default (calculated in pre-save)
   totalWeight: { type: Number, default: 0 }, // Total weight of entire order
+  isTotalBoxesConfirmed: { type: Boolean, default: false }, // Persist box confirmation status
   estimatedCost: { type: Number, default: 0 }, // Estimated logistics cost
   status: {
     type: String,
-    enum: ['pending', 'confirmed', 'picked_up', 'in_transit', 'delivered', 'cancelled'],
+    enum: ['pending', 'pending-approval', 'confirmed', 'picked_up', 'in_transit', 'delivered', 'cancelled'],
     default: 'pending',
     index: true
   },
@@ -99,16 +97,24 @@ const dispatchOrderSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
   },
+  submittedForApprovalAt: Date,
+  submittedForApprovalBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  // DEPRECATED: These fields are kept for backward compatibility.
+  // All balance calculations should use BalanceService and Ledger aggregations (SSOT).
+  // These fields will be removed in a future version after migration is complete.
   paymentDetails: {
-    cashPayment: { type: Number, default: 0 },
-    bankPayment: { type: Number, default: 0 },
+    cashPayment: { type: Number, default: 0 }, // DEPRECATED: Use Ledger.getOrderPayments()
+    bankPayment: { type: Number, default: 0 }, // DEPRECATED: Use Ledger.getOrderPayments()
     creditApplied: { type: Number, default: 0 }, // Credit automatically applied from supplier's debt to admin
-    remainingBalance: { type: Number, default: 0 },
+    remainingBalance: { type: Number, default: 0 }, // DEPRECATED: Use BalanceService.getOrderRemainingBalance()
     paymentStatus: {
       type: String,
       enum: ['pending', 'partial', 'paid'],
       default: 'pending'
-    }
+    } // DEPRECATED: Use BalanceService.enrichOrderWithPaymentStatus()
   },
   confirmedQuantities: [{
     itemIndex: { type: Number, required: true },
@@ -182,15 +188,16 @@ const dispatchOrderSchema = new mongoose.Schema({
   shippingCost: { type: Number, default: 0, min: 0 },
   supplierPaymentTotal: { type: Number, default: 0, min: 0 }, // Total amount to pay supplier (cost × exchange rate, NO profit)
   grandTotal: { type: Number, default: 0, min: 0 }, // Landed total (for inventory valuation)
-  // Flat payment fields (in addition to nested paymentDetails)
-  cashPayment: { type: Number, default: 0, min: 0 },
-  bankPayment: { type: Number, default: 0, min: 0 },
-  remainingBalance: { type: Number, default: 0 },
+  // DEPRECATED: Flat payment fields (legacy - use BalanceService for all balance operations)
+  // These fields are kept for backward compatibility and will be removed after migration.
+  cashPayment: { type: Number, default: 0, min: 0 }, // DEPRECATED: Use Ledger.getOrderPayments()
+  bankPayment: { type: Number, default: 0, min: 0 }, // DEPRECATED: Use Ledger.getOrderPayments()
+  remainingBalance: { type: Number, default: 0 }, // DEPRECATED: Use BalanceService.getOrderRemainingBalance()
   paymentStatus: {
     type: String,
     enum: ['pending', 'partial', 'paid', 'overdue'],
     default: 'pending'
-  },
+  }, // DEPRECATED: Use BalanceService.enrichOrderWithPaymentStatus()
   // Quality checks, fulfillment, delivery confirmations, attachments
   qualityChecks: [{
     qaStatus: {

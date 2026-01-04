@@ -9,8 +9,11 @@ const router = express.Router();
 const expenseSchema = Joi.object({
   description: Joi.string().min(5).max(200).required(),
   costType: Joi.string().required(),
-  amount: Joi.number().min(0).required(),
-  paymentMethod: Joi.string().valid('cash', 'card', 'bank_transfer', 'cheque', 'online').required(),
+  dispatchOrder: Joi.string().allow(null, '').optional(),
+  amount: Joi.number().min(0).optional(),
+  cashAmount: Joi.number().min(0).optional(),
+  bankAmount: Joi.number().min(0).optional(),
+  paymentMethod: Joi.string().valid('cash', 'card', 'bank_transfer', 'cheque', 'online', 'split').required(),
   expenseDate: Joi.date().default(Date.now),
   vendor: Joi.string().optional(),
   invoiceNumber: Joi.string().optional(),
@@ -65,8 +68,26 @@ router.post('/', auth, async (req, res) => {
 
     const expenseNumber = await generateExpenseNumber();
 
+    const amount = Number(req.body.amount || 0);
+    const paymentMethod = req.body.paymentMethod;
+    const cashAmount = paymentMethod === 'cash' ? amount : 0;
+    const bankAmount = (paymentMethod !== 'cash' && paymentMethod !== 'split') ? amount : 0;
+
+    let status = 'pending';
+    let approvedBy = undefined;
+
+    if (req.user.role === 'super_admin') {
+      status = 'approved';
+      approvedBy = req.user._id;
+    }
+
     const expense = new Expense({
       ...req.body,
+      amount,
+      cashAmount,
+      bankAmount,
+      status,
+      approvedBy,
       expenseNumber,
       createdBy: req.user._id
     });
@@ -75,6 +96,14 @@ router.post('/', auth, async (req, res) => {
 
     const populatedExpense = await Expense.findById(expense._id)
       .populate('costType', 'id name category')
+      .populate({
+        path: 'dispatchOrder',
+        select: 'orderNumber supplier',
+        populate: {
+          path: 'supplier',
+          select: 'name company'
+        }
+      })
       .populate('createdBy', 'name');
 
     res.status(201).json({
@@ -129,6 +158,14 @@ router.get('/', auth, async (req, res) => {
 
     const expenses = await Expense.find(query)
       .populate('costType', 'id name category')
+      .populate({
+        path: 'dispatchOrder',
+        select: 'orderNumber supplier',
+        populate: {
+          path: 'supplier',
+          select: 'name company'
+        }
+      })
       .populate('createdBy', 'name')
       .populate('approvedBy', 'name')
       .sort({ expenseDate: -1 })
@@ -215,9 +252,19 @@ router.put('/:id', auth, async (req, res) => {
       }
     }
 
+    const updateData = { ...req.body };
+
+    if (req.body.amount !== undefined && req.body.paymentMethod !== undefined) {
+      const amount = Number(req.body.amount);
+      const paymentMethod = req.body.paymentMethod;
+      updateData.cashAmount = paymentMethod === 'cash' ? amount : 0;
+      updateData.bankAmount = (paymentMethod !== 'cash' && paymentMethod !== 'split') ? amount : 0;
+      updateData.amount = amount;
+    }
+
     const expense = await Expense.findByIdAndUpdate(
       req.params.id,
-      req.body,
+      updateData,
       { new: true, runValidators: true }
     )
       .populate('costType', 'id name category')

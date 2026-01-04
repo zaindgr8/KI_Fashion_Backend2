@@ -8,7 +8,7 @@ const Joi = require('joi');
 
 // Helper function to check if user can modify a template
 async function canModifyTemplate(user, template) {
-  if (user.role === 'admin') {
+  if (user.role === 'super-admin') {
     // Admins can modify global templates only
     return template.isGlobal;
   } else if (user.role === 'supplier') {
@@ -61,7 +61,7 @@ router.get('/', auth, async (req, res) => {
         { isGlobal: true },  // Global templates
         { supplier: supplier ? supplier._id : null }  // Their own templates
       ];
-    } else if (req.user.role === 'admin') {
+    } else if (req.user.role === 'super-admin') {
       // Admins see all templates (no additional filter)
     }
     
@@ -139,7 +139,7 @@ router.get('/by-product-type/:typeId', auth, async (req, res) => {
 router.post('/', auth, async (req, res) => {
   try {
     // Only admin and supplier can create templates
-    if (req.user.role !== 'admin' && req.user.role !== 'supplier') {
+    if (req.user.role !== 'super-admin' && req.user.role !== 'supplier') {
       return res.status(403).json({
         success: false,
         message: 'Only admins and suppliers can create packet templates'
@@ -178,7 +178,7 @@ router.post('/', auth, async (req, res) => {
       createdBy: req.user._id
     };
     
-    if (req.user.role === 'admin') {
+    if (req.user.role === 'super-admin') {
       // Admin creates global templates
       templateData.isGlobal = true;
       templateData.supplier = null;
@@ -334,7 +334,7 @@ router.delete('/:id', auth, async (req, res) => {
 router.patch('/:id/toggle-active', auth, async (req, res) => {
   try {
     // Only admin can toggle status
-    if (req.user.role !== 'admin') {
+    if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
         message: 'Only admins can toggle template status'

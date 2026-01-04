@@ -17,11 +17,7 @@ const productSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
-  productType: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'ProductType',
-    required: true
-  },
+  season: [{ type: String, enum: ['winter', 'summer', 'spring', 'autumn', 'all_season'] }],
   category: {
     type: String,
     required: true,
@@ -186,7 +182,7 @@ productSchema.virtual('primaryImage').get(function () {
 });
 
 // Performance indexes for frequently queried fields
-productSchema.index({ productType: 1, isActive: 1 });
+productSchema.index({ season: 1, isActive: 1 });
 productSchema.index({ sku: 1, isActive: 1 });
 productSchema.index({ isActive: 1, createdAt: -1 });
 productSchema.index({ 'suppliers.supplier': 1 });

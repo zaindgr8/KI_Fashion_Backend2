@@ -67,10 +67,13 @@ const buyerSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  // DEPRECATED: currentBalance is kept for backward compatibility.
+  // All balance calculations should use BalanceService.getBuyerBalance() (SSOT from Ledger).
+  // This field will be removed in a future version after migration is complete.
   currentBalance: {
     type: Number,
     default: 0
-  },
+  }, // DEPRECATED: Use BalanceService.getBuyerBalance()
   totalSales: {
     type: Number,
     default: 0

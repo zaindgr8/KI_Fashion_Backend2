@@ -13,6 +13,7 @@ const { generateSaleQR } = require('../utils/qrCode');
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
 const { sendInvoiceEmails } = require('../utils/emailService');
 const { generateSignedUrls } = require('../utils/imageUpload');
+const BalanceService = require('../services/BalanceService');
 
 const router = express.Router();
 
@@ -561,7 +562,7 @@ router.post('/', auth, async (req, res) => {
         }
 
         // Get admin email (first admin user)
-        const adminUser = await User.findOne({ role: 'admin' });
+        const adminUser = await User.findOne({ role: 'super-admin' });
         const adminEmail = adminUser?.email || process.env.ADMIN_EMAIL;
 
         // Send emails if we have at least one recipient

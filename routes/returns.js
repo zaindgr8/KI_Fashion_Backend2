@@ -6,6 +6,7 @@ const Supplier = require('../models/Supplier');
 const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
+const BalanceService = require('../services/BalanceService');
 
 const router = express.Router();
 
@@ -102,7 +103,7 @@ router.get('/products-for-return', auth, async (req, res) => {
 // Reduce inventory, create ledger entry, update supplier balance
 router.post('/product-return', auth, async (req, res) => {
   try {
-    if (!['admin', 'manager'].includes(req.user.role)) {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can create returns', 403);
     }
 
