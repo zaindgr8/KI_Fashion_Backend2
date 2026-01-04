@@ -1638,9 +1638,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
             ? item.size.filter(s => s && s.trim()) // Remove empty values
             : (item.size ? [item.size] : []);
 
-          // Primary color and size for simple fields (backward compatibility)
+          // Primary color for specifications (backward compatibility with single string)
           const primaryColor = colors.length > 0 ? colors[0] : undefined;
-          const primarySize = sizes.length > 0 ? sizes[0] : undefined;
 
           product = new Product({
             name: item.productName,
@@ -1653,10 +1652,10 @@ router.post('/:id/confirm', auth, async (req, res) => {
               costPrice: landedPrice,
               sellingPrice: landedPrice * 1.2 // Default 20% markup
             },
-            color: primaryColor,  // First color for simple field
-            size: primarySize,    // First size for simple field
+            color: colors,  // All colors as array
+            size: sizes,    // All sizes as array
             specifications: {
-              color: primaryColor,
+              color: primaryColor,  // First color as string for backward compatibility
               material: item.material || undefined
             },
             variantTracking: {
