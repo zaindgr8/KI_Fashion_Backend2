@@ -1615,16 +1615,27 @@ router.post('/:id/confirm', auth, async (req, res) => {
         const landedPrice = item.landedPrice || itemsWithPrices[index].landedPrice;
 
         // Find or create Product
-        // Find or create Product
         // STRICT CHECK: Check if product exists with this SKU or Code
         // We prioritize SKU as it is the unique identifier
+        const productCodeTrimmed = item.productCode ? item.productCode.trim() : '';
+        const productCodeUpper = productCodeTrimmed.toUpperCase();
+        
+        console.log(`[Confirm Order] Looking for product with code: "${productCodeTrimmed}" (uppercase: "${productCodeUpper}")`);
+        
         let product = await Product.findOne({
           $or: [
-            { sku: item.productCode.toUpperCase().trim() }, // Standardized SKU
-            { productCode: item.productCode.trim() },       // Literal code match
-            { sku: item.productCode.trim() }                // Just in case SKU wasn't uppercased in DB (legacy)
+            { sku: productCodeUpper },                      // Standardized SKU (uppercase)
+            { productCode: productCodeTrimmed },           // Literal code match (case-sensitive)
+            { sku: productCodeTrimmed },                   // Just in case SKU wasn't uppercased in DB (legacy)
+            { productCode: { $regex: new RegExp(`^${productCodeTrimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } } // Case-insensitive productCode match
           ]
         });
+        
+        if (product) {
+          console.log(`[Confirm Order] Found existing product: ${product.name} (SKU: ${product.sku}, Code: ${product.productCode || 'N/A'}, isActive: ${product.isActive})`);
+        } else {
+          console.log(`[Confirm Order] Product not found, will create new product with code: "${productCodeTrimmed}"`);
+        }
 
         if (!product) {
           // Create new Product
@@ -1716,8 +1727,15 @@ router.post('/:id/confirm', auth, async (req, res) => {
             console.log(`[Confirm Order] Updated product cost price: ${product.name} -> ${landedPrice}`);
           }
           
+          // Always ensure product is active before proceeding
+          if (!product.isActive) {
+            product.isActive = true;
+            productNeedsSave = true;
+          }
+          
           if (productNeedsSave) {
             await product.save();
+            console.log(`[Confirm Order] Saved product: ${product.name} (${product.sku}), isActive: ${product.isActive}`);
           }
         }
 
@@ -1792,6 +1810,18 @@ router.post('/:id/confirm', auth, async (req, res) => {
             console.log(`[Confirm Order] Reactivated inventory for product ${product.name} (${product.sku})`);
           }
         }
+        
+        // Double-check: Ensure both product and inventory are active before adding stock
+        if (!product.isActive) {
+          product.isActive = true;
+          await product.save();
+          console.log(`[Confirm Order] Force-activated product: ${product.name} (${product.sku})`);
+        }
+        if (!inventory.isActive) {
+          inventory.isActive = true;
+          await inventory.save();
+          console.log(`[Confirm Order] Force-activated inventory for product: ${product.name} (${product.sku})`);
+        }
 
         // Prepare batch info for FIFO cost tracking
         const batchInfo = {
@@ -1860,16 +1890,32 @@ router.post('/:id/confirm', auth, async (req, res) => {
           console.log(`[Confirm Order] Added ${confirmedQuantity} units with batch tracking to inventory for ${product.name}`);
         }
         
-        // Verify inventory was saved correctly
-        const savedInventory = await Inventory.findById(inventory._id);
+        // Verify inventory was saved correctly and ensure both product and inventory are active
+        const savedInventory = await Inventory.findById(inventory._id).populate('product');
+        const savedProduct = await Product.findById(product._id);
+        
+        // Final verification: ensure both are active
+        if (savedProduct && !savedProduct.isActive) {
+          savedProduct.isActive = true;
+          await savedProduct.save();
+          console.log(`[Confirm Order] Final fix: Activated product ${savedProduct.name} (${savedProduct.sku})`);
+        }
+        if (savedInventory && !savedInventory.isActive) {
+          savedInventory.isActive = true;
+          await savedInventory.save();
+          console.log(`[Confirm Order] Final fix: Activated inventory for product ${product.name}`);
+        }
+        
         console.log(`[Confirm Order] Inventory verification for ${product.name}:`, {
-          productId: product._id.toString(),
-          productSku: product.sku,
-          productIsActive: product.isActive,
+          productId: savedProduct?._id?.toString(),
+          productSku: savedProduct?.sku,
+          productIsActive: savedProduct?.isActive,
+          productCode: savedProduct?.productCode,
           inventoryId: savedInventory?._id?.toString(),
           inventoryCurrentStock: savedInventory?.currentStock,
           inventoryIsActive: savedInventory?.isActive,
-          hasPurchaseBatches: savedInventory?.purchaseBatches?.length > 0
+          hasPurchaseBatches: savedInventory?.purchaseBatches?.length > 0,
+          inventoryProductId: savedInventory?.product?.toString()
         });
 
         // Track successful processing
