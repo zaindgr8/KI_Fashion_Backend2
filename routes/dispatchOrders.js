@@ -843,9 +843,10 @@ router.post('/manual', auth, async (req, res) => {
               sellingPrice: (item.costPrice || (item.landedTotal / item.quantity)) * 1.2
             },
             size: item.size,
-            color: item.primaryColor, // Use array of colors
+            size: item.size,
+            color: productColors, // ✅ Use the variable you defined!
             specifications: {
-              color: colorForProduct,  // Single color string (Product model expects string, not array)
+              color: colorForProduct,
               material: item.material || undefined
             },
             createdBy: req.user._id
