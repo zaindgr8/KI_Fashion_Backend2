@@ -131,7 +131,13 @@ router.get('/', auth, async (req, res) => {
     });
 
     // 3. Unwind Product (ensure it exists and is active)
-    pipeline.push({ $unwind: '$product' });
+    // Use preserveNullAndEmptyArrays: false to filter out inventory without products
+    pipeline.push({ 
+      $unwind: {
+        path: '$product',
+        preserveNullAndEmptyArrays: false // Filter out inventory without products
+      }
+    });
     pipeline.push({ $match: { 'product.isActive': true } });
 
     // 4. Product Fields Filters
