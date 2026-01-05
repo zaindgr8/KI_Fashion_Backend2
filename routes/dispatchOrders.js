@@ -515,6 +515,8 @@ router.post('/manual', auth, async (req, res) => {
     for (const item of value.items) {
       let product = null;
       let season = null;
+      let color = null;
+      let size = null;
 
       // If product reference provided, use it
       if (item.product) {
@@ -840,7 +842,8 @@ router.post('/manual', auth, async (req, res) => {
               costPrice: item.costPrice || (item.landedTotal / item.quantity),
               sellingPrice: (item.costPrice || (item.landedTotal / item.quantity)) * 1.2
             },
-            color: colorForProduct, // Use array of colors
+            size: item.size,
+            color: item.primaryColor, // Use array of colors
             specifications: {
               color: colorForProduct,  // Single color string (Product model expects string, not array)
               material: item.material || undefined
