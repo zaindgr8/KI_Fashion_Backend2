@@ -833,14 +833,14 @@ router.post('/manual', auth, async (req, res) => {
             name: item.productName || 'Unknown Product',
             sku: item.productCode?.toUpperCase() || 'UNKNOWN',
             productCode: item.productCode,
-            // season: item.season,
-            category: 'General', // Default category since we no longer use ProductType
+            season: item.season,
+            category: 'General',
             unit: 'piece',
             pricing: {
               costPrice: item.costPrice || (item.landedTotal / item.quantity),
               sellingPrice: (item.costPrice || (item.landedTotal / item.quantity)) * 1.2
             },
-            // color: productColors, // Use array of colors
+            color: colorForProduct, // Use array of colors
             specifications: {
               color: colorForProduct,  // Single color string (Product model expects string, not array)
               material: item.material || undefined
