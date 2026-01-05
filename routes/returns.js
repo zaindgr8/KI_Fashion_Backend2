@@ -78,6 +78,41 @@ router.get('/products-for-return', auth, async (req, res) => {
         }
       },
 
+      // Stage 5: Lookup dispatch order details for batches
+      {
+        $unwind: '$batches'
+      },
+      {
+        $addFields: {
+          'batches.dispatchOrderId': { $toObjectId: '$batches.dispatchOrderId' }
+        }
+      },
+      {
+        $lookup: {
+          from: 'dispatchorders',
+          localField: 'batches.dispatchOrderId',
+          foreignField: '_id',
+          as: 'orderInfo'
+        }
+      },
+      {
+        $addFields: {
+          'batches.orderNumber': { $arrayElemAt: ['$orderInfo.orderNumber', 0] },
+          'batches.confirmedAt': { $arrayElemAt: ['$orderInfo.confirmedAt', 0] }
+        }
+      },
+      {
+        $group: {
+          _id: '$_id',
+          inventoryId: { $first: '$inventoryId' },
+          totalStock: { $first: '$totalStock' },
+          supplierStock: { $first: '$supplierStock' },
+          averageCostPrice: { $first: '$averageCostPrice' },
+          supplierCostPriceSum: { $first: '$supplierCostPriceSum' },
+          batches: { $push: '$batches' }
+        }
+      },
+
       // Stage 5: Calculate supplier-specific average cost price
       {
         $addFields: {
