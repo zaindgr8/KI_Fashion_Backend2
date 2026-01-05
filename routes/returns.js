@@ -20,13 +20,18 @@ router.get('/products-for-return', auth, async (req, res) => {
       return sendResponse.error(res, 'Supplier ID is required', 400);
     }
 
-    // Find all dispatch orders from this supplier
+    // Find all CONFIRMED dispatch orders from this supplier
+    // Products are only linked to items after confirmation
     const DispatchOrder = require('../models/DispatchOrder');
-    const dispatchOrders = await DispatchOrder.find({ supplier: supplierId })
+    const dispatchOrders = await DispatchOrder.find({
+      supplier: supplierId,
+      status: 'confirmed'  // Only confirmed orders have product references
+    })
       .select('items')
       .lean();
 
     if (!dispatchOrders || dispatchOrders.length === 0) {
+      console.log(`No confirmed dispatch orders found for supplier ${supplierId}`);
       return sendResponse.success(res, []);
     }
 
@@ -41,6 +46,14 @@ router.get('/products-for-return', auth, async (req, res) => {
         });
       }
     });
+
+    console.log(`Found ${dispatchOrders.length} confirmed orders, extracted ${productIds.size} product IDs`);
+
+    // If no product IDs found, return empty array
+    if (productIds.size === 0) {
+      console.log('No product IDs found in dispatch order items');
+      return sendResponse.success(res, []);
+    }
 
     // Build search query
     const productQuery = {
@@ -107,8 +120,8 @@ router.post('/product-return', auth, async (req, res) => {
       return sendResponse.error(res, 'Only admins and managers can create returns', 403);
     }
 
-    const { 
-      supplierId, 
+    const {
+      supplierId,
       items,
       notes,
       returnDate,
@@ -154,8 +167,8 @@ router.post('/product-return', auth, async (req, res) => {
 
       // Check stock
       if (inventory.currentStock < quantity) {
-        return sendResponse.error(res, 
-          `Insufficient stock for ${product.name}. Available: ${inventory.currentStock}, Requested: ${quantity}`, 
+        return sendResponse.error(res,
+          `Insufficient stock for ${product.name}. Available: ${inventory.currentStock}, Requested: ${quantity}`,
           400
         );
       }
