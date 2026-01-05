@@ -566,7 +566,7 @@ router.post('/manual', auth, async (req, res) => {
         productCode: item.productCode || (product ? (product.productCode || product.sku) : undefined),
         season: season,
         costPrice: costPrice,
-        primaryColor: item.primaryColor || (product ? product.color : undefined),
+        primaryColor: item.primaryColor || (product ? product.primaryColor : undefined),
         size: item.size || (product ? product.size : undefined), // Add size field
         material: item.material || (product ? product.specifications?.material : undefined),
         description: item.description,
