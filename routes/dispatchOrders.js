@@ -1628,28 +1628,43 @@ router.post('/:id/confirm', auth, async (req, res) => {
 
         if (!product) {
           // Create new Product
-          // Handle primaryColor: can be array or string
-          const colorForProduct = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
-            ? item.primaryColor[0]  // Use first color as main color
-            : (typeof item.primaryColor === 'string' ? item.primaryColor : undefined);
+          // Extract all colors (handle both array and string)
+          const colors = Array.isArray(item.primaryColor)
+            ? item.primaryColor.filter(c => c && c.trim())
+            : (item.primaryColor ? [item.primaryColor] : []);
+
+          // Extract all sizes (handle both array and string)
+          const sizes = Array.isArray(item.size)
+            ? item.size.filter(s => s && s.trim())
+            : (item.size ? [item.size] : []);
+
+          // Primary color for specifications (backward compatibility with single string)
+          const primaryColor = colors.length > 0 ? colors[0] : undefined;
 
           product = new Product({
             name: item.productName,
             sku: item.productCode.toUpperCase(),
             productCode: item.productCode,
             season: season,
-            category: 'General', // Default category since we no longer use ProductType
+            category: 'General',
             unit: 'piece',
             pricing: {
               costPrice: landedPrice,
-              sellingPrice: landedPrice * 1.2 // Default 20% markup
+              sellingPrice: landedPrice * 1.2
             },
-            color: colorForProduct,  // Single color for main field
+            // Only set color and size if arrays have values
+            ...(colors.length > 0 && { color: colors }),
+            ...(sizes.length > 0 && { size: sizes }),
             specifications: {
-              color: colorForProduct,  // Single color string (Product model expects string, not array)
+              color: primaryColor,
               material: item.material || undefined
             },
             isActive: true, // Ensure product is active when created
+            variantTracking: {
+              enabled: colors.length > 1 || sizes.length > 1,
+              ...(colors.length > 0 && { availableColors: colors }),
+              ...(sizes.length > 0 && { availableSizes: sizes })
+            },
             createdBy: req.user._id
           });
 

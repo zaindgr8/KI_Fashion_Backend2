@@ -29,14 +29,14 @@ const productSchema = new mongoose.Schema({
     trim: true,
     index: true
   },
-  color: {
+  color: [{
     type: String,
     trim: true
-  },
-  size: {
+  }],
+  size: [{
     type: String,
     trim: true
-  },
+  }],
   productCode: {
     type: String,
     trim: true,
