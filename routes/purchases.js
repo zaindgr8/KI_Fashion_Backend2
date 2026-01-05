@@ -504,7 +504,7 @@ router.get('/', auth, async (req, res) => {
       orderNumber: 1, invoiceNumber: 1, dispatchDate: 1, createdAt: 1,
       supplier: 1, items: 1, grandTotal: 1, cashPayment: 1, bankPayment: 1,
       remainingBalance: 1, paymentStatus: 1, status: 1, source: 1,
-      exchangeRate: 1, percentage: 1, supplierPaymentTotal: 1,
+      exchangeRate: 1, percentage: 1, supplierPaymentTotal: 1, totalBoxes: 1,
       'paymentDetails.paymentStatus': 1, 'paymentDetails.cashPayment': 1,
       'paymentDetails.bankPayment': 1, 'paymentDetails.remainingBalance': 1,
       supplierUser: 1, supplierName: 1, deliveryStatus: 1
@@ -611,6 +611,7 @@ router.get('/', auth, async (req, res) => {
         exchangeRate: purchase.exchangeRate,
         percentage: purchase.percentage,
         supplierPaymentTotal: purchase.supplierPaymentTotal,
+        totalBoxes: purchase.totalBoxes || 0,
         searchText
       };
     });
