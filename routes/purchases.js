@@ -513,9 +513,10 @@ router.get('/', auth, async (req, res) => {
     // Execute Query
     const [purchases, total] = await Promise.all([
       DispatchOrder.find(query, projection)
-        .populate('supplier', 'name company phone email address')
-        // Only populate essential nested product fields
-        .populate('items.product', 'name sku productCode color size images')
+        .populate('supplier', 'name company')
+        .populate('logisticsCompany', 'name code')
+        .populate('createdBy', 'name')
+        .populate('items.product', 'name sku unit images color size productCode pricing')
         .sort({ dispatchDate: -1, createdAt: -1 })
         .limit(limitNum)
         .skip((pageNum - 1) * limitNum)
@@ -555,7 +556,7 @@ router.get('/', auth, async (req, res) => {
 
         // Color & Size
         const primaryColorArray = Array.isArray(item.primaryColor) ? item.primaryColor : (item.primaryColor ? [item.primaryColor] : []);
-        const color = item.color || product.color || primaryColorArray[0] || '';
+        const color = product.primaryColor || primaryColorArray[0] || '';
 
         const sizeArray = Array.isArray(item.size) ? item.size : (item.size ? [item.size] : []);
         const size = product.size || sizeArray[0] || '';
