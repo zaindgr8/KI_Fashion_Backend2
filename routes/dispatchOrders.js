@@ -1649,6 +1649,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
               color: colorForProduct,  // Single color string (Product model expects string, not array)
               material: item.material || undefined
             },
+            isActive: true, // Ensure product is active when created
             createdBy: req.user._id
           });
 
@@ -1685,11 +1686,23 @@ router.post('/:id/confirm', auth, async (req, res) => {
             }
           }
         } else {
+          // Ensure product is active (reactivate if it was deactivated)
+          let productNeedsSave = false;
+          if (!product.isActive) {
+            product.isActive = true;
+            productNeedsSave = true;
+            console.log(`[Confirm Order] Reactivating product: ${product.name} (${product.sku})`);
+          }
+          
           // Update product cost price if landed price is different (use latest landed price)
           if (product.pricing.costPrice !== landedPrice) {
             product.pricing.costPrice = landedPrice;
-            await product.save();
+            productNeedsSave = true;
             console.log(`[Confirm Order] Updated product cost price: ${product.name} -> ${landedPrice}`);
+          }
+          
+          if (productNeedsSave) {
+            await product.save();
           }
         }
 
@@ -1751,10 +1764,18 @@ router.post('/:id/confirm', auth, async (req, res) => {
             minStockLevel: 0,
             maxStockLevel: 1000,
             reorderLevel: 10,
+            isActive: true, // Ensure inventory is active
             purchaseBatches: [] // Initialize empty batches array
           });
           await inventory.save();
-          console.log(`[Confirm Order] Created new inventory for product ${product.name}`);
+          console.log(`[Confirm Order] Created new inventory for product ${product.name} (${product.sku})`);
+        } else {
+          // Ensure inventory is active (reactivate if it was deactivated)
+          if (!inventory.isActive) {
+            inventory.isActive = true;
+            await inventory.save();
+            console.log(`[Confirm Order] Reactivated inventory for product ${product.name} (${product.sku})`);
+          }
         }
 
         // Prepare batch info for FIFO cost tracking
@@ -1823,6 +1844,18 @@ router.post('/:id/confirm', auth, async (req, res) => {
           );
           console.log(`[Confirm Order] Added ${confirmedQuantity} units with batch tracking to inventory for ${product.name}`);
         }
+        
+        // Verify inventory was saved correctly
+        const savedInventory = await Inventory.findById(inventory._id);
+        console.log(`[Confirm Order] Inventory verification for ${product.name}:`, {
+          productId: product._id.toString(),
+          productSku: product.sku,
+          productIsActive: product.isActive,
+          inventoryId: savedInventory?._id?.toString(),
+          inventoryCurrentStock: savedInventory?.currentStock,
+          inventoryIsActive: savedInventory?.isActive,
+          hasPurchaseBatches: savedInventory?.purchaseBatches?.length > 0
+        });
 
         // Track successful processing
         inventoryResults.push({
