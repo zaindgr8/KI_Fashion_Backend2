@@ -592,6 +592,7 @@ router.post('/manual', auth, async (req, res) => {
     const totalDiscount = value.totalDiscount || 0;
     const totalTax = value.totalTax || 0;
     const shippingCost = value.shippingCost || 0;
+    const totalBoxes = value.totalBoxes || 0;
 
     // Apply discount to both totals (matching confirmation logic)
     const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
@@ -639,6 +640,7 @@ router.post('/manual', auth, async (req, res) => {
       // Financial fields
       subtotal,
       totalDiscount,
+      totalBoxes,
       totalTax,
       shippingCost,
       supplierPaymentTotal: discountedSupplierPaymentTotal, // What admin owes supplier (after discount)
