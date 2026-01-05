@@ -565,6 +565,7 @@ router.post('/manual', auth, async (req, res) => {
         season: season,
         costPrice: costPrice,
         primaryColor: item.primaryColor || (product ? product.color : undefined),
+        size: item.size || (product ? product.size : undefined), // Add size field
         material: item.material || (product ? product.specifications?.material : undefined),
         description: item.description,
         quantity: item.quantity,
@@ -818,8 +819,13 @@ router.post('/manual', auth, async (req, res) => {
 
           // Handle primaryColor: can be array or string
           const colorForProduct = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
-            ? item.primaryColor[0]  // Use first color as main color
+            ? item.primaryColor[0]  // Use first color as main color defined in specifications
             : (typeof item.primaryColor === 'string' ? item.primaryColor : undefined);
+
+          // For the main color field (which is an array in Schema), we should use the full array if available
+          const productColors = Array.isArray(item.primaryColor)
+            ? item.primaryColor
+            : (item.primaryColor ? [item.primaryColor] : []);
 
           const newProduct = new Product({
             name: item.productName || 'Unknown Product',
@@ -832,7 +838,7 @@ router.post('/manual', auth, async (req, res) => {
               costPrice: item.costPrice || (item.landedTotal / item.quantity),
               sellingPrice: (item.costPrice || (item.landedTotal / item.quantity)) * 1.2
             },
-            color: colorForProduct,
+            color: productColors, // Use array of colors
             specifications: {
               color: colorForProduct,  // Single color string (Product model expects string, not array)
               material: item.material || undefined
@@ -1619,9 +1625,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
         // We prioritize SKU as it is the unique identifier
         const productCodeTrimmed = item.productCode ? item.productCode.trim() : '';
         const productCodeUpper = productCodeTrimmed.toUpperCase();
-        
+
         console.log(`[Confirm Order] Looking for product with code: "${productCodeTrimmed}" (uppercase: "${productCodeUpper}")`);
-        
+
         let product = await Product.findOne({
           $or: [
             { sku: productCodeUpper },                      // Standardized SKU (uppercase)
@@ -1630,7 +1636,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             { productCode: { $regex: new RegExp(`^${productCodeTrimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } } // Case-insensitive productCode match
           ]
         });
-        
+
         if (product) {
           console.log(`[Confirm Order] Found existing product: ${product.name} (SKU: ${product.sku}, Code: ${product.productCode || 'N/A'}, isActive: ${product.isActive})`);
         } else {
@@ -1719,20 +1725,20 @@ router.post('/:id/confirm', auth, async (req, res) => {
             productNeedsSave = true;
             console.log(`[Confirm Order] Reactivating product: ${product.name} (${product.sku})`);
           }
-          
+
           // Update product cost price if landed price is different (use latest landed price)
           if (product.pricing.costPrice !== landedPrice) {
             product.pricing.costPrice = landedPrice;
             productNeedsSave = true;
             console.log(`[Confirm Order] Updated product cost price: ${product.name} -> ${landedPrice}`);
           }
-          
+
           // Always ensure product is active before proceeding
           if (!product.isActive) {
             product.isActive = true;
             productNeedsSave = true;
           }
-          
+
           if (productNeedsSave) {
             await product.save();
             console.log(`[Confirm Order] Saved product: ${product.name} (${product.sku}), isActive: ${product.isActive}`);
@@ -1810,7 +1816,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             console.log(`[Confirm Order] Reactivated inventory for product ${product.name} (${product.sku})`);
           }
         }
-        
+
         // Double-check: Ensure both product and inventory are active before adding stock
         if (!product.isActive) {
           product.isActive = true;
@@ -1889,11 +1895,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
           );
           console.log(`[Confirm Order] Added ${confirmedQuantity} units with batch tracking to inventory for ${product.name}`);
         }
-        
+
         // Verify inventory was saved correctly and ensure both product and inventory are active
         const savedInventory = await Inventory.findById(inventory._id).populate('product');
         const savedProduct = await Product.findById(product._id);
-        
+
         // Final verification: ensure both are active
         if (savedProduct && !savedProduct.isActive) {
           savedProduct.isActive = true;
@@ -1905,7 +1911,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
           await savedInventory.save();
           console.log(`[Confirm Order] Final fix: Activated inventory for product ${product.name}`);
         }
-        
+
         console.log(`[Confirm Order] Inventory verification for ${product.name}:`, {
           productId: savedProduct?._id?.toString(),
           productSku: savedProduct?.sku,
