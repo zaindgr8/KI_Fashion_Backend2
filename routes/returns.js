@@ -11,98 +11,146 @@ const BalanceService = require('../services/BalanceService');
 const router = express.Router();
 
 // Get products available for return from a specific supplier
-// Simple: Find products purchased from supplier via DispatchOrder, check inventory stock
+// OPTIMIZED: Uses Inventory.purchaseBatches for direct supplier lookup (indexed field)
 router.get('/products-for-return', auth, async (req, res) => {
   try {
-    const { search, supplierId } = req.query;
+    const { search = '', supplierId, limit = 50, skip = 0 } = req.query;
 
     if (!supplierId) {
       return sendResponse.error(res, 'Supplier ID is required', 400);
     }
 
-    // Find all CONFIRMED dispatch orders from this supplier
-    // Products are only linked to items after confirmation
-    const DispatchOrder = require('../models/DispatchOrder');
-    const dispatchOrders = await DispatchOrder.find({
-      supplier: supplierId,
-      status: 'confirmed'  // Only confirmed orders have product references
-    })
-      .select('items')
-      .lean();
+    const mongoose = require('mongoose');
+    const supplierObjectId = new mongoose.Types.ObjectId(supplierId);
 
-    if (!dispatchOrders || dispatchOrders.length === 0) {
-      console.log(`No confirmed dispatch orders found for supplier ${supplierId}`);
-      return sendResponse.success(res, []);
-    }
+    // Build search match for product lookup
+    const searchMatch = search ? {
+      $or: [
+        { name: { $regex: search, $options: 'i' } },
+        { sku: { $regex: search, $options: 'i' } },
+        { productCode: { $regex: search, $options: 'i' } }
+      ]
+    } : {};
 
-    // Extract all product IDs from dispatch orders
-    const productIds = new Set();
-    dispatchOrders.forEach(order => {
-      if (order.items && Array.isArray(order.items)) {
-        order.items.forEach(item => {
-          if (item.product || item.productId) {
-            productIds.add((item.product || item.productId).toString());
+    const pipeline = [
+      // Stage 1: Match inventories with batches from this supplier that have remaining stock
+      {
+        $match: {
+          'purchaseBatches.supplierId': supplierObjectId,
+          isActive: true
+        }
+      },
+
+      // Stage 2: Unwind batches to filter by supplier
+      { $unwind: '$purchaseBatches' },
+
+      // Stage 3: Filter only batches from this supplier with remaining stock
+      {
+        $match: {
+          'purchaseBatches.supplierId': supplierObjectId,
+          'purchaseBatches.remainingQuantity': { $gt: 0 }
+        }
+      },
+
+      // Stage 4: Group by product to aggregate all batches from this supplier
+      {
+        $group: {
+          _id: '$product',
+          inventoryId: { $first: '$_id' },
+          totalStock: { $first: '$currentStock' },
+          supplierStock: { $sum: '$purchaseBatches.remainingQuantity' },
+          averageCostPrice: { $first: '$averageCostPrice' },
+          // Calculate weighted sum for supplier-specific average cost
+          supplierCostPriceSum: {
+            $sum: {
+              $multiply: ['$purchaseBatches.remainingQuantity', '$purchaseBatches.costPrice']
+            }
+          },
+          batches: {
+            $push: {
+              batchId: '$purchaseBatches._id',
+              dispatchOrderId: '$purchaseBatches.dispatchOrderId',
+              remainingQuantity: '$purchaseBatches.remainingQuantity',
+              costPrice: '$purchaseBatches.costPrice',
+              purchaseDate: '$purchaseBatches.purchaseDate'
+            }
           }
-        });
-      }
-    });
+        }
+      },
 
-    console.log(`Found ${dispatchOrders.length} confirmed orders, extracted ${productIds.size} product IDs`);
+      // Stage 5: Calculate supplier-specific average cost price
+      {
+        $addFields: {
+          supplierAvgCostPrice: {
+            $cond: {
+              if: { $gt: ['$supplierStock', 0] },
+              then: { $divide: ['$supplierCostPriceSum', '$supplierStock'] },
+              else: '$averageCostPrice'
+            }
+          }
+        }
+      },
 
-    // If no product IDs found, return empty array
-    if (productIds.size === 0) {
-      console.log('No product IDs found in dispatch order items');
-      return sendResponse.success(res, []);
-    }
+      // Stage 6: Lookup product details
+      {
+        $lookup: {
+          from: 'products',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'product',
+          pipeline: [
+            {
+              $match: {
+                isActive: { $ne: false },
+                ...searchMatch
+              }
+            },
+            {
+              $project: {
+                name: 1,
+                sku: 1,
+                productCode: 1,
+                images: { $slice: ['$images', 1] }, // Only first image for performance
+                category: 1,
+                brand: 1
+              }
+            }
+          ]
+        }
+      },
 
-    // Build search query
-    const productQuery = {
-      _id: { $in: Array.from(productIds) },
-      isActive: { $ne: false }
-    };
+      // Stage 7: Unwind product (also filters out products that don't match search)
+      { $unwind: '$product' },
 
-    if (search) {
-      const searchRegex = new RegExp(search, 'i');
-      productQuery.$or = [
-        { name: searchRegex },
-        { sku: searchRegex },
-        { productCode: searchRegex }
-      ];
-    }
+      // Stage 8: Final projection matching frontend expectations
+      {
+        $project: {
+          _id: '$product._id',
+          name: '$product.name',
+          sku: '$product.sku',
+          productCode: '$product.productCode',
+          images: '$product.images',
+          category: '$product.category',
+          brand: '$product.brand',
+          currentStock: '$supplierStock', // Stock from THIS supplier only
+          availableForReturn: '$supplierStock',
+          averageCostPrice: '$supplierAvgCostPrice', // Cost for THIS supplier
+          // Include batch details for accurate return tracking
+          batches: 1
+        }
+      },
 
-    // Find products with inventory
-    const products = await Product.find(productQuery)
-      .select('name sku productCode')
-      .lean();
+      // Stage 9: Sort by product name
+      { $sort: { name: 1 } },
 
-    const inventories = await Inventory.find({
-      product: { $in: products.map(p => p._id) },
-      currentStock: { $gt: 0 }
-    })
-      .select('product currentStock averageCostPrice')
-      .lean();
+      // Stage 10: Pagination
+      { $skip: parseInt(skip) || 0 },
+      { $limit: parseInt(limit) || 50 }
+    ];
 
-    // Build inventory map
-    const inventoryMap = {};
-    inventories.forEach(inv => {
-      inventoryMap[inv.product.toString()] = inv;
-    });
+    const result = await Inventory.aggregate(pipeline);
 
-    // Combine products with inventory
-    const result = products
-      .filter(p => inventoryMap[p._id.toString()])
-      .map(product => {
-        const inv = inventoryMap[product._id.toString()];
-        return {
-          _id: product._id,
-          name: product.name,
-          sku: product.sku,
-          productCode: product.productCode,
-          currentStock: inv.currentStock,
-          availableForReturn: inv.currentStock,
-          averageCostPrice: inv.averageCostPrice || 0
-        };
-      });
+    console.log(`Found ${result.length} products for supplier ${supplierId} via purchaseBatches`);
 
     return sendResponse.success(res, result);
 
