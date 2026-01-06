@@ -488,6 +488,21 @@ router.post('/', auth, async (req, res) => {
 
 // Create manual entry (CRM Admin only - replaces Purchase)
 router.post('/manual', auth, async (req, res) => {
+  // Helper to normalize size/color arrays - handles strings, comma-separated strings, and arrays
+  const normalizeToArray = (value) => {
+    if (!value) return [];
+    if (Array.isArray(value)) {
+      // Flatten in case of nested comma-separated values, filter empty strings
+      return value
+        .flatMap(v => typeof v === 'string' ? v.split(',').map(s => s.trim()) : [v])
+        .filter(v => v && typeof v === 'string' && v.trim() !== '');
+    }
+    if (typeof value === 'string') {
+      return value.split(',').map(s => s.trim()).filter(s => s !== '');
+    }
+    return [];
+  };
+
   try {
     // Only admin/manager can create manual entries
     if (!['super-admin', 'admin'].includes(req.user.role)) {
@@ -824,17 +839,10 @@ router.post('/manual', auth, async (req, res) => {
             continue;
           }
 
-          // Handle primaryColor: can be array or string
-          const colorForProduct = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
-            ? item.primaryColor[0]  // Use first color as main color defined in specifications
-            : (typeof item.primaryColor === 'string' ? item.primaryColor : undefined);
-
-          // For the main color field (which is an array in Schema), we should use the full array if available
-          const productColors = Array.isArray(item.primaryColor)
-            ? item.primaryColor
-            : (item.primaryColor ? [item.primaryColor] : []);
-
-
+          // Normalize sizes and colors using helper function
+          const productSizes = normalizeToArray(item.size);
+          const productColors = normalizeToArray(item.primaryColor);
+          const colorForSpec = productColors.length > 0 ? productColors[0] : undefined;
 
           const newProduct = new Product({
             name: item.productName || 'Unknown Product',
@@ -847,10 +855,10 @@ router.post('/manual', auth, async (req, res) => {
               costPrice: item.costPrice || (item.landedTotal / item.quantity),
               sellingPrice: (item.costPrice || (item.landedTotal / item.quantity)) * 1.2
             },
-            size: item.size,
-            color: productColors, // ✅ Use the variable you defined!
+            size: productSizes,
+            color: productColors,
             specifications: {
-              color: colorForProduct,
+              color: colorForSpec,
               material: item.material || undefined
             },
             createdBy: req.user._id
@@ -915,6 +923,43 @@ router.post('/manual', auth, async (req, res) => {
             }
           } else {
             console.log(`[Manual Entry] All images already exist in product ${productObj.name || productObj._id}`);
+          }
+        }
+
+        // Update existing product's size and color arrays (merge new values)
+        if (productObj) {
+          let hasUpdates = false;
+
+          // Merge new sizes into existing product sizes
+          if (item.size) {
+            const newSizes = normalizeToArray(item.size);
+            const existingSizes = productObj.size || [];
+            const mergedSizes = [...new Set([...existingSizes, ...newSizes])];
+            if (mergedSizes.length !== existingSizes.length) {
+              productObj.size = mergedSizes;
+              hasUpdates = true;
+            }
+          }
+
+          // Merge new colors into existing product colors
+          if (item.primaryColor) {
+            const newColors = normalizeToArray(item.primaryColor);
+            const existingColors = productObj.color || [];
+            const mergedColors = [...new Set([...existingColors, ...newColors])];
+            if (mergedColors.length !== existingColors.length) {
+              productObj.color = mergedColors;
+              hasUpdates = true;
+            }
+          }
+
+          // Save if we have updates
+          if (hasUpdates) {
+            try {
+              await productObj.save();
+              console.log(`[Manual Entry] Updated product ${productObj.name} with sizes: [${productObj.size?.join(', ')}], colors: [${productObj.color?.join(', ')}]`);
+            } catch (updateError) {
+              console.error(`[Manual Entry] Failed to update product sizes/colors:`, updateError.message);
+            }
           }
         }
 
