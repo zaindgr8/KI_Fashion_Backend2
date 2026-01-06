@@ -2303,13 +2303,30 @@ router.post('/:id/return', auth, async (req, res) => {
     let totalReturnValue = 0;
 
     for (const returnItem of returnedItems) {
-      const { itemIndex, quantity, reason } = returnItem;
+      // Support both itemIndex (legacy) and productId (modal)
+      let itemIndex = returnItem.itemIndex;
+      let item;
 
-      if (itemIndex < 0 || itemIndex >= dispatchOrder.items.length) {
-        return sendResponse.error(res, `Invalid item index: ${itemIndex}`, 400);
+      if (itemIndex !== undefined && itemIndex !== null) {
+        if (itemIndex < 0 || itemIndex >= dispatchOrder.items.length) {
+          return sendResponse.error(res, `Invalid item index: ${itemIndex}`, 400);
+        }
+        item = dispatchOrder.items[itemIndex];
+      } else if (returnItem.productId) {
+        // Find item by product ID
+        itemIndex = dispatchOrder.items.findIndex(i =>
+          i.product && i.product.toString() === returnItem.productId
+        );
+
+        if (itemIndex === -1) {
+          return sendResponse.error(res, `Product not found in dispatch order: ${returnItem.productId}`, 404);
+        }
+        item = dispatchOrder.items[itemIndex];
+      } else {
+        return sendResponse.error(res, 'Item identifier (itemIndex or productId) is required', 400);
       }
 
-      const item = dispatchOrder.items[itemIndex];
+      const { quantity, reason, batchId } = returnItem;
       const originalQty = item.quantity;
 
       // Calculate already returned quantity for this item
@@ -2327,6 +2344,37 @@ router.post('/:id/return', auth, async (req, res) => {
         return sendResponse.error(res, `Return quantity (${quantity}) exceeds remaining quantity (${remainingQty}) for item ${itemIndex}`, 400);
       }
 
+      // Handle Batch Deduction (if batchId provided)
+      let batchDeductionInfo = null;
+      if (batchId && item.product) {
+        const inventory = await Inventory.findOne({ product: item.product });
+        if (inventory) {
+          const batch = inventory.purchaseBatches.find(b => b._id.toString() === batchId);
+          if (batch) {
+            // Only deduct if batch has enough quantity (safeguard)
+            if (batch.remainingQuantity < quantity) {
+              // If the batch doesn't have enough, we allow the return but only deduct what's available
+              // This prevents blocking returns if data is slightly out of sync
+              console.warn(`[Return] Insufficient batch quantity for ${item.productCode || 'product'}. Available: ${batch.remainingQuantity}, Requested: ${quantity}`);
+            }
+
+            // Reduce batch quantity, but don't go below 0
+            const deductAmount = Math.min(batch.remainingQuantity, quantity);
+            batch.remainingQuantity -= deductAmount;
+            await inventory.save();
+
+            batchDeductionInfo = {
+              batchId: batch._id,
+              dispatchOrderId: dispatchOrder._id,
+              quantity: quantity,
+              costPrice: batch.costPrice
+            };
+          } else {
+            console.warn(`[Return] Batch ${batchId} not found in inventory for product ${item.product}`);
+          }
+        }
+      }
+
       // Calculate return value using actual cost price paid to supplier (supplier currency)
       // NOT landed price - we return what we paid the supplier
       // Use costPrice directly (NO exchange rate) because that's what we paid supplier during confirmation
@@ -2337,7 +2385,7 @@ router.post('/:id/return', auth, async (req, res) => {
       // Keep landedPrice for reference
       const landedPrice = item.landedPrice || (item.costPrice * (dispatchOrder.exchangeRate || 1) * (1 + ((dispatchOrder.percentage || 0) / 100)));
 
-      returnItemsData.push({
+      const returnItemData = {
         itemIndex,
         originalQuantity: originalQty,
         returnedQuantity: quantity,
@@ -2345,7 +2393,13 @@ router.post('/:id/return', auth, async (req, res) => {
         supplierPaymentAmount, // What we actually return to supplier
         landedPrice, // Keep for reference
         reason: reason || ''
-      });
+      };
+
+      if (batchDeductionInfo) {
+        returnItemData.batchDeductions = [batchDeductionInfo];
+      }
+
+      returnItemsData.push(returnItemData);
 
       // Add to dispatch order's returnedItems array
       dispatchOrder.returnedItems.push({
@@ -2365,7 +2419,8 @@ router.post('/:id/return', auth, async (req, res) => {
       totalReturnValue,
       returnedAt: new Date(),
       returnedBy: req.user._id,
-      notes: req.body.notes || ''
+      notes: req.body.notes || '',
+      returnType: 'order-level'
     });
 
     await returnDoc.save();

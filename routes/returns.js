@@ -215,8 +215,8 @@ router.get('/products-for-return', auth, async (req, res) => {
   }
 });
 
-// Create product-level supplier return (simplified - no batches)
-// Reduce inventory, create ledger entry, update supplier balance
+// Create product-level supplier return (batch-aware)
+// Uses specific batch data for accurate cost tracking and FIFO inventory management
 router.post('/product-return', auth, async (req, res) => {
   try {
     if (!['super-admin', 'admin'].includes(req.user.role)) {
@@ -245,12 +245,13 @@ router.post('/product-return', auth, async (req, res) => {
       return sendResponse.error(res, 'Supplier not found', 404);
     }
 
-    // Process each item
+    // Process each item with batch-specific data
     const processedItems = [];
     let totalReturnValue = 0;
+    let commonDispatchOrderId = null; // Track the dispatch order for all items
 
     for (const item of items) {
-      const { productId, quantity, reason } = item;
+      const { productId, batchId, quantity, reason } = item;
 
       if (!productId || !quantity || quantity <= 0) {
         return sendResponse.error(res, 'Each item must have productId and positive quantity', 400);
@@ -268,7 +269,42 @@ router.post('/product-return', auth, async (req, res) => {
         return sendResponse.error(res, `No inventory found for product: ${product.name}`, 404);
       }
 
-      // Check stock
+      // Find the specific batch if batchId is provided
+      let batch = null;
+      let costPrice = inventory.averageCostPrice || 0; // Fallback to average
+      let dispatchOrderId = null;
+
+      if (batchId) {
+        // Find the exact batch by batchId
+        batch = inventory.purchaseBatches.find(b => b._id.toString() === batchId);
+
+        if (!batch) {
+          return sendResponse.error(res, `Batch not found for product: ${product.name}. BatchId: ${batchId}`, 404);
+        }
+
+        if (batch.remainingQuantity < quantity) {
+          return sendResponse.error(res,
+            `Insufficient batch quantity for ${product.name}. Available in batch: ${batch.remainingQuantity}, Requested: ${quantity}`,
+            400
+          );
+        }
+
+        // Use batch-specific data
+        costPrice = batch.costPrice || costPrice;
+        dispatchOrderId = batch.dispatchOrderId;
+
+        // Validate all items are from the same dispatch order
+        if (commonDispatchOrderId === null) {
+          commonDispatchOrderId = dispatchOrderId;
+        } else if (dispatchOrderId && commonDispatchOrderId.toString() !== dispatchOrderId.toString()) {
+          return sendResponse.error(res, 'All items must be from the same Dispatch Order', 400);
+        }
+
+        // Reduce the specific batch's remainingQuantity (FIFO tracking)
+        batch.remainingQuantity -= quantity;
+      }
+
+      // Check overall stock
       if (inventory.currentStock < quantity) {
         return sendResponse.error(res,
           `Insufficient stock for ${product.name}. Available: ${inventory.currentStock}, Requested: ${quantity}`,
@@ -276,8 +312,6 @@ router.post('/product-return', auth, async (req, res) => {
         );
       }
 
-      // Use averageCostPrice from inventory
-      const costPrice = inventory.averageCostPrice || 0;
       const itemTotalCost = quantity * costPrice;
 
       // Add stock movement
@@ -285,9 +319,9 @@ router.post('/product-return', auth, async (req, res) => {
         type: 'out',
         quantity: quantity,
         reference: 'SupplierReturn',
-        referenceId: null,
+        referenceId: null, // Will be updated after Return document is created
         user: req.user._id,
-        notes: `Return - ${reason || 'No reason'}`,
+        notes: `Return - ${reason || 'No reason'}${batch ? ` (Batch: ${batchId})` : ''}`,
         date: new Date()
       });
 
@@ -298,6 +332,8 @@ router.post('/product-return', auth, async (req, res) => {
 
       processedItems.push({
         product: productId,
+        dispatchOrderId: dispatchOrderId,
+        batchId: batch ? batch._id : null,
         productName: product.name,
         productCode: product.productCode || product.sku,
         quantity: quantity,
@@ -309,10 +345,10 @@ router.post('/product-return', auth, async (req, res) => {
       totalReturnValue += itemTotalCost;
     }
 
-    // Create Return document
+    // Create Return document with proper dispatchOrder reference
     const returnDoc = new Return({
       supplier: supplierId,
-      dispatchOrder: null,
+      dispatchOrder: commonDispatchOrderId || null, // Set from batch data, not hardcoded null
       items: processedItems.map((item, index) => ({
         itemIndex: index,
         product: item.product,
@@ -321,7 +357,14 @@ router.post('/product-return', auth, async (req, res) => {
         originalQuantity: item.quantity,
         returnedQuantity: item.quantity,
         costPrice: item.costPrice,
-        reason: item.reason
+        reason: item.reason,
+        // Track which batch was deducted for audit purposes
+        batchDeductions: item.batchId ? [{
+          batchId: item.batchId,
+          dispatchOrderId: item.dispatchOrderId,
+          quantity: item.quantity,
+          costPrice: item.costPrice
+        }] : []
       })),
       totalReturnValue: totalReturnValue,
       returnedAt: returnDate ? new Date(returnDate) : new Date(),
@@ -332,7 +375,7 @@ router.post('/product-return', auth, async (req, res) => {
 
     await returnDoc.save();
 
-    // Update stock movement references
+    // Update stock movement references with the Return document ID
     for (const item of processedItems) {
       const inventory = await Inventory.findOne({ product: item.product });
       if (inventory && inventory.stockMovements.length > 0) {
@@ -355,7 +398,7 @@ router.post('/product-return', auth, async (req, res) => {
       debit: 0,
       credit: totalReturnValue,
       date: returnDoc.returnedAt,
-      description: `Product Return - ${processedItems.length} item(s) worth £${totalReturnValue.toFixed(2)}`,
+      description: `Product Return - ${processedItems.length} item(s) worth £${totalReturnValue.toFixed(2)}${commonDispatchOrderId ? ` (Order: ${commonDispatchOrderId})` : ''}`,
       remarks: `Return ID: ${returnDoc._id}`,
       createdBy: req.user._id
     });
@@ -369,6 +412,7 @@ router.post('/product-return', auth, async (req, res) => {
     // Populate for response
     await returnDoc.populate([
       { path: 'supplier', select: 'name company' },
+      { path: 'dispatchOrder', select: 'orderNumber' },
       { path: 'returnedBy', select: 'name' },
       { path: 'items.product', select: 'name sku productCode' }
     ]);
@@ -379,7 +423,8 @@ router.post('/product-return', auth, async (req, res) => {
         totalItems: processedItems.length,
         totalQuantity: processedItems.reduce((sum, i) => sum + i.quantity, 0),
         totalReturnValue: totalReturnValue,
-        supplierBalanceAdjustment: -totalReturnValue
+        supplierBalanceAdjustment: -totalReturnValue,
+        dispatchOrderId: commonDispatchOrderId
       }
     }, 'Return created successfully', 201);
 
