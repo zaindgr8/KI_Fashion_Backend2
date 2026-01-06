@@ -476,7 +476,7 @@ router.get('/', auth, async (req, res) => {
       .populate('returnedBy', 'name')
       .populate({
         path: 'dispatchOrder',
-        select: 'orderNumber',
+        select: 'orderNumber purchaseDate dispatchDate confirmedAt createdAt',
         populate: {
           path: 'items.product',
           select: 'name sku unit images color size productCode pricing'
