@@ -574,7 +574,12 @@ router.get('/', auth, async (req, res) => {
           product: product,
           productType: productType,
           costPrice: item.costPrice,
-          landedTotal: item.landedTotal
+          landedTotal: item.landedTotal,
+          // ADD: Include full color and size arrays for proper display
+          primaryColor: primaryColorArray,
+          primaryColorDisplay: primaryColorArray.length > 0 ? primaryColorArray : null,
+          sizeArray: sizeArray,
+          packets: item.packets || []
         };
       });
 
