@@ -625,9 +625,12 @@ router.post('/manual', auth, async (req, res) => {
     );
 
     // Create dispatch order as manual entry
+    // If the supplier has a portal account (userId), set supplierUser so the entry appears in their portal
+    const supplierUserId = supplier.userId || null;
+
     const dispatchOrder = new DispatchOrder({
       supplier: value.supplier,
-      supplierUser: null, // Manual entry - no supplierUser
+      supplierUser: supplierUserId, // Set to supplier's userId if they have a portal account
       logisticsCompany: value.logisticsCompany || null, // Optional - for tracking logistics charges
       dispatchDate: value.purchaseDate ? new Date(value.purchaseDate) : new Date(),
       expectedDeliveryDate: value.expectedDeliveryDate,
@@ -844,7 +847,6 @@ router.post('/manual', auth, async (req, res) => {
               costPrice: item.costPrice || (item.landedTotal / item.quantity),
               sellingPrice: (item.costPrice || (item.landedTotal / item.quantity)) * 1.2
             },
-            size: item.size,
             size: item.size,
             color: productColors, // ✅ Use the variable you defined!
             specifications: {
