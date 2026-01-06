@@ -930,23 +930,23 @@ router.post('/manual', auth, async (req, res) => {
         if (productObj) {
           let hasUpdates = false;
 
-          // Merge new sizes into existing product sizes
+          // Merge new sizes into existing product sizes (normalize both to handle old merged values)
           if (item.size) {
             const newSizes = normalizeToArray(item.size);
-            const existingSizes = productObj.size || [];
+            const existingSizes = normalizeToArray(productObj.size); // Normalize existing too!
             const mergedSizes = [...new Set([...existingSizes, ...newSizes])];
-            if (mergedSizes.length !== existingSizes.length) {
+            if (JSON.stringify(mergedSizes.sort()) !== JSON.stringify((productObj.size || []).sort())) {
               productObj.size = mergedSizes;
               hasUpdates = true;
             }
           }
 
-          // Merge new colors into existing product colors
+          // Merge new colors into existing product colors (normalize both to handle old merged values)
           if (item.primaryColor) {
             const newColors = normalizeToArray(item.primaryColor);
-            const existingColors = productObj.color || [];
+            const existingColors = normalizeToArray(productObj.color); // Normalize existing too!
             const mergedColors = [...new Set([...existingColors, ...newColors])];
-            if (mergedColors.length !== existingColors.length) {
+            if (JSON.stringify(mergedColors.sort()) !== JSON.stringify((productObj.color || []).sort())) {
               productObj.color = mergedColors;
               hasUpdates = true;
             }
