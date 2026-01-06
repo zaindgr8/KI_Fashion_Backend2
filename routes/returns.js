@@ -12,6 +12,7 @@ const router = express.Router();
 
 // Get products available for return from a specific supplier
 // OPTIMIZED: Uses Inventory.purchaseBatches for direct supplier lookup (indexed field)
+// FIXED: Now handles both string and ObjectId formats for supplierId to include manual buying entries
 router.get('/products-for-return', auth, async (req, res) => {
   try {
     const { search = '', supplierId, limit = 50, skip = 0 } = req.query;
@@ -22,6 +23,7 @@ router.get('/products-for-return', auth, async (req, res) => {
 
     const mongoose = require('mongoose');
     const supplierObjectId = new mongoose.Types.ObjectId(supplierId);
+    const supplierIdString = supplierId.toString();
 
     // Build search match for product lookup
     const searchMatch = search ? {
@@ -34,9 +36,13 @@ router.get('/products-for-return', auth, async (req, res) => {
 
     const pipeline = [
       // Stage 1: Match inventories with batches from this supplier that have remaining stock
+      // Handle both ObjectId and string formats for supplierId (for backward compatibility with manual entries)
       {
         $match: {
-          'purchaseBatches.supplierId': supplierObjectId,
+          $or: [
+            { 'purchaseBatches.supplierId': supplierObjectId },
+            { 'purchaseBatches.supplierId': supplierIdString }
+          ],
           isActive: true
         }
       },
@@ -45,9 +51,13 @@ router.get('/products-for-return', auth, async (req, res) => {
       { $unwind: '$purchaseBatches' },
 
       // Stage 3: Filter only batches from this supplier with remaining stock
+      // Handle both ObjectId and string formats
       {
         $match: {
-          'purchaseBatches.supplierId': supplierObjectId,
+          $or: [
+            { 'purchaseBatches.supplierId': supplierObjectId },
+            { 'purchaseBatches.supplierId': supplierIdString }
+          ],
           'purchaseBatches.remainingQuantity': { $gt: 0 }
         }
       },
@@ -185,7 +195,17 @@ router.get('/products-for-return', auth, async (req, res) => {
 
     const result = await Inventory.aggregate(pipeline);
 
-    console.log(`Found ${result.length} products for supplier ${supplierId} via purchaseBatches`);
+    console.log(`[Returns] Found ${result.length} products for supplier ${supplierId} (searched both ObjectId and string formats)`);
+
+    // If no results, log additional debug info
+    if (result.length === 0) {
+      const totalInventoryCount = await Inventory.countDocuments({ isActive: true });
+      const batchCount = await Inventory.countDocuments({
+        isActive: true,
+        'purchaseBatches.0': { $exists: true }
+      });
+      console.log(`[Returns] Debug: Total active inventories: ${totalInventoryCount}, With batches: ${batchCount}`);
+    }
 
     return sendResponse.success(res, result);
 
