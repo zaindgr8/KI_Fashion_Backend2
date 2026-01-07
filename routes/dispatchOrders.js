@@ -1421,9 +1421,9 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
     dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
     dispatchOrder.grandTotal = grandTotal;
     dispatchOrder.paymentDetails = {
-      cashPayment: (parseFloat(cashPayment) || 0) / finalExchangeRate,
-      bankPayment: (parseFloat(bankPayment) || 0) / finalExchangeRate,
-      remainingBalance: (discountedSupplierPaymentTotal / finalExchangeRate) - ((parseFloat(cashPayment) || 0) / finalExchangeRate) - ((parseFloat(bankPayment) || 0) / finalExchangeRate),
+      cashPayment: (parseFloat(cashPayment) || 0),
+      bankPayment: (parseFloat(bankPayment) || 0),
+      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
       paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
         ? 'paid'
         : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
@@ -2057,9 +2057,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal; // Use discounted amount
     dispatchOrder.grandTotal = grandTotal; // Landed total after discount (for inventory valuation)
     dispatchOrder.paymentDetails = {
-      cashPayment: (parseFloat(cashPayment) || 0) / finalExchangeRate,
-      bankPayment: (parseFloat(bankPayment) || 0) / finalExchangeRate,
-      remainingBalance: (discountedSupplierPaymentTotal / finalExchangeRate) - ((parseFloat(cashPayment) || 0) / finalExchangeRate) - ((parseFloat(bankPayment) || 0) / finalExchangeRate),
+      cashPayment: (parseFloat(cashPayment) || 0),
+      bankPayment: (parseFloat(bankPayment) || 0),
+      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
       paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
         ? 'paid'
         : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
