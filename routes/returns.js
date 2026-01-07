@@ -388,14 +388,9 @@ router.post('/product-return', auth, async (req, res) => {
     }
 
     // Create ledger entry
-    // Calculate remaining balance for the linked order (if exists)
-    let currentOrderRemaining = 0;
-    if (commonDispatchOrderId) {
-      const DispatchOrder = require('../models/DispatchOrder');
-      const linkedOrder = await DispatchOrder.findById(commonDispatchOrderId);
-      currentOrderRemaining = linkedOrder?.paymentDetails?.remainingBalance || 0;
-    }
-    const newRemainingBalance = Math.max(0, currentOrderRemaining - totalReturnValue);
+    // Get current supplier balance using BalanceService (accurate aggregation-based calculation)
+    const currentSupplierBalance = await BalanceService.getSupplierBalance(supplierId);
+    const newSupplierBalance = currentSupplierBalance - totalReturnValue;
 
     await Ledger.createEntry({
       type: 'supplier',
@@ -413,7 +408,7 @@ router.post('/product-return', auth, async (req, res) => {
       paymentDetails: {
         cashPayment: 0,
         bankPayment: 0,
-        remainingBalance: newRemainingBalance
+        remainingBalance: newSupplierBalance
       }
     });
 

@@ -2438,9 +2438,9 @@ router.post('/:id/return', auth, async (req, res) => {
     if (dispatchOrder.status === 'confirmed') {
       const totalReturnedItems = returnItemsData.reduce((sum, item) => sum + item.returnedQuantity, 0);
 
-      // Calculate remaining balance BEFORE creating ledger entry
-      const currentRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0;
-      const newRemaining = Math.max(0, currentRemaining - totalReturnValue);
+      // Get current supplier balance using BalanceService (accurate aggregation-based calculation)
+      const currentSupplierBalance = await BalanceService.getSupplierBalance(dispatchOrder.supplier._id);
+      const newSupplierBalance = currentSupplierBalance - totalReturnValue;
 
       await Ledger.createEntry({
         type: 'supplier',
@@ -2458,7 +2458,7 @@ router.post('/:id/return', auth, async (req, res) => {
         paymentDetails: {
           cashPayment: 0,
           bankPayment: 0,
-          remainingBalance: newRemaining
+          remainingBalance: newSupplierBalance
         }
       });
 
@@ -2480,19 +2480,23 @@ router.post('/:id/return', auth, async (req, res) => {
         };
       });
 
-      // Update payment details - reduce remaining balance by return value
+      // Update payment details - reduce per-order remaining balance by return value
+      const currentOrderRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0;
+      const newOrderRemaining = Math.max(0, currentOrderRemaining - totalReturnValue);
+
       dispatchOrder.paymentDetails = {
         ...dispatchOrder.paymentDetails,
-        remainingBalance: newRemaining,
+        remainingBalance: newOrderRemaining,
         // Update payment status if now fully paid
-        paymentStatus: newRemaining <= 0 ? 'paid' :
+        paymentStatus: newOrderRemaining <= 0 ? 'paid' :
           (dispatchOrder.paymentDetails?.cashPayment || 0) +
             (dispatchOrder.paymentDetails?.bankPayment || 0) +
             (dispatchOrder.paymentDetails?.creditApplied || 0) > 0
             ? 'partial' : 'pending'
       };
 
-      console.log(`[Return] Updated remainingBalance: €${currentRemaining.toFixed(2)} -> €${newRemaining.toFixed(2)} (return value: €${totalReturnValue.toFixed(2)})`);
+      console.log(`[Return] Updated order remainingBalance: €${currentOrderRemaining.toFixed(2)} -> €${newOrderRemaining.toFixed(2)} (return value: €${totalReturnValue.toFixed(2)})`);
+      console.log(`[Return] Supplier balance updated: ${currentSupplierBalance} -> ${newSupplierBalance}`);
 
 
       // Reduce inventory for returned items
