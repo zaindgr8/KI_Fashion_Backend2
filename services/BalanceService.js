@@ -514,6 +514,9 @@ class BalanceService {
       const paymentForOrder = isLastOrder ? remainingAmount : Math.min(remainingAmount, orderRemaining);
 
       if (paymentForOrder > 0) {
+        // Calculate the new remaining balance for this order after this payment
+        const newOrderRemaining = orderRemaining - paymentForOrder;
+
         // Create ledger entry linked to this order
         await Ledger.createEntry({
           type: 'supplier',
@@ -527,7 +530,12 @@ class BalanceService {
           paymentMethod,
           date,
           description: description || `Distributed payment from bulk payment`,
-          createdBy
+          createdBy,
+          paymentDetails: {
+            cashPayment: paymentMethod === 'cash' ? paymentForOrder : 0,
+            bankPayment: paymentMethod === 'bank' ? paymentForOrder : 0,
+            remainingBalance: Math.max(0, newOrderRemaining)
+          }
         }, session);
 
         distributions.push({
@@ -535,7 +543,7 @@ class BalanceService {
           orderNumber: order.orderNumber,
           amountApplied: paymentForOrder,
           previousRemaining: orderRemaining,
-          newRemaining: orderRemaining - paymentForOrder
+          newRemaining: newOrderRemaining
         });
 
         remainingAmount -= paymentForOrder;
@@ -554,7 +562,12 @@ class BalanceService {
         paymentMethod,
         date,
         description: description || `Excess payment (credit to supplier account)`,
-        createdBy
+        createdBy,
+        paymentDetails: {
+          cashPayment: paymentMethod === 'cash' ? remainingAmount : 0,
+          bankPayment: paymentMethod === 'bank' ? remainingAmount : 0,
+          remainingBalance: 0 // No remaining balance for excess/credit entries
+        }
       }, session);
 
       distributions.push({
@@ -788,6 +801,9 @@ class BalanceService {
       const paymentForCharge = isLastCharge ? remainingAmount : Math.min(remainingAmount, chargeRemaining);
 
       if (paymentForCharge > 0) {
+        // Calculate new remaining balance for this charge
+        const newChargeRemaining = chargeRemaining - paymentForCharge;
+
         await Ledger.createEntry({
           type: 'logistics',
           entityId: logisticsCompanyId,
@@ -800,13 +816,20 @@ class BalanceService {
           paymentMethod,
           date,
           description: description || `Distributed payment`,
-          createdBy
+          createdBy,
+          paymentDetails: {
+            cashPayment: paymentMethod === 'cash' ? paymentForCharge : 0,
+            bankPayment: paymentMethod === 'bank' ? paymentForCharge : 0,
+            remainingBalance: Math.max(0, newChargeRemaining)
+          }
         }, session);
 
         distributions.push({
           orderId: charge.orderId,
           orderNumber: charge.orderNumber,
-          amountApplied: paymentForCharge
+          amountApplied: paymentForCharge,
+          previousRemaining: chargeRemaining,
+          newRemaining: newChargeRemaining
         });
 
         remainingAmount -= paymentForCharge;
@@ -825,13 +848,20 @@ class BalanceService {
         paymentMethod,
         date,
         description: `Excess payment (credit)`,
-        createdBy
+        createdBy,
+        paymentDetails: {
+          cashPayment: paymentMethod === 'cash' ? remainingAmount : 0,
+          bankPayment: paymentMethod === 'bank' ? remainingAmount : 0,
+          remainingBalance: 0
+        }
       }, session);
 
       distributions.push({
         orderId: null,
         orderNumber: 'CREDIT',
-        amountApplied: remainingAmount
+        amountApplied: remainingAmount,
+        previousRemaining: 0,
+        newRemaining: -remainingAmount
       });
     }
 
