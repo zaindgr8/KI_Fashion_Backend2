@@ -10,8 +10,14 @@ const productSchema = new mongoose.Schema({
   sku: {
     type: String,
     required: true,
-    unique: true,
     uppercase: true
+  },
+  // Primary supplier for this product entry - used for uniqueness
+  supplier: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Supplier',
+    required: true,
+    index: true
   },
   description: {
     type: String,
@@ -180,6 +186,9 @@ productSchema.virtual('profitMargin').get(function () {
 productSchema.virtual('primaryImage').get(function () {
   return this.images && this.images.length > 0 ? this.images[0] : null;
 });
+
+// Compound unique index: one product per SKU-supplier combination
+productSchema.index({ sku: 1, supplier: 1 }, { unique: true });
 
 // Performance indexes for frequently queried fields
 productSchema.index({ season: 1, isActive: 1 });

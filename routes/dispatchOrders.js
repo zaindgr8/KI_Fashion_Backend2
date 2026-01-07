@@ -542,11 +542,10 @@ router.post('/manual', auth, async (req, res) => {
         season = product.season;
       } else if (item.productCode) {
         // Try to find existing product by code
+        // Try to find existing product by code AND supplier
         product = await Product.findOne({
-          $or: [
-            { sku: item.productCode.toUpperCase() },
-            { productCode: item.productCode }
-          ]
+          sku: item.productCode.toUpperCase(),
+          supplier: value.supplier // Use the supplier from the dispatch order
         });
 
         if (product) {
@@ -847,6 +846,7 @@ router.post('/manual', auth, async (req, res) => {
           const newProduct = new Product({
             name: item.productName || 'Unknown Product',
             sku: item.productCode?.toUpperCase() || 'UNKNOWN',
+            supplier: supplier._id, // Associate product with supplier
             productCode: item.productCode,
             season: item.season,
             category: 'General',
@@ -869,8 +869,11 @@ router.post('/manual', auth, async (req, res) => {
             item.product = newProduct._id;
           } catch (productError) {
             if (productError.code === 11000) {
-              // Duplicate SKU - find existing
-              const existingProduct = await Product.findOne({ sku: item.productCode?.toUpperCase() });
+              // Duplicate SKU+supplier - find existing for this supplier
+              const existingProduct = await Product.findOne({
+                sku: item.productCode?.toUpperCase(),
+                supplier: supplier._id
+              });
               if (existingProduct) {
                 item.product = existingProduct._id;
               } else {
@@ -1676,26 +1679,23 @@ router.post('/:id/confirm', auth, async (req, res) => {
         const landedPrice = item.landedPrice || itemsWithPrices[index].landedPrice;
 
         // Find or create Product
-        // STRICT CHECK: Check if product exists with this SKU or Code
-        // We prioritize SKU as it is the unique identifier
+        // SUPPLIER-SCOPED: Look for product with this SKU FROM THIS SUPPLIER
         const productCodeTrimmed = item.productCode ? item.productCode.trim() : '';
         const productCodeUpper = productCodeTrimmed.toUpperCase();
+        const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
 
-        console.log(`[Confirm Order] Looking for product with code: "${productCodeTrimmed}" (uppercase: "${productCodeUpper}")`);
+        console.log(`[Confirm Order] Looking for product with code: "${productCodeTrimmed}" from supplier: ${supplierId}`);
 
+        // First, try to find a product with matching SKU AND supplier
         let product = await Product.findOne({
-          $or: [
-            { sku: productCodeUpper },                      // Standardized SKU (uppercase)
-            { productCode: productCodeTrimmed },           // Literal code match (case-sensitive)
-            { sku: productCodeTrimmed },                   // Just in case SKU wasn't uppercased in DB (legacy)
-            { productCode: { $regex: new RegExp(`^${productCodeTrimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } } // Case-insensitive productCode match
-          ]
+          sku: productCodeUpper,
+          supplier: supplierId
         });
 
         if (product) {
-          console.log(`[Confirm Order] Found existing product: ${product.name} (SKU: ${product.sku}, Code: ${product.productCode || 'N/A'}, isActive: ${product.isActive})`);
+          console.log(`[Confirm Order] Found existing product for supplier: ${product.name} (SKU: ${product.sku}, Supplier: ${product.supplier}, isActive: ${product.isActive})`);
         } else {
-          console.log(`[Confirm Order] Product not found, will create new product with code: "${productCodeTrimmed}"`);
+          console.log(`[Confirm Order] Product not found for supplier ${supplierId}, will create new product with code: "${productCodeTrimmed}"`);
         }
 
         if (!product) {
@@ -1716,6 +1716,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
           product = new Product({
             name: item.productName,
             sku: item.productCode.toUpperCase(),
+            supplier: supplierId, // Associate product with supplier
             productCode: item.productCode,
             season: season,
             category: 'General',
@@ -1742,11 +1743,14 @@ router.post('/:id/confirm', auth, async (req, res) => {
 
           try {
             await product.save();
-            console.log(`[Confirm Order] Created new product: ${product.name} (${product.sku})`);
+            console.log(`[Confirm Order] Created new product: ${product.name} (${product.sku}) for supplier ${supplierId}`);
           } catch (productError) {
-            // If product creation fails (e.g., duplicate SKU), try to find again
+            // If product creation fails (e.g., duplicate SKU+supplier), try to find again
             if (productError.code === 11000) {
-              product = await Product.findOne({ sku: item.productCode.toUpperCase() });
+              product = await Product.findOne({
+                sku: item.productCode.toUpperCase(),
+                supplier: supplierId
+              });
               if (!product) {
                 const error = `Failed to create product and refetch failed: ${productError.message}`;
                 console.error(`[Confirm Order] Item ${index} ${error}`);
@@ -2908,12 +2912,12 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
           }
 
           const landedPrice = item.landedPrice || itemsWithPrices[index].landedPrice;
+          const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
 
+          // SUPPLIER-SCOPED: Look for product with this SKU from this supplier
           let product = await Product.findOne({
-            $or: [
-              { sku: item.productCode.toUpperCase() },
-              { productCode: item.productCode }
-            ]
+            sku: item.productCode.toUpperCase(),
+            supplier: supplierId
           });
 
           if (!product) {
@@ -2925,6 +2929,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
             product = new Product({
               name: item.productName,
               sku: item.productCode.toUpperCase(),
+              supplier: supplierId, // Associate product with supplier
               productCode: item.productCode,
               season: season,
               category: 'General', // Default category since we no longer use ProductType
@@ -2945,7 +2950,10 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
               await product.save();
             } catch (productError) {
               if (productError.code === 11000) {
-                product = await Product.findOne({ sku: item.productCode.toUpperCase() });
+                product = await Product.findOne({
+                  sku: item.productCode.toUpperCase(),
+                  supplier: supplierId
+                });
               } else {
                 console.error(`Error creating product for item ${index}:`, productError);
                 continue;
@@ -3485,7 +3493,11 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
     const item = dispatchOrder.items[itemIndex];
     if (item.productCode) {
       try {
-        let product = await Product.findOne({ code: item.productCode });
+        const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
+        let product = await Product.findOne({
+          sku: item.productCode.toUpperCase(),
+          supplier: supplierId
+        });
 
         if (product) {
           // Update existing product - add image if not already present
@@ -3718,15 +3730,14 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
     const item = dispatchOrder.items[itemIndex];
     let product = null;
 
-    // Find product by reference or productCode
+    // Find product by reference or productCode (supplier-scoped)
+    const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
     if (item.product) {
       product = await Product.findById(item.product);
     } else if (item.productCode) {
       product = await Product.findOne({
-        $or: [
-          { sku: item.productCode.toUpperCase() },
-          { productCode: item.productCode }
-        ]
+        sku: item.productCode.toUpperCase(),
+        supplier: supplierId
       });
     }
 
