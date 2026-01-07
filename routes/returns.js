@@ -388,6 +388,15 @@ router.post('/product-return', auth, async (req, res) => {
     }
 
     // Create ledger entry
+    // Calculate remaining balance for the linked order (if exists)
+    let currentOrderRemaining = 0;
+    if (commonDispatchOrderId) {
+      const DispatchOrder = require('../models/DispatchOrder');
+      const linkedOrder = await DispatchOrder.findById(commonDispatchOrderId);
+      currentOrderRemaining = linkedOrder?.paymentDetails?.remainingBalance || 0;
+    }
+    const newRemainingBalance = Math.max(0, currentOrderRemaining - totalReturnValue);
+
     await Ledger.createEntry({
       type: 'supplier',
       entityId: supplierId,
@@ -400,7 +409,12 @@ router.post('/product-return', auth, async (req, res) => {
       date: returnDoc.returnedAt,
       description: `Product Return - ${processedItems.length} item(s) worth £${totalReturnValue.toFixed(2)}${commonDispatchOrderId ? ` (Order: ${commonDispatchOrderId})` : ''}`,
       remarks: `Return ID: ${returnDoc._id}`,
-      createdBy: req.user._id
+      createdBy: req.user._id,
+      paymentDetails: {
+        cashPayment: 0,
+        bankPayment: 0,
+        remainingBalance: newRemainingBalance
+      }
     });
 
     // Update supplier balance (reduce what we owe them)

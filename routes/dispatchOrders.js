@@ -2438,6 +2438,10 @@ router.post('/:id/return', auth, async (req, res) => {
     if (dispatchOrder.status === 'confirmed') {
       const totalReturnedItems = returnItemsData.reduce((sum, item) => sum + item.returnedQuantity, 0);
 
+      // Calculate remaining balance BEFORE creating ledger entry
+      const currentRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0;
+      const newRemaining = Math.max(0, currentRemaining - totalReturnValue);
+
       await Ledger.createEntry({
         type: 'supplier',
         entityId: dispatchOrder.supplier._id,
@@ -2450,7 +2454,12 @@ router.post('/:id/return', auth, async (req, res) => {
         date: new Date(),
         description: `Return from Dispatch Order ${dispatchOrder.orderNumber} - ${totalReturnedItems} items worth €${totalReturnValue.toFixed(2)} (adjusted from balance)`,
         remarks: `Return ID: ${returnDoc._id}`,
-        createdBy: req.user._id
+        createdBy: req.user._id,
+        paymentDetails: {
+          cashPayment: 0,
+          bankPayment: 0,
+          remainingBalance: newRemaining
+        }
       });
 
       // Update supplier balance (reduce by return amount)
@@ -2472,9 +2481,6 @@ router.post('/:id/return', auth, async (req, res) => {
       });
 
       // Update payment details - reduce remaining balance by return value
-      const currentRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0;
-      const newRemaining = Math.max(0, currentRemaining - totalReturnValue);
-
       dispatchOrder.paymentDetails = {
         ...dispatchOrder.paymentDetails,
         remainingBalance: newRemaining,
