@@ -621,29 +621,19 @@ router.post('/manual', auth, async (req, res) => {
     // ==========================================
     const currentSupplierBalance = await Ledger.getBalance('supplier', supplier._id);
     let creditApplied = 0;
-
-    // Calculate final remaining balance in supplier currency
-    // Both discountedSupplierPaymentTotal and initialPaidAmount are in supplier currency (EUR)
-    let remainingInSupplierCurrency = Math.max(0, discountedSupplierPaymentTotal - initialPaidAmount);
+    let finalRemainingBalance = Math.max(0, discountedSupplierPaymentTotal - initialPaidAmount);
 
     // If balance is negative, supplier owes admin - apply credit
     if (currentSupplierBalance < 0) {
-      // availableCredit is in base currency (PKR/GBP) from ledger
       const availableCredit = Math.abs(currentSupplierBalance);
-      const availableCreditInSupplierCurrency = availableCredit * (exchangeRate || 1);
-
-      creditApplied = Math.min(availableCredit, remainingInSupplierCurrency / (exchangeRate || 1));
-      remainingInSupplierCurrency = Math.max(0, remainingInSupplierCurrency - (creditApplied * (exchangeRate || 1)));
+      creditApplied = Math.min(availableCredit, finalRemainingBalance);
+      finalRemainingBalance = Math.max(0, finalRemainingBalance - creditApplied);
     }
-
-    // finalRemainingBalance is used for general purpose logic, keep it in base currency if needed by other parts, 
-    // but here we primarily use it for the order field. Let's make it consistent.
-    const finalRemainingBalance = remainingInSupplierCurrency / (exchangeRate || 1);
 
     const paymentStatus = value.paymentStatus || (
       finalRemainingBalance <= 0
         ? 'paid'
-        : (initialPaidAmount + (creditApplied * (exchangeRate || 1))) > 0
+        : (initialPaidAmount + creditApplied) > 0
           ? 'partial'
           : 'pending'
     );
@@ -703,15 +693,14 @@ router.post('/manual', auth, async (req, res) => {
         transactionType: 'purchase',
         referenceId: dispatchOrder._id,
         referenceModel: 'DispatchOrder',
-        debit: discountedSupplierPaymentTotal / exchangeRate,
+        debit: discountedSupplierPaymentTotal,
         credit: 0,
         date: dispatchOrder.dispatchDate,
-        description: `Manual Purchase ${dispatchOrder.orderNumber} - Supplier Debt (PKR): ${(discountedSupplierPaymentTotal / exchangeRate).toFixed(2)} (Subtotal: €${supplierPaymentTotal.toFixed(2)}, Discount: €${totalDiscount.toFixed(2)}), Valuation (PKR): ${grandTotal.toFixed(2)}, Cash (PKR): ${cashPayment.toFixed(2)}, Bank (PKR): ${bankPayment.toFixed(2)}, Credit (PKR): ${creditApplied.toFixed(2)}, Remaining (PKR): ${finalRemainingBalance.toFixed(2)}`,
+        description: `Manual Purchase ${dispatchOrder.orderNumber} - Supplier Debt: €${discountedSupplierPaymentTotal.toFixed(2)} (Subtotal: €${supplierPaymentTotal.toFixed(2)}, Discount: €${totalDiscount.toFixed(2)}), Valuation: €${grandTotal.toFixed(2)}, Cash: €${cashPayment.toFixed(2)}, Bank: €${bankPayment.toFixed(2)}, Credit: €${creditApplied.toFixed(2)}, Remaining: €${finalRemainingBalance.toFixed(2)}`,
         paymentDetails: {
           cashPayment: cashPayment,
           bankPayment: bankPayment,
-          remainingBalance: remainingInSupplierCurrency, // Store in raw supplier currency
-          creditApplied: creditApplied * (exchangeRate || 1) // Store in raw supplier currency
+          remainingBalance: finalRemainingBalance
         },
         createdBy: req.user._id
       });
@@ -831,7 +820,7 @@ router.post('/manual', auth, async (req, res) => {
     try {
       await Supplier.findByIdAndUpdate(
         supplier._id,
-        { $inc: { currentBalance: (discountedSupplierPaymentTotal - initialPaidAmount - (creditApplied * (exchangeRate || 1))) / (exchangeRate || 1) } }
+        { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: finalRemainingBalance } }
       );
     } catch (supplierError) {
       console.error(`Error updating supplier balance:`, supplierError);
@@ -1150,7 +1139,7 @@ router.get('/unpaid/:supplierId', auth, async (req, res) => {
       status: 'confirmed',
       'paymentDetails.remainingBalance': { $gt: 0 }
     })
-      .select('orderNumber paymentDetails totalQuantity dispatchDate createdAt supplierPaymentTotal totalDiscount exchangeRate')
+      .select('orderNumber paymentDetails totalQuantity dispatchDate createdAt supplierPaymentTotal totalDiscount')
       .sort({ createdAt: -1 });
 
     // Calculate total amount and paid amount for each order
@@ -1172,8 +1161,7 @@ router.get('/unpaid/:supplierId', auth, async (req, res) => {
         return sum + (entry.paymentDetails?.cashPayment || 0) + (entry.paymentDetails?.bankPayment || 0);
       }, 0);
 
-      const totalAmountBase = totalAmount / (order.exchangeRate || 1);
-      const remainingBalance = totalAmountBase - totalPaid;
+      const remainingBalance = totalAmount - totalPaid;
 
       return {
         _id: order._id,
@@ -1432,14 +1420,13 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
     dispatchOrder.subtotal = subtotal;
     dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
     dispatchOrder.grandTotal = grandTotal;
-    const totalPaidInSupplierCurrency = (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0);
     dispatchOrder.paymentDetails = {
-      cashPayment: (parseFloat(cashPayment) || 0),
-      bankPayment: (parseFloat(bankPayment) || 0),
-      remainingBalance: discountedSupplierPaymentTotal - totalPaidInSupplierCurrency, // Raw supplier currency
-      paymentStatus: discountedSupplierPaymentTotal <= totalPaidInSupplierCurrency
+      cashPayment: (parseFloat(cashPayment) || 0) / finalExchangeRate,
+      bankPayment: (parseFloat(bankPayment) || 0) / finalExchangeRate,
+      remainingBalance: (discountedSupplierPaymentTotal / finalExchangeRate) - ((parseFloat(cashPayment) || 0) / finalExchangeRate) - ((parseFloat(bankPayment) || 0) / finalExchangeRate),
+      paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
         ? 'paid'
-        : totalPaidInSupplierCurrency > 0
+        : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
           ? 'partial'
           : 'pending'
     };
@@ -2069,14 +2056,13 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.subtotal = subtotal;
     dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal; // Use discounted amount
     dispatchOrder.grandTotal = grandTotal; // Landed total after discount (for inventory valuation)
-    const totalPaidInSupplierCurrency = (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0);
     dispatchOrder.paymentDetails = {
-      cashPayment: (parseFloat(cashPayment) || 0),
-      bankPayment: (parseFloat(bankPayment) || 0),
-      remainingBalance: discountedSupplierPaymentTotal - totalPaidInSupplierCurrency, // Raw supplier currency
-      paymentStatus: discountedSupplierPaymentTotal <= totalPaidInSupplierCurrency
+      cashPayment: (parseFloat(cashPayment) || 0) / finalExchangeRate,
+      bankPayment: (parseFloat(bankPayment) || 0) / finalExchangeRate,
+      remainingBalance: (discountedSupplierPaymentTotal / finalExchangeRate) - ((parseFloat(cashPayment) || 0) / finalExchangeRate) - ((parseFloat(bankPayment) || 0) / finalExchangeRate),
+      paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
         ? 'paid'
-        : totalPaidInSupplierCurrency > 0
+        : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
           ? 'partial'
           : 'pending'
     };
@@ -2111,15 +2097,12 @@ router.post('/:id/confirm', auth, async (req, res) => {
         console.log(`  - Credit to apply: €${creditApplied.toFixed(2)}`);
         console.log(`  - New remaining balance: €${(amountNeeded - creditApplied).toFixed(2)}`);
 
-        // creditApplied is in base currency (PKR/GBP), convert it to EUR for comparison
-        const creditAppliedInEur = creditApplied * finalExchangeRate;
-
         // Update payment details with credit applied
-        dispatchOrder.paymentDetails.creditApplied = creditAppliedInEur; // Raw supplier currency
-        dispatchOrder.paymentDetails.remainingBalance = discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0) - creditAppliedInEur;
+        dispatchOrder.paymentDetails.creditApplied = creditApplied;
+        dispatchOrder.paymentDetails.remainingBalance = amountNeeded - creditApplied;
 
-        // Recalculate payment status using consistent currency (EUR)
-        const totalPaid = (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) + creditAppliedInEur;
+        // Recalculate payment status
+        const totalPaid = (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) + creditApplied;
         if (totalPaid >= discountedSupplierPaymentTotal) {
           dispatchOrder.paymentDetails.paymentStatus = 'paid';
         } else if (totalPaid > 0) {
@@ -2156,10 +2139,10 @@ router.post('/:id/confirm', auth, async (req, res) => {
       transactionType: 'purchase',
       referenceId: dispatchOrder._id,
       referenceModel: 'DispatchOrder',
-      debit: discountedSupplierPaymentTotal, // Raw supplier currency
+      debit: discountedSupplierPaymentTotal, // What admin owes supplier (cost / exchange rate, NO profit, after discount)
       credit: 0,
       date: new Date(),
-      description: `Purchase for Dispatch Order ${dispatchOrder.orderNumber} - Amount: €${discountedSupplierPaymentTotal.toFixed(2)} (PKR ${(discountedSupplierPaymentTotal / finalExchangeRate).toFixed(2)}), Rate: ${finalExchangeRate}`,
+      description: `Dispatch Order ${dispatchOrder.orderNumber} confirmed - Supplier Payment: €${supplierPaymentTotal.toFixed(2)} (Cost ÷ Exchange Rate × Qty), Discount: €${totalDiscount.toFixed(2)}, Final Amount: €${discountedSupplierPaymentTotal.toFixed(2)}, Ledger shows: €${landedPriceTotal.toFixed(2)} ((Cost ÷ Exchange Rate + ${finalPercentage}%) × Qty), Cash: €${parseFloat(cashPayment).toFixed(2)}, Bank: €${parseFloat(bankPayment).toFixed(2)}, Remaining: €${dispatchOrder.paymentDetails.remainingBalance.toFixed(2)}`,
       paymentDetails: {
         cashPayment: parseFloat(cashPayment) || 0,
         bankPayment: parseFloat(bankPayment) || 0,
@@ -2182,9 +2165,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
         referenceId: dispatchOrder._id,
         referenceModel: 'DispatchOrder',
         debit: 0,
-        credit: cashPaymentAmount, // Raw supplier currency
+        credit: cashPaymentAmount,
         date: new Date(),
-        description: `Cash payment for Dispatch Order ${dispatchOrder.orderNumber} - €${cashPaymentAmount.toFixed(2)}`,
+        description: `Cash payment for Dispatch Order ${dispatchOrder.orderNumber}`,
         paymentMethod: 'cash',
         paymentDetails: {
           cashPayment: cashPaymentAmount,
@@ -2193,7 +2176,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         },
         createdBy: req.user._id
       });
-      console.log(`[Confirm Order] Created cash payment ledger entry: €${cashPaymentAmount}`);
+      console.log(`[Confirm Order] Created cash payment ledger entry: £${cashPaymentAmount}`);
     }
 
     if (bankPaymentAmount > 0) {
@@ -2205,9 +2188,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
         referenceId: dispatchOrder._id,
         referenceModel: 'DispatchOrder',
         debit: 0,
-        credit: bankPaymentAmount, // Raw supplier currency
+        credit: bankPaymentAmount,
         date: new Date(),
-        description: `Bank payment for Dispatch Order ${dispatchOrder.orderNumber} - €${bankPaymentAmount.toFixed(2)}`,
+        description: `Bank payment for Dispatch Order ${dispatchOrder.orderNumber}`,
         paymentMethod: 'bank',
         paymentDetails: {
           cashPayment: 0,
@@ -2216,7 +2199,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         },
         createdBy: req.user._id
       });
-      console.log(`[Confirm Order] Created bank payment ledger entry: €${bankPaymentAmount}`);
+      console.log(`[Confirm Order] Created bank payment ledger entry: £${bankPaymentAmount}`);
     }
 
     // Create credit application entry if credit was applied from supplier's existing debt
@@ -2229,7 +2212,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         referenceId: dispatchOrder._id,
         referenceModel: 'DispatchOrder',
         debit: 0,
-        credit: creditApplied, // Raw supplier currency
+        credit: creditApplied,
         date: new Date(),
         description: `Credit applied from previous overpayment to Dispatch Order ${dispatchOrder.orderNumber} - €${creditApplied.toFixed(2)} offset against supplier debt`,
         paymentDetails: {
@@ -2277,16 +2260,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // STEP 4: Update supplier balance
     // ==========================================
 
-    // Update supplier balance in base currency (PKR)
-    const totalPaidInSupplierCurrency = cashPaymentAmount + bankPaymentAmount + (creditApplied * finalExchangeRate);
-    const netChangeInSupplierCurrency = discountedSupplierPaymentTotal - totalPaidInSupplierCurrency;
-    const netChangeInBaseCurrency = netChangeInSupplierCurrency / finalExchangeRate;
-
     await Supplier.findByIdAndUpdate(
       dispatchOrder.supplier._id,
-      { $inc: { currentBalance: netChangeInBaseCurrency } }
+      { $inc: { currentBalance: discountedSupplierPaymentTotal - cashPaymentAmount - bankPaymentAmount } }
     );
-    console.log(`[Confirm Order] Updated supplier balance by PKR ${netChangeInBaseCurrency.toFixed(2)}`);
+    console.log(`[Confirm Order] Updated supplier balance`)
 
     // Populate for response
     await dispatchOrder.populate([
@@ -2458,7 +2436,6 @@ router.post('/:id/return', auth, async (req, res) => {
     // If dispatch order is already confirmed, create ledger credit entry
     if (dispatchOrder.status === 'confirmed') {
       const totalReturnedItems = returnItemsData.reduce((sum, item) => sum + item.returnedQuantity, 0);
-      const totalReturnValueBase = totalReturnValue / (dispatchOrder.exchangeRate || 1);
 
       await Ledger.createEntry({
         type: 'supplier',
@@ -2468,9 +2445,9 @@ router.post('/:id/return', auth, async (req, res) => {
         referenceId: returnDoc._id,
         referenceModel: 'Return',
         debit: 0,
-        credit: totalReturnValue, // Raw supplier currency
+        credit: totalReturnValue,
         date: new Date(),
-        description: `Return from Dispatch Order ${dispatchOrder.orderNumber} - ${totalReturnedItems} items worth €${totalReturnValue.toFixed(2)} (PKR ${totalReturnValueBase.toFixed(2)})`,
+        description: `Return from Dispatch Order ${dispatchOrder.orderNumber} - ${totalReturnedItems} items worth €${totalReturnValue.toFixed(2)} (adjusted from balance)`,
         remarks: `Return ID: ${returnDoc._id}`,
         createdBy: req.user._id
       });
@@ -2478,7 +2455,7 @@ router.post('/:id/return', auth, async (req, res) => {
       // Update supplier balance (reduce by return amount)
       await Supplier.findByIdAndUpdate(
         dispatchOrder.supplier._id,
-        { $inc: { currentBalance: -totalReturnValueBase } }
+        { $inc: { currentBalance: -totalReturnValue } }
       );
 
       // Recalculate confirmed quantities
@@ -2494,8 +2471,8 @@ router.post('/:id/return', auth, async (req, res) => {
       });
 
       // Update payment details - reduce remaining balance by return value
-      const currentRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0; // In supplier currency
-      const newRemaining = Math.max(0, currentRemaining - totalReturnValue); // totalReturnValue is in supplier currency
+      const currentRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0;
+      const newRemaining = Math.max(0, currentRemaining - totalReturnValue);
 
       dispatchOrder.paymentDetails = {
         ...dispatchOrder.paymentDetails,
@@ -2508,7 +2485,7 @@ router.post('/:id/return', auth, async (req, res) => {
             ? 'partial' : 'pending'
       };
 
-      console.log(`[Return] Updated remainingBalance: €${currentRemaining.toFixed(2)} -> €${newRemaining.toFixed(2)} (return value in EUR: ${totalReturnValue.toFixed(2)})`);
+      console.log(`[Return] Updated remainingBalance: €${currentRemaining.toFixed(2)} -> €${newRemaining.toFixed(2)} (return value: €${totalReturnValue.toFixed(2)})`);
 
 
       // Reduce inventory for returned items
@@ -2787,8 +2764,8 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
     dispatchOrder.paymentDetails = {
       cashPayment: parseFloat(cashPayment) || 0,
       bankPayment: parseFloat(bankPayment) || 0,
-      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0), // Remaining in supplier currency
-      paymentStatus: discountedSupplierPaymentTotal <= (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
+      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
+      paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
         ? 'paid'
         : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
           ? 'partial'
@@ -2812,10 +2789,10 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       transactionType: 'purchase',
       referenceId: dispatchOrder._id,
       referenceModel: 'DispatchOrder',
-      debit: discountedSupplierPaymentTotal, // Raw supplier currency
+      debit: supplierPaymentTotal,
       credit: 0,
       date: new Date(),
-      description: `Purchase for Dispatch Order ${dispatchOrder.orderNumber} confirmed via QR scan - Amount: €${discountedSupplierPaymentTotal.toFixed(2)} (PKR ${(discountedSupplierPaymentTotal / finalExchangeRate).toFixed(2)}), Rate: ${finalExchangeRate}`,
+      description: `Dispatch Order ${dispatchOrder.orderNumber} confirmed via QR scan - Supplier Payment: €${supplierPaymentTotal.toFixed(2)} (Cost ÷ Exchange Rate × Qty), Ledger shows: €${landedPriceTotal.toFixed(2)} ((Cost ÷ Exchange Rate + ${finalPercentage}%) × Qty), Cash: €${parseFloat(cashPayment).toFixed(2)}, Bank: €${parseFloat(bankPayment).toFixed(2)}, Remaining: €${dispatchOrder.paymentDetails.remainingBalance.toFixed(2)}`,
       paymentDetails: {
         cashPayment: parseFloat(cashPayment) || 0,
         bankPayment: parseFloat(bankPayment) || 0,
