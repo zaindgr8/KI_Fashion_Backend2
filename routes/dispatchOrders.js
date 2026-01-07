@@ -1214,7 +1214,8 @@ router.get('/:id', auth, async (req, res) => {
       .lean();
 
     // order is already a plain object from .lean()
-    const orderObj = { ...order, returns };
+    const enrichedOrder = await BalanceService.enrichOrderWithPaymentStatus({ ...order, returns });
+    const orderObj = enrichedOrder;
 
     // Convert images to signed URLs
     await convertDispatchOrderImages(orderObj);
