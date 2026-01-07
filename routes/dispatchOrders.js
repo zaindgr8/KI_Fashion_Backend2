@@ -1322,6 +1322,8 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
     if (logisticsCompany) {
       dispatchOrder.logisticsCompany = logisticsCompany;
       dispatchOrder.markModified('logisticsCompany');
+      // Re-populate to ensure we have the full object for response/calculations
+      await dispatchOrder.populate('logisticsCompany', 'name code contactInfo rates');
     }
     if (dispatchDate) {
       dispatchOrder.dispatchDate = new Date(dispatchDate);
@@ -1514,6 +1516,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
     if (logisticsCompany) {
       dispatchOrder.logisticsCompany = logisticsCompany;
       dispatchOrder.markModified('logisticsCompany');
+      // Re-populate to ensure we have rates for ledger calculation later
+      await dispatchOrder.populate('logisticsCompany', 'name code contactInfo rates');
     }
     if (dispatchDate) {
       dispatchOrder.dispatchDate = new Date(dispatchDate);
