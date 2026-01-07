@@ -122,36 +122,105 @@ ledgerSchema.statics.createEntry = async function (entryData, session = null) {
     throw new Error('Invalid entryData: type and entityId are required');
   }
 
-  // Use session if provided to ensure transaction consistency
-  // Mongoose .session() returns a new query, so we need to chain it properly
-  let findOneQuery = this.findOne({
-    type: entryData.type,
-    entityId: entryData.entityId
-  }).sort({ date: -1, createdAt: -1 });
-  
-  // Attach session to query if provided (session() returns a new query object)
-  if (session) {
-    // Mongoose will throw an error if session is invalid, so we don't need strict validation
-    findOneQuery = findOneQuery.session(session);
-  }
-  
-  const lastEntry = await findOneQuery;
+  const entryDate = entryData.date ? new Date(entryData.date) : new Date();
 
-  const previousBalance = lastEntry ? lastEntry.balance : 0;
+  // Find the entry that immediately precedes this new one in the timeline
+  let findPreviousQuery = this.findOne({
+    type: entryData.type,
+    entityId: entryData.entityId,
+    date: { $lte: entryDate }
+  }).sort({ date: -1, createdAt: -1 });
+
+  if (session) {
+    findPreviousQuery = findPreviousQuery.session(session);
+  }
+
+  const previousEntry = await findPreviousQuery;
+  const previousBalance = previousEntry ? previousEntry.balance : 0;
+
   const debit = Number(entryData.debit) || 0;
   const credit = Number(entryData.credit) || 0;
   const newBalance = previousBalance + debit - credit;
 
   const entry = new this({
     ...entryData,
+    date: entryDate,
     balance: newBalance
   });
 
-  // Save with session if provided
+  const savedEntry = session ? await entry.save({ session }) : await entry.save();
+
+  // Check if there are entries AFTER this one that need re-calculation
+  let findNextQuery = this.findOne({
+    type: entryData.type,
+    entityId: entryData.entityId,
+    $or: [
+      { date: { $gt: entryDate } },
+      { date: entryDate, createdAt: { $gt: savedEntry.createdAt } }
+    ]
+  });
+
   if (session) {
-    return await entry.save({ session });
+    findNextQuery = findNextQuery.session(session);
   }
-  return await entry.save();
+
+  const nextEntry = await findNextQuery;
+  if (nextEntry) {
+    // There are entries in the future, trigger re-calculation
+    await this.recalculateBalances(entryData.type, entryData.entityId, entryDate, session);
+  }
+
+  return savedEntry;
+};
+
+/**
+ * Re-calculate all balances for an entity starting from a specific date
+ * Useful when a backdated entry is inserted or an existing entry is edited/deleted
+ */
+ledgerSchema.statics.recalculateBalances = async function (type, entityId, startDate, session = null) {
+  // 1. Find all entries for this entity from startDate onwards
+  let findQuery = this.find({
+    type,
+    entityId,
+    date: { $gte: new Date(startDate) }
+  }).sort({ date: 1, createdAt: 1 });
+
+  if (session) {
+    findQuery = findQuery.session(session);
+  }
+
+  const entriesToUpdate = await findQuery;
+  if (entriesToUpdate.length === 0) return;
+
+  // 2. Find the base balance (the entry immediately BEFORE the first one in entriesToUpdate)
+  const firstEntry = entriesToUpdate[0];
+  let findBaseQuery = this.findOne({
+    type,
+    entityId,
+    $or: [
+      { date: { $lt: firstEntry.date } },
+      { date: firstEntry.date, createdAt: { $lt: firstEntry.createdAt } }
+    ]
+  }).sort({ date: -1, createdAt: -1 });
+
+  if (session) {
+    findBaseQuery = findBaseQuery.session(session);
+  }
+
+  const baseEntry = await findBaseQuery;
+  let currentBalance = baseEntry ? baseEntry.balance : 0;
+
+  // 3. Update each entry sequentially
+  for (const entry of entriesToUpdate) {
+    currentBalance = Number((currentBalance + (entry.debit || 0) - (entry.credit || 0)).toFixed(2));
+    entry.balance = currentBalance;
+
+    if (session) {
+      await entry.save({ session });
+    } else {
+      await entry.save();
+    }
+  }
 };
 
 // =====================================================
@@ -166,10 +235,12 @@ ledgerSchema.statics.createEntry = async function (entryData, session = null) {
 ledgerSchema.statics.getBalance = async function (type, entityId) {
   const result = await this.aggregate([
     { $match: { type, entityId: new mongoose.Types.ObjectId(entityId) } },
-    { $group: {
-      _id: null,
-      balance: { $sum: { $subtract: ['$debit', '$credit'] } }
-    }}
+    {
+      $group: {
+        _id: null,
+        balance: { $sum: { $subtract: ['$debit', '$credit'] } }
+      }
+    }
   ]);
   return result[0]?.balance || 0;
 };
@@ -187,30 +258,34 @@ ledgerSchema.statics.getBalanceLegacy = async function (type, entityId) {
  * Get payment summary for a specific order/reference
  * Returns: { cash: amount, bank: amount, total: amount }
  */
-ledgerSchema.statics.getOrderPayments = async function(referenceId) {
+ledgerSchema.statics.getOrderPayments = async function (referenceId) {
   const result = await this.aggregate([
-    { $match: { 
-      referenceId: new mongoose.Types.ObjectId(referenceId),
-      transactionType: 'payment' 
-    }},
-    { $group: {
-      _id: '$paymentMethod',
-      amount: { $sum: '$credit' }
-    }}
+    {
+      $match: {
+        referenceId: new mongoose.Types.ObjectId(referenceId),
+        transactionType: 'payment'
+      }
+    },
+    {
+      $group: {
+        _id: '$paymentMethod',
+        amount: { $sum: '$credit' }
+      }
+    }
   ]);
-  
+
   const payments = {
     cash: 0,
     bank: 0,
     total: 0
   };
-  
+
   for (const item of result) {
     if (item._id === 'cash') payments.cash = item.amount;
     else if (item._id === 'bank') payments.bank = item.amount;
     payments.total += item.amount;
   }
-  
+
   return payments;
 };
 
@@ -218,61 +293,73 @@ ledgerSchema.statics.getOrderPayments = async function(referenceId) {
  * Get total payments by method for an entity
  * Returns: { cash: totalCash, bank: totalBank }
  */
-ledgerSchema.statics.getPaymentTotalsByMethod = async function(type, entityId) {
+ledgerSchema.statics.getPaymentTotalsByMethod = async function (type, entityId) {
   const result = await this.aggregate([
-    { $match: { 
-      type, 
-      entityId: new mongoose.Types.ObjectId(entityId),
-      transactionType: 'payment'
-    }},
-    { $group: {
-      _id: '$paymentMethod',
-      total: { $sum: '$credit' }
-    }}
+    {
+      $match: {
+        type,
+        entityId: new mongoose.Types.ObjectId(entityId),
+        transactionType: 'payment'
+      }
+    },
+    {
+      $group: {
+        _id: '$paymentMethod',
+        total: { $sum: '$credit' }
+      }
+    }
   ]);
-  
+
   const totals = { cash: 0, bank: 0 };
   for (const item of result) {
     if (item._id === 'cash') totals.cash = item.total;
     else if (item._id === 'bank') totals.bank = item.total;
   }
-  
+
   return totals;
 };
 
 /**
  * Get purchase total for a specific order (debit entries)
  */
-ledgerSchema.statics.getOrderPurchaseTotal = async function(referenceId) {
+ledgerSchema.statics.getOrderPurchaseTotal = async function (referenceId) {
   const result = await this.aggregate([
-    { $match: { 
-      referenceId: new mongoose.Types.ObjectId(referenceId),
-      transactionType: 'purchase' 
-    }},
-    { $group: {
-      _id: null,
-      total: { $sum: '$debit' }
-    }}
+    {
+      $match: {
+        referenceId: new mongoose.Types.ObjectId(referenceId),
+        transactionType: 'purchase'
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: '$debit' }
+      }
+    }
   ]);
-  
+
   return result[0]?.total || 0;
 };
 
 /**
  * Get return total for a specific order (credit entries from returns)
  */
-ledgerSchema.statics.getOrderReturnTotal = async function(referenceId) {
+ledgerSchema.statics.getOrderReturnTotal = async function (referenceId) {
   const result = await this.aggregate([
-    { $match: { 
-      referenceId: new mongoose.Types.ObjectId(referenceId),
-      transactionType: 'return' 
-    }},
-    { $group: {
-      _id: null,
-      total: { $sum: '$credit' }
-    }}
+    {
+      $match: {
+        referenceId: new mongoose.Types.ObjectId(referenceId),
+        transactionType: 'return'
+      }
+    },
+    {
+      $group: {
+        _id: null,
+        total: { $sum: '$credit' }
+      }
+    }
   ]);
-  
+
   return result[0]?.total || 0;
 };
 
