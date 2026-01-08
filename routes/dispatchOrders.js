@@ -16,6 +16,17 @@ const BalanceService = require('../services/BalanceService');
 
 const router = express.Router();
 
+/**
+ * Truncate a number to 2 decimal places (no rounding)
+ * Example: 14.554472 -> 14.55, 19.125456 -> 19.12, 13.337555 -> 13.33
+ * @param {number} value - The number to truncate
+ * @returns {number} The truncated number with at most 2 decimal places
+ */
+const truncateToTwoDecimals = (value) => {
+  if (typeof value !== 'number' || isNaN(value)) return 0;
+  return Math.floor(value * 100) / 100;
+};
+
 // Configure multer for memory storage
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -571,8 +582,9 @@ router.post('/manual', auth, async (req, res) => {
 
       // Calculate landed price (for inventory valuation - WITH profit margin)
       // Formula: (cost price / exchange rate) × (1 + percentage/100)
-      const landedPrice = (costPrice / exchangeRate) * (1 + (percentage / 100));
-      const landedTotal = landedPrice * item.quantity;
+      // Truncate to 2 decimal places (no rounding) for database storage
+      const landedPrice = truncateToTwoDecimals((costPrice / exchangeRate) * (1 + (percentage / 100)));
+      const landedTotal = truncateToTwoDecimals(landedPrice * item.quantity);
 
       itemsWithDetails.push({
         product: product ? product._id : undefined,
@@ -587,7 +599,7 @@ router.post('/manual', auth, async (req, res) => {
         quantity: item.quantity,
         supplierPaymentAmount: supplierPaymentAmount,
         landedPrice: landedPrice,
-        landedTotal: item.landedTotal || landedTotal, // Use provided or calculated
+        landedTotal: item.landedTotal ? truncateToTwoDecimals(item.landedTotal) : landedTotal, // Use provided (truncated) or calculated
         productImage: item.productImage || undefined
       });
     }
@@ -1388,8 +1400,9 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
       const supplierPaymentItemTotal = supplierPaymentAmount * confirmedQty;
       supplierPaymentTotal += supplierPaymentItemTotal;
 
-      const landedPrice = (costPrice / finalExchangeRate) * (1 + (finalPercentage / 100));
-      const landedPriceItemTotal = landedPrice * confirmedQty;
+      // Truncate to 2 decimal places (no rounding) for database storage
+      const landedPrice = truncateToTwoDecimals((costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
+      const landedPriceItemTotal = truncateToTwoDecimals(landedPrice * confirmedQty);
       landedPriceTotal += landedPriceItemTotal;
 
       return {
@@ -1408,8 +1421,9 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
     // Apply discount to supplierPaymentTotal
     const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
 
-    const subtotal = landedPriceTotal;
-    const grandTotal = Math.max(0, subtotal - totalDiscount);
+    // Truncate subtotal and grandTotal to 2 decimal places
+    const subtotal = truncateToTwoDecimals(landedPriceTotal);
+    const grandTotal = truncateToTwoDecimals(Math.max(0, subtotal - totalDiscount));
 
     // Update dispatch order status to pending-approval (DO NOT process inventory or ledger)
     dispatchOrder.status = 'pending-approval';
@@ -1597,8 +1611,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
 
       // Landed price (for inventory valuation - WITH profit margin)
       // Formula: (cost price / exchange rate) × (1 + percentage/100)
-      const landedPrice = (costPrice / finalExchangeRate) * (1 + (finalPercentage / 100));
-      const landedPriceItemTotal = landedPrice * confirmedQty;
+      // Truncate to 2 decimal places (no rounding) for database storage
+      const landedPrice = truncateToTwoDecimals((costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
+      const landedPriceItemTotal = truncateToTwoDecimals(landedPrice * confirmedQty);
       landedPriceTotal += landedPriceItemTotal;
 
       return {
@@ -1617,8 +1632,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // Apply discount to supplierPaymentTotal (what admin pays supplier)
     const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
 
-    const subtotal = landedPriceTotal;
-    const grandTotal = Math.max(0, subtotal - totalDiscount);
+    // Truncate subtotal and grandTotal to 2 decimal places
+    const subtotal = truncateToTwoDecimals(landedPriceTotal);
+    const grandTotal = truncateToTwoDecimals(Math.max(0, subtotal - totalDiscount));
 
     // ==========================================
     // STEP 1: Process products and inventory FIRST (before changing order status)
