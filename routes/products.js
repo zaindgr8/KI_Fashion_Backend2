@@ -28,6 +28,7 @@ const upload = multer({
 const productSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
   sku: Joi.string().required().uppercase(),
+  supplier: Joi.string().optional(), // Primary supplier ObjectId (required by model, but optional here for backward compat)
   description: Joi.string().optional(),
   season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season')).min(1).required(),
   category: Joi.string().required(),
@@ -181,18 +182,39 @@ router.post('/', auth, async (req, res) => {
       });
     }
 
-    // Check if SKU already exists
-    const existingProduct = await Product.findOne({ sku: req.body.sku.toUpperCase() });
+    // Determine supplier: from request body, or from first supplier in suppliers array, or from user's supplier
+    let supplierId = req.body.supplier;
+    if (!supplierId && req.body.suppliers && req.body.suppliers.length > 0) {
+      supplierId = req.body.suppliers[0].supplier;
+    }
+    if (!supplierId && req.user.supplier) {
+      supplierId = req.user.supplier;
+    }
+
+    // Product model requires supplier field
+    if (!supplierId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Supplier is required. Please provide a supplier ID.'
+      });
+    }
+
+    // Check if SKU already exists for this supplier (compound unique index: sku + supplier)
+    const existingProduct = await Product.findOne({
+      sku: req.body.sku.toUpperCase(),
+      supplier: supplierId
+    });
     if (existingProduct) {
       return res.status(400).json({
         success: false,
-        message: 'SKU already exists'
+        message: 'A product with this SKU already exists for this supplier'
       });
     }
 
     const product = new Product({
       ...req.body,
       sku: req.body.sku.toUpperCase(),
+      supplier: supplierId,
       createdBy: req.user._id
     });
 
