@@ -2086,51 +2086,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.confirmedQuantities = confirmedQuantities;
 
     // ==========================================
-    // CREDIT APPLICATION: Check if supplier owes admin and auto-apply credit
+    // CREDIT APPLICATION: DISABLED - Manual payment application only
     // ==========================================
 
-    // Get current supplier balance BEFORE this order is recorded
-    const currentSupplierBalance = await Ledger.getBalance('supplier', dispatchOrder.supplier._id);
+    // Automatic credit application disabled - credits must be manually applied through payment modal
     let creditApplied = 0;
-
-    console.log(`[Confirm Order] Checking supplier balance for credit application:`);
-    console.log(`  - Supplier ID: ${dispatchOrder.supplier._id}`);
-    console.log(`  - Current ledger balance: ${currentSupplierBalance}`);
-    console.log(`  - Order remaining balance (before credit): ${dispatchOrder.paymentDetails.remainingBalance}`);
-
-    // If balance is negative, supplier owes admin - we can apply credit
-    // Negative balance in ledger = credits > debits = admin paid more than owed = supplier owes admin
-    if (currentSupplierBalance < 0) {
-      const availableCredit = Math.abs(currentSupplierBalance);
-      const amountNeeded = dispatchOrder.paymentDetails.remainingBalance;
-
-      // Apply credit: min of available credit and amount needed
-      creditApplied = Math.min(availableCredit, amountNeeded);
-
-      if (creditApplied > 0) {
-        console.log(`[Confirm Order] APPLYING CREDIT:`);
-        console.log(`  - Supplier has €${availableCredit.toFixed(2)} credit (owes admin)`);
-        console.log(`  - Amount needed: €${amountNeeded.toFixed(2)}`);
-        console.log(`  - Credit to apply: €${creditApplied.toFixed(2)}`);
-        console.log(`  - New remaining balance: €${(amountNeeded - creditApplied).toFixed(2)}`);
-
-        // Update payment details with credit applied
-        dispatchOrder.paymentDetails.creditApplied = creditApplied;
-        dispatchOrder.paymentDetails.remainingBalance = amountNeeded - creditApplied;
-
-        // Recalculate payment status
-        const totalPaid = (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) + creditApplied;
-        if (totalPaid >= discountedSupplierPaymentTotal) {
-          dispatchOrder.paymentDetails.paymentStatus = 'paid';
-        } else if (totalPaid > 0) {
-          dispatchOrder.paymentDetails.paymentStatus = 'partial';
-        } else {
-          dispatchOrder.paymentDetails.paymentStatus = 'pending';
-        }
-      }
-    } else {
-      console.log(`[Confirm Order] No credit to apply (balance >= 0 means admin owes supplier or neutral)`);
-    }
 
     // Update prices on items
     dispatchOrder.items.forEach((item, index) => {
@@ -2219,29 +2179,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
       console.log(`[Confirm Order] Created bank payment ledger entry: £${bankPaymentAmount}`);
     }
 
-    // Create credit application entry if credit was applied from supplier's existing debt
-    if (creditApplied > 0) {
-      await Ledger.createEntry({
-        type: 'supplier',
-        entityId: dispatchOrder.supplier._id,
-        entityModel: 'Supplier',
-        transactionType: 'credit_application',
-        referenceId: dispatchOrder._id,
-        referenceModel: 'DispatchOrder',
-        debit: 0,
-        credit: creditApplied,
-        date: new Date(),
-        description: `Credit applied from previous overpayment to Dispatch Order ${dispatchOrder.orderNumber} - €${creditApplied.toFixed(2)} offset against supplier debt`,
-        paymentDetails: {
-          cashPayment: 0,
-          bankPayment: 0,
-          creditApplied: creditApplied,
-          remainingBalance: dispatchOrder.paymentDetails.remainingBalance
-        },
-        createdBy: req.user._id
-      });
-      console.log(`[Confirm Order] Created credit application ledger entry: €${creditApplied.toFixed(2)}`);
-    }
+    // Credit application entry - DISABLED (automatic credit application disabled)
+    // Credits must be manually applied through payment modal
 
     try {
       if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {

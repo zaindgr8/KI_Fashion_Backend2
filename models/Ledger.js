@@ -238,12 +238,25 @@ ledgerSchema.statics.getBalance = async function (type, entityId) {
     {
       $group: {
         _id: null,
-        balance: { $sum: { $subtract: ['$debit', '$credit'] } }
+        totalDebit: { $sum: '$debit' },
+        totalCredit: { $sum: '$credit' }
       }
     }
   ]);
-  return result[0]?.balance || 0;
+
+  const totalDebit = result[0]?.totalDebit || 0;
+  const totalCredit = result[0]?.totalCredit || 0;
+
+  const balance = totalCredit - totalDebit;
+
+  console.log("Total Debit:", totalDebit);
+  console.log("Total Credit:", totalCredit);
+  console.log("Balance:", balance);
+
+  return balance;
 };
+
+
 
 /**
  * Get balance using the legacy method (for validation during migration)

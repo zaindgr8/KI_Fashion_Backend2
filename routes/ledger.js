@@ -270,6 +270,8 @@ router.get("/suppliers", auth, async (req, res) => {
       totalBalance = await BalanceService.getTotalSupplierBalance();
     }
 
+    console.log("totalBalance:", totalBalance);
+
     res.json({
       success: true,
       data: {
@@ -435,11 +437,63 @@ router.post("/entry", auth, async (req, res) => {
       createdBy: req.user._id,
     };
 
-    // Handle dispatch order payments
+    console.log(`\n[LEDGER ENTRY] Creating entry:`, {
+      type: entryData.type,
+      transactionType: entryData.transactionType,
+      referenceModel: entryData.referenceModel,
+      referenceId: entryData.referenceId,
+      credit: entryData.credit,
+      entityId: entryData.entityId
+    });
+
+    // Handle supplier payments with universal distribution
+    if (
+      entryData.type === "supplier" &&
+      entryData.transactionType === "payment" &&
+      (!entryData.referenceId || entryData.referenceId === "none")
+    ) {
+      console.log(`[LEDGER ENTRY] Taking UNIVERSAL PAYMENT route`);
+      // Universal payment - distribute across pending orders
+      const { entityId, paymentMethod, credit } = entryData;
+
+      if (!entityId || !credit) {
+        return res.status(400).json({
+          success: false,
+          message: "Supplier ID and payment amount are required",
+        });
+      }
+
+      try {
+        const result = await BalanceService.distributeUniversalPayment({
+          supplierId: entityId,
+          amount: credit,
+          paymentMethod: paymentMethod || "cash",
+          createdBy: req.user._id,
+          description: entryData.description,
+          date: entryData.date || new Date(),
+        });
+
+        return res.status(201).json({
+          success: true,
+          message: "Payment distributed successfully",
+          data: result,
+        });
+      } catch (error) {
+        console.error("Universal payment distribution error:", error);
+        return res.status(500).json({
+          success: false,
+          message: error.message || "Failed to distribute payment",
+        });
+      }
+    }
+
+    // Handle dispatch order payments (specific order)
     if (
       entryData.referenceModel === "DispatchOrder" &&
       entryData.transactionType === "payment"
     ) {
+      console.log(`[LEDGER ENTRY] Taking DISPATCH ORDER PAYMENT route`);
+      
       const { referenceId, entityId, paymentMethod, paymentDetails } =
         entryData;
 
@@ -520,6 +574,14 @@ router.post("/entry", auth, async (req, res) => {
         entityId
       );
 
+      // Calculate remaining balance for this specific order
+      const orderRemainingBalance = totalAmount - totalPaid;
+
+      console.log(`[Payment Check] Order: ${dispatchOrder.orderNumber}`);
+      console.log(`[Payment Check] Total amount: €${totalAmount.toFixed(2)}`);
+      console.log(`[Payment Check] Total paid: €${totalPaid.toFixed(2)}`);
+      console.log(`[Payment Check] Order remaining: €${orderRemainingBalance.toFixed(2)}`);
+
       // Get payment amount from the current entry
       const paymentAmount = entryData.credit || 0;
       const cashPayment =
@@ -532,7 +594,102 @@ router.post("/entry", auth, async (req, res) => {
           : paymentDetails?.bankPayment || 0;
       const newPaymentTotal = cashPayment + bankPayment;
 
-      // Calculate remaining balance after this payment
+      console.log(`[Payment Check] New payment: €${newPaymentTotal.toFixed(2)}`);
+      console.log(`[Payment Check] Will split: ${newPaymentTotal > orderRemainingBalance}`);
+
+      // CHECK IF PAYMENT EXCEEDS ORDER REMAINING - SPLIT IT
+      if (newPaymentTotal > orderRemainingBalance && orderRemainingBalance > 0) {
+        // Payment is more than what's owed - split it
+        const paymentForOrder = orderRemainingBalance;
+        const excessPayment = newPaymentTotal - orderRemainingBalance;
+
+        console.log(`[Payment Split] Payment (€${newPaymentTotal.toFixed(2)}) exceeds order remaining (€${orderRemainingBalance.toFixed(2)})`);
+        console.log(`[Payment Split] Splitting: €${paymentForOrder.toFixed(2)} to order + €${excessPayment.toFixed(2)} as credit`);
+
+        // ============================================
+        // START TRANSACTION - Ensure atomic operations
+        // ============================================
+        const session = await mongoose.startSession();
+        session.startTransaction();
+
+        try {
+          // 1. Create payment entry for the order (exact remaining amount)
+          const orderPaymentEntry = {
+            type: entryData.type,
+            entityId: entryData.entityId,
+            entityModel: entryData.entityModel,
+            transactionType: 'payment',
+            referenceId: referenceId,
+            referenceModel: 'DispatchOrder',
+            debit: 0,
+            credit: paymentForOrder,
+            paymentMethod: paymentMethod,
+            date: entryData.date || new Date(),
+            description: entryData.description || `Payment for ${dispatchOrder.orderNumber}`,
+            createdBy: req.user._id,
+            paymentDetails: {
+              cashPayment: paymentMethod === 'cash' ? paymentForOrder : 0,
+              bankPayment: paymentMethod === 'bank' ? paymentForOrder : 0,
+              remainingBalance: 0
+            }
+          };
+
+          await Ledger.createEntry(orderPaymentEntry, session);
+
+          // 2. Create credit entry for overpayment (no reference)
+          const creditEntry = {
+            type: entryData.type,
+            entityId: entryData.entityId,
+            entityModel: entryData.entityModel,
+            transactionType: 'payment',
+            debit: 0,
+            credit: excessPayment,
+            paymentMethod: paymentMethod,
+            date: entryData.date || new Date(),
+            description: `Overpayment credit (excess from ${dispatchOrder.orderNumber})`,
+            createdBy: req.user._id,
+            paymentDetails: {
+              cashPayment: paymentMethod === 'cash' ? excessPayment : 0,
+              bankPayment: paymentMethod === 'bank' ? excessPayment : 0,
+              remainingBalance: 0
+            }
+          };
+
+          await Ledger.createEntry(creditEntry, session);
+
+          // 3. Update dispatch order to mark as fully paid
+          dispatchOrder.paymentDetails = {
+            cashPayment: (dispatchOrder.paymentDetails?.cashPayment || 0) + (paymentMethod === 'cash' ? paymentForOrder : 0),
+            bankPayment: (dispatchOrder.paymentDetails?.bankPayment || 0) + (paymentMethod === 'bank' ? paymentForOrder : 0),
+            remainingBalance: 0,
+            paymentStatus: 'paid'
+          };
+
+          await dispatchOrder.save({ session });
+          await session.commitTransaction();
+
+          console.log(`[Payment Split] Successfully split payment and updated order`);
+
+          return res.status(201).json({
+            success: true,
+            message: `Payment split: €${paymentForOrder.toFixed(2)} applied to order, €${excessPayment.toFixed(2)} as credit`,
+            data: {
+              orderPayment: paymentForOrder,
+              creditAmount: excessPayment,
+              dispatchOrder: dispatchOrder
+            }
+          });
+
+        } catch (error) {
+          await session.abortTransaction();
+          console.error('Payment split transaction error:', error);
+          throw error;
+        } finally {
+          session.endSession();
+        }
+      }
+
+      // Normal flow: payment does not exceed remaining
       const remainingAfterPayment = totalAmount - totalPaid - newPaymentTotal;
 
       // Calculate outstanding balance (when payment exceeds what's owed, supplier owes admin)
@@ -1123,7 +1280,7 @@ router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
       paymentMethod,
       date: date ? new Date(date) : new Date(),
       description,
-      createdBy: req.user._id
+      createdBy: req.user._id,
     });
 
     res.json({

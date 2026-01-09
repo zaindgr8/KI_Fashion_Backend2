@@ -140,7 +140,7 @@ class BalanceService {
     const orders = await DispatchOrder.find({
       supplier: supplierId,
       status: 'confirmed'
-    }).select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount').lean();
+    }).select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount createdAt').lean();
 
     const ordersWithBalances = await Promise.all(
       orders.map(async (order) => {
@@ -155,15 +155,17 @@ class BalanceService {
           totalAmount: currentValue,
           totalPaid: payments.total,
           returnTotal: returnTotal,
-          remainingBalance: remainingBalance
+          remainingBalance: remainingBalance,
+          createdAt: order.createdAt
         };
       })
     );
 
-    // Return only orders with positive remaining balance, sorted descending
+    // Return only orders with positive remaining balance, sorted by newest first
+    // This applies payments to newest orders first
     return ordersWithBalances
       .filter(o => o.remainingBalance > 0)
-      .sort((a, b) => b.remainingBalance - a.remainingBalance);
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   }
 
   /**
@@ -297,11 +299,22 @@ class BalanceService {
       type: "supplier"
     });
 
+    console.log(`\n========== TOTAL SUPPLIER BALANCE (All Suppliers) ==========`);
+    console.log(`Number of suppliers with ledger entries: ${supplierIds.length}\n`);
+
     const balances = await Promise.all(
       supplierIds.map(id => this.getSupplierBalance(id))
     );
 
-    return balances.reduce((sum, balance) => sum + (balance || 0), 0);
+    // Calculate total and round to 2 decimal places to avoid floating-point precision issues
+    const total = balances.reduce((sum, balance) => sum + (balance || 0), 0);
+    const roundedTotal = Math.round(total * 100) / 100;
+
+    console.log(`Balances for each supplier: [ ${balances.map(b => (b || 0).toFixed(2)).join(', ')} ]`);
+    console.log(`totalBalance: ${roundedTotal.toFixed(2)}`);
+    console.log(`=========================================\n`);
+
+    return roundedTotal;
   }
 
   /**
@@ -498,6 +511,8 @@ class BalanceService {
   }) {
     // 1. Get pending orders sorted by remaining balance descending
     const pendingOrders = await this.getPendingOrdersForSupplier(supplierId);
+
+    console.log("pending Order:", pendingOrders);
 
     let remainingAmount = amount;
     const distributions = [];
