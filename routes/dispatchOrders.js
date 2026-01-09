@@ -832,7 +832,7 @@ router.post('/manual', auth, async (req, res) => {
     try {
       await Supplier.findByIdAndUpdate(
         supplier._id,
-        { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: finalRemainingBalance } }
+        { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: discountedSupplierPaymentTotal - cashPayment - bankPayment } }
       );
     } catch (supplierError) {
       console.error(`Error updating supplier balance:`, supplierError);
