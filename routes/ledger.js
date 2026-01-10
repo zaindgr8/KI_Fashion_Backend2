@@ -5,6 +5,7 @@ const Ledger = require("../models/Ledger");
 const DispatchOrder = require("../models/DispatchOrder");
 const Supplier = require("../models/Supplier");
 const Buyer = require("../models/Buyer");
+const LogisticsCompany = require("../models/LogisticsCompany");
 const auth = require("../middleware/auth");
 const BalanceService = require("../services/BalanceService");
 
@@ -1423,6 +1424,15 @@ router.post("/logistics/:id/distribute-payment", auth, async (req, res) => {
   try {
     const { amount, paymentMethod, date, description } = req.body;
 
+    // Verify logistics company exists
+    const companyExists = await LogisticsCompany.findById(req.params.id);
+    if (!companyExists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Logistics company not found'
+      });
+    }
+
     if (!amount || amount <= 0) {
       return res.status(400).json({
         success: false,
@@ -1437,25 +1447,61 @@ router.post("/logistics/:id/distribute-payment", auth, async (req, res) => {
       });
     }
 
+    // Get current balance before payment
+    const beforeBalance = await BalanceService.getLogisticsBalance(req.params.id);
+
+    // Distribute payment
     const result = await BalanceService.distributeLogisticsPayment({
       logisticsCompanyId: req.params.id,
       amount: parseFloat(amount),
       paymentMethod,
       date: date ? new Date(date) : new Date(),
       description,
-      createdBy: req.user._id
+      createdBy: req.user._id,
     });
+
+    // Get updated balance
+    const afterBalance = await BalanceService.getLogisticsBalance(req.params.id);
 
     res.json({
       success: true,
-      message: `Payment distributed to ${result.distributions.length} orders`,
-      data: result
+      message: `Payment of £${amount.toFixed(2)} distributed successfully`,
+      data: {
+        payment: {
+          amount: parseFloat(amount),
+          method: paymentMethod,
+          date: date || new Date()
+        },
+        distribution: {
+          ordersAffected: result.distributions.filter(d => !d.isAdvance).length,
+          fullyPaidOrders: result.distributions.filter(d => d.fullyPaid).length,
+          distributedAmount: result.totalDistributed,
+          advanceAmount: result.remainingCredit || 0
+        },
+        balance: {
+          before: beforeBalance,
+          after: afterBalance,
+          change: beforeBalance - afterBalance
+        },
+        distributions: result.distributions.map(d => ({
+          orderReference: d.orderNumber,
+          originalAmount: d.totalAmount,
+          previouslyPaid: d.totalPaid || 0,
+          currentPayment: d.amountApplied,
+          remainingBalance: d.newRemaining,
+          status: d.fullyPaid ? 'PAID' : d.isAdvance ? 'ADVANCE' : 'PARTIAL'
+        }))
+      }
     });
+
   } catch (error) {
     console.error("Distribute logistics payment error:", error);
     res.status(500).json({
       success: false,
-      message: error.message || "Failed to distribute payment"
+      message: error.message || "Failed to distribute payment",
+      ...(process.env.NODE_ENV === 'development' && {
+        stack: error.stack
+      })
     });
   }
 });
