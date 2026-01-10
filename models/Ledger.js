@@ -74,6 +74,12 @@ const ledgerSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
+  },
+  entryNumber: {
+    type: String,
+    unique: true,
+    index: true,
+    sparse: true // Allow null/undefined for existing entries during migration
   }
 }, {
   timestamps: true
@@ -114,6 +120,89 @@ ledgerSchema.index({
   entityId: 1,
   date: -1,
   createdAt: -1
+});
+
+// Explicit index for entryNumber (unique index already created via schema, but explicit is good)
+ledgerSchema.index({ entryNumber: 1 });
+
+// =====================================================
+// ENTRY NUMBER GENERATION - Atomic Counter
+// =====================================================
+
+/**
+ * Get next entry number atomically using counter collection
+ * Uses MongoDB's findOneAndUpdate with $inc for atomic increment
+ * This prevents race conditions when multiple entries are created simultaneously
+ */
+ledgerSchema.statics.getNextEntryNumber = async function (session = null) {
+  try {
+    const countersCollection = mongoose.connection.db.collection('counters');
+    
+    const options = {
+      upsert: true,
+      returnDocument: 'after'
+    };
+    
+    if (session) {
+      options.session = session;
+    }
+    
+    const counter = await countersCollection.findOneAndUpdate(
+      { _id: 'ledgerEntryNumber' },
+      { $inc: { seq: 1 } },
+      options
+    );
+    
+    return counter.value.seq;
+  } catch (error) {
+    // Fallback: if counter collection fails, find max entryNumber
+    console.warn('Counter collection access failed, falling back to max entryNumber:', error.message);
+    
+    let query = this.findOne().sort({ entryNumber: -1 }).select('entryNumber');
+    if (session) {
+      query = query.session(session);
+    }
+    
+    const lastEntry = await query;
+    const lastNumber = lastEntry?.entryNumber ? parseInt(lastEntry.entryNumber) : 0;
+    return lastNumber + 1;
+  }
+};
+
+// Pre-save hook to auto-generate entryNumber for new entries
+ledgerSchema.pre('save', async function (next) {
+  // Only generate entryNumber if it doesn't exist
+  if (!this.entryNumber) {
+    try {
+      // Access session from the save options if available
+      // When save({ session }) is called, the session is available via this.$session()
+      let session = null;
+      if (typeof this.$session === 'function') {
+        session = this.$session();
+      } else if (this.$session) {
+        session = this.$session;
+      }
+      
+      const nextNumber = await this.constructor.getNextEntryNumber(session);
+      this.entryNumber = String(nextNumber).padStart(7, '0');
+    } catch (error) {
+      // If generation fails, try one more time with retry logic
+      console.warn('Entry number generation failed, retrying:', error.message);
+      try {
+        let session = null;
+        if (typeof this.$session === 'function') {
+          session = this.$session();
+        } else if (this.$session) {
+          session = this.$session;
+        }
+        const nextNumber = await this.constructor.getNextEntryNumber(session);
+        this.entryNumber = String(nextNumber).padStart(7, '0');
+      } catch (retryError) {
+        return next(new Error(`Failed to generate entry number: ${retryError.message}`));
+      }
+    }
+  }
+  next();
 });
 
 ledgerSchema.statics.createEntry = async function (entryData, session = null) {

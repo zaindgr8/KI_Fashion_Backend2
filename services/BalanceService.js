@@ -546,8 +546,52 @@ static async getSupplierBalanceSummary(supplierId) {
     });
     console.log("=================================================\n");
 
+    // Handle case when there are no pending orders - create advance/credit entry
     if (pendingOrders.length === 0) {
-      throw new Error('No pending orders found for this supplier');
+      console.log(`No pending orders found - Creating advance/credit entry for full amount: €${amount.toFixed(2)}`);
+
+      await Ledger.createEntry({
+        type: 'supplier',
+        entityId: supplierId,
+        entityModel: 'Supplier',
+        transactionType: 'payment',
+        referenceId: null, // No dispatch order reference
+        referenceModel: null, // No reference model
+        debit: 0,
+        credit: amount,
+        paymentMethod,
+        date,
+        description: description || `Advance payment (credit to supplier account - no pending orders)`,
+        createdBy,
+        paymentDetails: {
+          cashPayment: paymentMethod === 'cash' ? amount : 0,
+          bankPayment: paymentMethod === 'bank' ? amount : 0,
+          remainingBalance: 0
+        }
+      }, session);
+
+      console.log("\n========== DISTRIBUTION COMPLETE ==========");
+      console.log(`Total Distributed: €${amount.toFixed(2)}`);
+      console.log(`Orders Affected: 0`);
+      console.log(`Fully Paid Orders: 0`);
+      console.log(`Advance/Credit: €${amount.toFixed(2)}`);
+      console.log("==========================================\n");
+
+      return {
+        totalDistributed: amount,
+        distributions: [{
+          orderId: null,
+          orderNumber: 'ADVANCE_CREDIT',
+          amountApplied: amount,
+          previousRemaining: 0,
+          newRemaining: -amount, // Negative = supplier has credit
+          fullyPaid: false,
+          isAdvance: true,
+          totalAmount: undefined, // Not applicable
+          totalPaid: undefined // Not applicable
+        }],
+        remainingCredit: amount
+      };
     }
 
     let remainingAmount = amount;
@@ -616,6 +660,8 @@ static async getSupplierBalanceSummary(supplierId) {
         entityId: supplierId,
         entityModel: 'Supplier',
         transactionType: 'payment', // Keep as 'payment' for consistency
+        referenceId: null, // No dispatch order reference for excess payment
+        referenceModel: null, // No reference model
         debit: 0,
         credit: remainingAmount,
         paymentMethod,
@@ -636,7 +682,9 @@ static async getSupplierBalanceSummary(supplierId) {
         previousRemaining: 0,
         newRemaining: -remainingAmount, // Negative = supplier has credit
         fullyPaid: false,
-        isAdvance: true
+        isAdvance: true,
+        totalAmount: undefined, // Not applicable
+        totalPaid: undefined // Not applicable
       });
     }
 
