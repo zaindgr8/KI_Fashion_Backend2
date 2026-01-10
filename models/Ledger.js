@@ -336,7 +336,7 @@ ledgerSchema.statics.getBalance = async function (type, entityId) {
   const totalDebit = result[0]?.totalDebit || 0;
   const totalCredit = result[0]?.totalCredit || 0;
 
-  const balance = totalCredit - totalDebit;
+  const balance = totalDebit - totalCredit;
 
   console.log("Total Debit:", totalDebit);
   console.log("Total Credit:", totalCredit);
