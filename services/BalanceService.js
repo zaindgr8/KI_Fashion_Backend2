@@ -1,8 +1,8 @@
 /**
  * BalanceService - Single Source of Truth for all balance calculations
  * 
- * This service centralizes all balance-related business logic, using the Ledger
- * model as the authoritative source for all financial data.
+ * CRITICAL FIX: Payment distribution now uses FIFO (First In, First Out)
+ * Payments are applied to oldest orders first, not newest.
  * 
  * Key principles:
  * - All balances are calculated on-demand from Ledger entries
@@ -134,7 +134,9 @@ class BalanceService {
 
   /**
    * Get all pending orders for a supplier (for payment distribution)
-   * Returns orders sorted by remaining balance descending
+   * 
+   * CRITICAL FIX: Returns orders sorted by createdAt ASCENDING (oldest first) - FIFO
+   * This ensures payments are applied to orders in the correct chronological order
    */
   static async getPendingOrdersForSupplier(supplierId) {
     const orders = await DispatchOrder.find({
@@ -161,11 +163,11 @@ class BalanceService {
       })
     );
 
-    // Return only orders with positive remaining balance, sorted by newest first
-    // This applies payments to newest orders first
+    // CRITICAL FIX: Sort by createdAt ASCENDING (oldest first) for FIFO payment distribution
+    // This ensures DSP001 (created first) receives payment before DSP002, DSP003, etc.
     return ordersWithBalances
       .filter(o => o.remainingBalance > 0)
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)); // ASCENDING = FIFO
   }
 
   /**
@@ -179,7 +181,7 @@ class BalanceService {
     const orders = await DispatchOrder.find({
       logisticsCompany: logisticsCompanyId,
       status: 'confirmed'
-    }).select('_id orderNumber totalBoxes').lean();
+    }).select('_id orderNumber totalBoxes createdAt').lean();
 
     const chargesWithBalances = await Promise.all(
       orders.map(async (order) => {
@@ -194,15 +196,16 @@ class BalanceService {
           boxRate: boxRate,
           totalAmount: totalAmount,
           totalPaid: payments.total,
-          remainingBalance: remainingBalance
+          remainingBalance: remainingBalance,
+          createdAt: order.createdAt
         };
       })
     );
 
-    // Return only charges with positive remaining balance, sorted descending
+    // Sort by createdAt ASCENDING for FIFO distribution
     return chargesWithBalances
       .filter(c => c.remainingBalance > 0)
-      .sort((a, b) => b.remainingBalance - a.remainingBalance);
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
   }
 
   // =====================================================
@@ -498,7 +501,19 @@ class BalanceService {
   }
 
   /**
-   * Distribute a universal payment across pending orders (descending by amount)
+   * Distribute a universal payment across pending orders using FIFO (First In, First Out)
+   * 
+   * CRITICAL FIX: This method now correctly applies payments to oldest orders first
+   * 
+   * Payment Distribution Logic:
+   * 1. Get pending orders sorted by createdAt ASCENDING (oldest first)
+   * 2. Apply payment to each order sequentially until:
+   *    - Payment is exhausted, OR
+   *    - All orders are fully paid
+   * 3. If payment exceeds all order balances, create advance/credit entry
+   * 
+   * @param {Object} params - Payment parameters
+   * @returns {Object} Distribution result with affected orders
    */
   static async distributeUniversalPayment({
     supplierId,
@@ -509,30 +524,44 @@ class BalanceService {
     date = new Date(),
     session = null
   }) {
-    // 1. Get pending orders sorted by remaining balance descending
+    // 1. Get pending orders sorted by createdAt ASCENDING (FIFO - oldest first)
     const pendingOrders = await this.getPendingOrdersForSupplier(supplierId);
 
-    console.log("pending Order:", pendingOrders);
+    console.log("\n========== PAYMENT DISTRIBUTION (FIFO) ==========");
+    console.log(`Supplier ID: ${supplierId}`);
+    console.log(`Payment Amount: €${amount.toFixed(2)}`);
+    console.log(`Payment Method: ${paymentMethod}`);
+    console.log(`Pending Orders (sorted oldest first):`);
+    pendingOrders.forEach((order, index) => {
+      console.log(`  ${index + 1}. ${order.orderNumber} - Remaining: €${order.remainingBalance.toFixed(2)} (Created: ${order.createdAt})`);
+    });
+    console.log("=================================================\n");
+
+    if (pendingOrders.length === 0) {
+      throw new Error('No pending orders found for this supplier');
+    }
 
     let remainingAmount = amount;
     const distributions = [];
 
-    // 2. Distribute across orders
+    // 2. Distribute payment across orders in FIFO order
     for (let i = 0; i < pendingOrders.length; i++) {
       if (remainingAmount <= 0) break;
 
       const order = pendingOrders[i];
-      const isLastOrder = (i === pendingOrders.length - 1);
       const orderRemaining = order.remainingBalance;
 
-      // If it's the last order, it takes all remaining amount (Scenario: More/Equal/Less)
-      const paymentForOrder = isLastOrder ? remainingAmount : Math.min(remainingAmount, orderRemaining);
+      // Calculate payment for this specific order
+      // Pay exactly what the order needs, up to the remaining payment amount
+      const paymentForOrder = Math.min(remainingAmount, orderRemaining);
 
       if (paymentForOrder > 0) {
         // Calculate the new remaining balance for this order after this payment
         const newOrderRemaining = orderRemaining - paymentForOrder;
 
-        // Create ledger entry linked to this order
+        console.log(`Applying €${paymentForOrder.toFixed(2)} to ${order.orderNumber} (Remaining after: €${newOrderRemaining.toFixed(2)})`);
+
+        // Create ledger entry linked to this specific order
         await Ledger.createEntry({
           type: 'supplier',
           entityId: supplierId,
@@ -544,7 +573,7 @@ class BalanceService {
           credit: paymentForOrder,
           paymentMethod,
           date,
-          description: description || `Distributed payment from bulk payment`,
+          description: description || `Distributed payment to ${order.orderNumber}`,
           createdBy,
           paymentDetails: {
             cashPayment: paymentMethod === 'cash' ? paymentForOrder : 0,
@@ -558,25 +587,29 @@ class BalanceService {
           orderNumber: order.orderNumber,
           amountApplied: paymentForOrder,
           previousRemaining: orderRemaining,
-          newRemaining: newOrderRemaining
+          newRemaining: newOrderRemaining,
+          fullyPaid: newOrderRemaining === 0
         });
 
         remainingAmount -= paymentForOrder;
       }
     }
 
-    // 3. If excess payment (all orders paid), create unlinked credit entry
+    // 3. Handle excess payment (if any)
+    // If payment exceeds all order balances, create advance/credit entry
     if (remainingAmount > 0) {
+      console.log(`\nExcess payment: €${remainingAmount.toFixed(2)} - Creating advance/credit entry`);
+
       await Ledger.createEntry({
         type: 'supplier',
         entityId: supplierId,
         entityModel: 'Supplier',
-        transactionType: 'payment',
+        transactionType: 'payment', // Keep as 'payment' for consistency
         debit: 0,
         credit: remainingAmount,
         paymentMethod,
         date,
-        description: description || `Excess payment (credit to supplier account)`,
+        description: description || `Advance payment (credit to supplier account)`,
         createdBy,
         paymentDetails: {
           cashPayment: paymentMethod === 'cash' ? remainingAmount : 0,
@@ -587,12 +620,21 @@ class BalanceService {
 
       distributions.push({
         orderId: null,
-        orderNumber: 'CREDIT',
+        orderNumber: 'ADVANCE_CREDIT',
         amountApplied: remainingAmount,
         previousRemaining: 0,
-        newRemaining: -remainingAmount // Negative = supplier has credit
+        newRemaining: -remainingAmount, // Negative = supplier has credit
+        fullyPaid: false,
+        isAdvance: true
       });
     }
+
+    console.log("\n========== DISTRIBUTION COMPLETE ==========");
+    console.log(`Total Distributed: €${amount.toFixed(2)}`);
+    console.log(`Orders Affected: ${distributions.filter(d => !d.isAdvance).length}`);
+    console.log(`Fully Paid Orders: ${distributions.filter(d => d.fullyPaid).length}`);
+    console.log(`Advance/Credit: €${(remainingAmount > 0 ? remainingAmount : 0).toFixed(2)}`);
+    console.log("==========================================\n");
 
     return {
       totalDistributed: amount,
@@ -788,7 +830,7 @@ class BalanceService {
   }
 
   /**
-   * Distribute a universal payment across pending logistics charges
+   * Distribute a universal payment across pending logistics charges using FIFO
    */
   static async distributeLogisticsPayment({
     logisticsCompanyId,
@@ -799,7 +841,7 @@ class BalanceService {
     date = new Date(),
     session = null
   }) {
-    // Get pending charges sorted by remaining descending
+    // Get pending charges sorted by createdAt ASCENDING (FIFO)
     const pendingCharges = await this.getPendingLogisticsCharges(logisticsCompanyId);
 
     let remainingAmount = amount;
@@ -809,11 +851,10 @@ class BalanceService {
       if (remainingAmount <= 0) break;
 
       const charge = pendingCharges[i];
-      const isLastCharge = (i === pendingCharges.length - 1);
       const chargeRemaining = charge.remainingBalance;
 
-      // If it's the last charge, it takes all remaining amount
-      const paymentForCharge = isLastCharge ? remainingAmount : Math.min(remainingAmount, chargeRemaining);
+      // Calculate payment for this charge
+      const paymentForCharge = Math.min(remainingAmount, chargeRemaining);
 
       if (paymentForCharge > 0) {
         // Calculate new remaining balance for this charge
@@ -1055,4 +1096,3 @@ class BalanceService {
 }
 
 module.exports = BalanceService;
-
