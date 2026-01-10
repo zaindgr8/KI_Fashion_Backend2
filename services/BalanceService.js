@@ -52,78 +52,15 @@ class BalanceService {
     return await this.getEntityBalance('logistics', logisticsCompanyId);
   }
 
-  /**
-   * Get supplier balance summary
-   */
-  static async getSupplierBalanceSummary(supplierId) {
-    const ledgerEntries = await Ledger.find({
-      type: 'supplier',
-      entityId: supplierId
-    }).sort({ createdAt: 1 });
-
-    const purchases = ledgerEntries
-      .filter(e => e.transactionType === 'purchase')
-      .reduce((sum, e) => sum + e.debit, 0);
-
-    const payments = ledgerEntries
-      .filter(e => e.transactionType === 'payment')
-      .reduce((sum, e) => sum + e.credit, 0);
-
-    const currentBalance = purchases - payments;
-
-    // Get unpaid orders
-    const unpaidOrders = await Ledger.aggregate([
-      {
-        $match: {
-          type: 'supplier',
-          entityId: mongoose.Types.ObjectId(supplierId),
-          transactionType: 'purchase'
-        }
-      },
-      {
-        $lookup: {
-          from: 'ledgers',
-          let: { refId: '$referenceId' },
-          pipeline: [
-            {
-              $match: {
-                $expr: {
-                  $and: [
-                    { $eq: ['$referenceId', '$$refId'] },
-                    { $eq: ['$transactionType', 'payment'] }
-                  ]
-                }
-              }
-            }
-          ],
-          as: 'payments'
-        }
-      },
-      {
-        $addFields: {
-          totalPaid: { $sum: '$payments.credit' },
-          remainingBalance: { $subtract: ['$debit', { $sum: '$payments.credit' }] }
-        }
-      },
-      {
-        $match: {
-          remainingBalance: { $gt: 0 }
-        }
-      },
-      {
-        $sort: { createdAt: 1 }
-      }
-    ]);
-
-    return {
-      totalPurchases: purchases,
-      totalPayments: payments,
-      currentBalance,
-      unpaidOrdersCount: unpaidOrders.length,
-      unpaidOrders
-    };
-  }
-
+/**
+    * Get supplier balance summary (simple format for API responses)
+    * @param {string} supplierId - The supplier's MongoDB ObjectId
+    * @returns {Object} { currentBalance: number }
+ */
+static async getSupplierBalanceSummary(supplierId) {
+  const currentBalance = await this.getSupplierBalance(supplierId);
+  return { currentBalance };
+}
   // =====================================================
   // ORDER-LEVEL BALANCE METHODS
   // =====================================================
@@ -660,7 +597,9 @@ class BalanceService {
           amountApplied: paymentForOrder,
           previousRemaining: orderRemaining,
           newRemaining: newOrderRemaining,
-          fullyPaid: newOrderRemaining === 0
+          fullyPaid: newOrderRemaining === 0,
+          totalAmount: order.totalAmount,
+          totalPaid: order.totalPaid
         });
 
         remainingAmount -= paymentForOrder;

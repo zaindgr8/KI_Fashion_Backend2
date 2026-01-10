@@ -8,7 +8,7 @@ const Buyer = require("../models/Buyer");
 const auth = require("../middleware/auth");
 const BalanceService = require("../services/BalanceService");
 
-const router = express.Router();
+const router = express.Router()
 
 // Helper function to get buyer ID for distributor/buyer users
 async function getBuyerIdForUser(user) {
@@ -1343,8 +1343,8 @@ router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
         distribution: {
           ordersAffected: result.distributions.length,
           fullyPaidOrders: result.distributions.filter(d => d.fullyPaid).length,
-          distributedAmount: result.distributedAmount,
-          advanceAmount: result.advanceAmount
+          distributedAmount: result.totalDistributed,
+          advanceAmount: result.remainingCredit
         },
         balance: {
           before: beforeSummary.currentBalance,
@@ -1352,11 +1352,11 @@ router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
           change: beforeSummary.currentBalance - afterSummary.currentBalance
         },
         distributions: result.distributions.map(d => ({
-          orderReference: d.orderReference,
-          originalAmount: d.originalAmount,
-          previouslyPaid: d.previouslyPaid,
-          currentPayment: d.currentPayment,
-          remainingBalance: d.remainingAfterPayment,
+          orderReference: d.orderNumber,
+          originalAmount: d.totalAmount || (d.previousRemaining + d.amountApplied),
+          previouslyPaid: d.totalPaid || 0,
+          currentPayment: d.amountApplied,
+          remainingBalance: d.newRemaining,
           status: d.fullyPaid ? 'PAID' : d.isAdvance ? 'ADVANCE' : 'PARTIAL'
         }))
       }
