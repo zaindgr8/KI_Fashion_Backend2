@@ -1302,106 +1302,77 @@ router.get("/logistics", auth, async (req, res) => {
  * POST /ledger/supplier/:id/distribute-payment
  * Distribute a bulk payment across pending orders for a supplier (FIFO)
  */
-router.post(
-  "/supplier/:id/distribute-payment",
-  auth,
-  [
-    body('amount')
-      .isFloat({ min: 0.01 })
-      .withMessage('Amount must be greater than 0'),
-    body('paymentMethod')
-      .isIn(['cash', 'bank'])
-      .withMessage("Payment method must be 'cash' or 'bank'"),
-    body('date')
-      .optional()
-      .isISO8601()
-      .withMessage('Invalid date format'),
-    body('description')
-      .optional()
-      .isString()
-      .trim()
-  ],
-  async (req, res) => {
-    try {
-      // Validate request
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: 'Validation failed',
-          errors: errors.array()
-        });
-      }
+router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
+  try {
+    const { amount, paymentMethod, date, description } = req.body;
 
-      const { amount, paymentMethod, date, description } = req.body;
-
-      // Verify supplier exists
-      const supplierExists = await Supplier.findById(req.params.id);
-      if (!supplierExists) {
-        return res.status(404).json({
-          success: false,
-          message: 'Supplier not found'
-        });
-      }
-
-      // Get current balance before payment
-      const beforeSummary = await BalanceService.getSupplierBalanceSummary(req.params.id);
-
-      // Distribute payment
-      const result = await BalanceService.distributeUniversalPayment({
-        supplierId: req.params.id,
-        amount: parseFloat(amount),
-        paymentMethod,
-        date: date ? new Date(date) : new Date(),
-        description,
-        createdBy: req.user._id,
-      });
-
-      // Get updated balance
-      const afterSummary = await BalanceService.getSupplierBalanceSummary(req.params.id);
-
-      res.json({
-        success: true,
-        message: `Payment of €${amount.toFixed(2)} distributed successfully`,
-        data: {
-          payment: {
-            amount: parseFloat(amount),
-            method: paymentMethod,
-            date: date || new Date()
-          },
-          distribution: {
-            ordersAffected: result.distributions.length,
-            fullyPaidOrders: result.distributions.filter(d => d.fullyPaid).length,
-            distributedAmount: result.distributedAmount,
-            advanceAmount: result.advanceAmount
-          },
-          balance: {
-            before: beforeSummary.currentBalance,
-            after: afterSummary.currentBalance,
-            change: beforeSummary.currentBalance - afterSummary.currentBalance
-          },
-          distributions: result.distributions.map(d => ({
-            orderReference: d.orderReference,
-            originalAmount: d.originalAmount,
-            previouslyPaid: d.previouslyPaid,
-            currentPayment: d.currentPayment,
-            remainingBalance: d.remainingAfterPayment,
-            status: d.fullyPaid ? 'PAID' : d.isAdvance ? 'ADVANCE' : 'PARTIAL'
-          }))
-        }
-      });
-
-    } catch (error) {
-      console.error("Distribute supplier payment error:", error);
-      res.status(500).json({
+    // Verify supplier exists
+    const supplierExists = await Supplier.findById(req.params.id);
+    if (!supplierExists) {
+      return res.status(404).json({
         success: false,
-        message: error.message || "Failed to distribute payment",
-        ...(process.env.NODE_ENV === 'development' && {
-          stack: error.stack
-        })
+        message: 'Supplier not found'
       });
     }
+
+    // Get current balance before payment
+    const beforeSummary = await BalanceService.getSupplierBalanceSummary(req.params.id);
+
+    // Distribute payment
+    const result = await BalanceService.distributeUniversalPayment({
+      supplierId: req.params.id,
+      amount: parseFloat(amount),
+      paymentMethod,
+      date: date ? new Date(date) : new Date(),
+      description,
+      createdBy: req.user._id,
+    });
+
+    // Get updated balance
+    const afterSummary = await BalanceService.getSupplierBalanceSummary(req.params.id);
+
+    res.json({
+      success: true,
+      message: `Payment of €${amount.toFixed(2)} distributed successfully`,
+      data: {
+        payment: {
+          amount: parseFloat(amount),
+          method: paymentMethod,
+          date: date || new Date()
+        },
+        distribution: {
+          ordersAffected: result.distributions.length,
+          fullyPaidOrders: result.distributions.filter(d => d.fullyPaid).length,
+          distributedAmount: result.distributedAmount,
+          advanceAmount: result.advanceAmount
+        },
+        balance: {
+          before: beforeSummary.currentBalance,
+          after: afterSummary.currentBalance,
+          change: beforeSummary.currentBalance - afterSummary.currentBalance
+        },
+        distributions: result.distributions.map(d => ({
+          orderReference: d.orderReference,
+          originalAmount: d.originalAmount,
+          previouslyPaid: d.previouslyPaid,
+          currentPayment: d.currentPayment,
+          remainingBalance: d.remainingAfterPayment,
+          status: d.fullyPaid ? 'PAID' : d.isAdvance ? 'ADVANCE' : 'PARTIAL'
+        }))
+      }
+    });
+
+  } catch (error) {
+    console.error("Distribute supplier payment error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to distribute payment",
+      ...(process.env.NODE_ENV === 'development' && {
+        stack: error.stack
+      })
+    });
   }
+}
 );
 
 
