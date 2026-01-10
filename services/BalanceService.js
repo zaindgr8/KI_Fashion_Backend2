@@ -555,8 +555,7 @@ static async getSupplierBalanceSummary(supplierId) {
         entityId: supplierId,
         entityModel: 'Supplier',
         transactionType: 'payment',
-        referenceId: null, // No dispatch order reference
-        referenceModel: null, // No reference model
+        // referenceId and referenceModel omitted - no dispatch order reference for advance payments
         debit: 0,
         credit: amount,
         paymentMethod,
@@ -660,8 +659,7 @@ static async getSupplierBalanceSummary(supplierId) {
         entityId: supplierId,
         entityModel: 'Supplier',
         transactionType: 'payment', // Keep as 'payment' for consistency
-        referenceId: null, // No dispatch order reference for excess payment
-        referenceModel: null, // No reference model
+        // referenceId and referenceModel omitted - no dispatch order reference for excess payments
         debit: 0,
         credit: remainingAmount,
         paymentMethod,
