@@ -901,9 +901,48 @@ static async getSupplierBalanceSummary(supplierId) {
     // Get pending charges sorted by createdAt ASCENDING (FIFO)
     const pendingCharges = await this.getPendingLogisticsCharges(logisticsCompanyId);
 
+    // Handle case when there are no pending charges - create advance/credit entry
+    if (pendingCharges.length === 0) {
+      await Ledger.createEntry({
+        type: 'logistics',
+        entityId: logisticsCompanyId,
+        entityModel: 'LogisticsCompany',
+        transactionType: 'payment',
+        // referenceId and referenceModel omitted - no dispatch order reference for advance payments
+        debit: 0,
+        credit: amount,
+        paymentMethod,
+        date,
+        description: description || `Advance payment (credit to logistics company account - no pending charges)`,
+        createdBy,
+        paymentDetails: {
+          cashPayment: paymentMethod === 'cash' ? amount : 0,
+          bankPayment: paymentMethod === 'bank' ? amount : 0,
+          remainingBalance: 0
+        }
+      }, session);
+
+      return {
+        totalDistributed: amount,
+        distributions: [{
+          orderId: null,
+          orderNumber: 'ADVANCE_CREDIT',
+          amountApplied: amount,
+          previousRemaining: 0,
+          newRemaining: -amount, // Negative = logistics company has credit
+          fullyPaid: false,
+          isAdvance: true,
+          totalAmount: undefined, // Not applicable
+          totalPaid: undefined // Not applicable
+        }],
+        remainingCredit: amount
+      };
+    }
+
     let remainingAmount = amount;
     const distributions = [];
 
+    // Distribute payment across charges in FIFO order
     for (let i = 0; i < pendingCharges.length; i++) {
       if (remainingAmount <= 0) break;
 
@@ -911,6 +950,7 @@ static async getSupplierBalanceSummary(supplierId) {
       const chargeRemaining = charge.remainingBalance;
 
       // Calculate payment for this charge
+      // Pay exactly what the charge needs, up to the remaining payment amount
       const paymentForCharge = Math.min(remainingAmount, chargeRemaining);
 
       if (paymentForCharge > 0) {
@@ -928,7 +968,7 @@ static async getSupplierBalanceSummary(supplierId) {
           credit: paymentForCharge,
           paymentMethod,
           date,
-          description: description || `Distributed payment`,
+          description: description || `Distributed payment to ${charge.orderNumber}`,
           createdBy,
           paymentDetails: {
             cashPayment: paymentMethod === 'cash' ? paymentForCharge : 0,
@@ -942,43 +982,57 @@ static async getSupplierBalanceSummary(supplierId) {
           orderNumber: charge.orderNumber,
           amountApplied: paymentForCharge,
           previousRemaining: chargeRemaining,
-          newRemaining: newChargeRemaining
+          newRemaining: newChargeRemaining,
+          fullyPaid: newChargeRemaining === 0,
+          isAdvance: false,
+          totalAmount: charge.totalAmount,
+          totalPaid: charge.totalPaid
         });
 
         remainingAmount -= paymentForCharge;
       }
     }
 
-    // Excess payment creates unlinked credit (only if no pending charges existed)
+    // Handle excess payment (if any)
+    // If payment exceeds all charge balances, create advance/credit entry
     if (remainingAmount > 0) {
       await Ledger.createEntry({
         type: 'logistics',
         entityId: logisticsCompanyId,
         entityModel: 'LogisticsCompany',
         transactionType: 'payment',
+        // referenceId and referenceModel omitted - no dispatch order reference for excess payments
         debit: 0,
         credit: remainingAmount,
         paymentMethod,
         date,
-        description: `Excess payment (credit)`,
+        description: description || `Advance payment (credit to logistics company account)`,
         createdBy,
         paymentDetails: {
           cashPayment: paymentMethod === 'cash' ? remainingAmount : 0,
           bankPayment: paymentMethod === 'bank' ? remainingAmount : 0,
-          remainingBalance: 0
+          remainingBalance: 0 // No remaining balance for excess/credit entries
         }
       }, session);
 
       distributions.push({
         orderId: null,
-        orderNumber: 'CREDIT',
+        orderNumber: 'ADVANCE_CREDIT',
         amountApplied: remainingAmount,
         previousRemaining: 0,
-        newRemaining: -remainingAmount
+        newRemaining: -remainingAmount, // Negative = logistics company has credit
+        fullyPaid: false,
+        isAdvance: true,
+        totalAmount: undefined, // Not applicable
+        totalPaid: undefined // Not applicable
       });
     }
 
-    return { totalDistributed: amount, distributions };
+    return {
+      totalDistributed: amount,
+      distributions,
+      remainingCredit: remainingAmount > 0 ? remainingAmount : 0
+    };
   }
 
   /**
