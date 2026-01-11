@@ -144,14 +144,14 @@ static async getSupplierBalanceSummary(supplierId) {
   /**
    * Get all pending orders for a supplier (for payment distribution)
    * 
-   * CRITICAL FIX: Returns orders sorted by createdAt ASCENDING (oldest first) - FIFO
-   * This ensures payments are applied to orders in the correct chronological order
+   * FIFO based on confirmedAt - First confirmed, first paid
+   * This ensures payment distribution matches ledger display order
    */
   static async getPendingOrdersForSupplier(supplierId) {
     const orders = await DispatchOrder.find({
       supplier: supplierId,
       status: 'confirmed'
-    }).select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount createdAt').lean();
+    }).select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount createdAt confirmedAt').lean();
 
     const ordersWithBalances = await Promise.all(
       orders.map(async (order) => {
@@ -167,20 +167,22 @@ static async getSupplierBalanceSummary(supplierId) {
           totalPaid: payments.total,
           returnTotal: returnTotal,
           remainingBalance: remainingBalance,
-          createdAt: order.createdAt
+          createdAt: order.createdAt,
+          confirmedAt: order.confirmedAt
         };
       })
     );
 
-    // CRITICAL FIX: Sort by createdAt ASCENDING (oldest first) for FIFO payment distribution
-    // This ensures DSP001 (created first) receives payment before DSP002, DSP003, etc.
+    // FIFO: Sort by confirmedAt ASCENDING (first confirmed = first paid)
+    // This matches the ledger display order where entries are created at confirmation time
     return ordersWithBalances
       .filter(o => o.remainingBalance > 0)
-      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)); // ASCENDING = FIFO
+      .sort((a, b) => new Date(a.confirmedAt) - new Date(b.confirmedAt)); // Sort by confirmation date
   }
 
   /**
    * Get all pending logistics charges for a company (for payment distribution)
+   * FIFO based on confirmedAt - matches ledger display order
    */
   static async getPendingLogisticsCharges(logisticsCompanyId) {
     const LogisticsCompany = require('../models/LogisticsCompany');
@@ -190,7 +192,7 @@ static async getSupplierBalanceSummary(supplierId) {
     const orders = await DispatchOrder.find({
       logisticsCompany: logisticsCompanyId,
       status: 'confirmed'
-    }).select('_id orderNumber totalBoxes createdAt').lean();
+    }).select('_id orderNumber totalBoxes createdAt confirmedAt').lean();
 
     const chargesWithBalances = await Promise.all(
       orders.map(async (order) => {
@@ -206,15 +208,16 @@ static async getSupplierBalanceSummary(supplierId) {
           totalAmount: totalAmount,
           totalPaid: payments.total,
           remainingBalance: remainingBalance,
-          createdAt: order.createdAt
+          createdAt: order.createdAt,
+          confirmedAt: order.confirmedAt
         };
       })
     );
 
-    // Sort by createdAt ASCENDING for FIFO distribution
+    // Sort by confirmedAt ASCENDING for FIFO distribution (first confirmed = first paid)
     return chargesWithBalances
       .filter(c => c.remainingBalance > 0)
-      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+      .sort((a, b) => new Date(a.confirmedAt) - new Date(b.confirmedAt));
   }
 
   // =====================================================
@@ -533,16 +536,16 @@ static async getSupplierBalanceSummary(supplierId) {
     date = new Date(),
     session = null
   }) {
-    // 1. Get pending orders sorted by createdAt ASCENDING (FIFO - oldest first)
+    // 1. Get pending orders sorted by confirmedAt ASCENDING (FIFO - first confirmed, first paid)
     const pendingOrders = await this.getPendingOrdersForSupplier(supplierId);
 
     console.log("\n========== PAYMENT DISTRIBUTION (FIFO) ==========");
     console.log(`Supplier ID: ${supplierId}`);
     console.log(`Payment Amount: €${amount.toFixed(2)}`);
     console.log(`Payment Method: ${paymentMethod}`);
-    console.log(`Pending Orders (sorted oldest first):`);
+    console.log(`Pending Orders (sorted by confirmation date - first confirmed first):`);
     pendingOrders.forEach((order, index) => {
-      console.log(`  ${index + 1}. ${order.orderNumber} - Remaining: €${order.remainingBalance.toFixed(2)} (Created: ${order.createdAt})`);
+      console.log(`  ${index + 1}. ${order.orderNumber} - Remaining: €${order.remainingBalance.toFixed(2)} (Confirmed: ${order.confirmedAt})`);
     });
     console.log("=================================================\n");
 
