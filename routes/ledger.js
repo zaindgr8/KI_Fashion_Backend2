@@ -248,9 +248,29 @@ router.get("/suppliers", auth, async (req, res) => {
                 };
             } else if (entry.referenceModel === "Return") {
               refDoc = await Return.findById(entry.referenceId)
-                .select("_id")
+                .select("_id dispatchOrder")
                 .lean();
-              if (refDoc) entry.referenceId = { _id: refDoc._id };
+              if (refDoc) {
+                let orderNumber = null;
+                let dispatchOrderId = null;
+                
+                // If Return has a dispatchOrder, fetch its orderNumber
+                if (refDoc.dispatchOrder) {
+                  const dispatchOrder = await DispatchOrder.findById(refDoc.dispatchOrder)
+                    .select("orderNumber")
+                    .lean();
+                  if (dispatchOrder) {
+                    orderNumber = dispatchOrder.orderNumber;
+                    dispatchOrderId = dispatchOrder._id;
+                  }
+                }
+                
+                entry.referenceId = {
+                  _id: refDoc._id,
+                  orderNumber: orderNumber,
+                  dispatchOrderId: dispatchOrderId
+                };
+              }
             }
           } catch (err) {
             // If model doesn't exist or populate fails, continue without reference
