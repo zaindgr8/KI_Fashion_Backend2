@@ -101,6 +101,7 @@ router.get("/supplier/:id", auth, async (req, res) => {
 
     // Populate referenceId for DispatchOrder references (same as /suppliers endpoint)
     const DispatchOrderModel = require("../models/DispatchOrder");
+    const Return = mongoose.model("Return");
     entries = await Promise.all(
       entries.map(async (entry) => {
         if (entry.referenceId && entry.referenceModel) {
@@ -132,6 +133,31 @@ router.get("/supplier/:id", auth, async (req, res) => {
                   confirmedQuantities: refDoc.confirmedQuantities,
                   totalDiscount: refDoc.totalDiscount || 0,
                   discount: refDoc.discount || 0,
+                };
+              }
+            } else if (entry.referenceModel === "Return") {
+              refDoc = await Return.findById(entry.referenceId)
+                .select("_id dispatchOrder")
+                .lean();
+              if (refDoc) {
+                let orderNumber = null;
+                let dispatchOrderId = null;
+                
+                // If Return has a dispatchOrder, fetch its orderNumber
+                if (refDoc.dispatchOrder) {
+                  const dispatchOrder = await DispatchOrderModel.findById(refDoc.dispatchOrder)
+                    .select("orderNumber")
+                    .lean();
+                  if (dispatchOrder) {
+                    orderNumber = dispatchOrder.orderNumber;
+                    dispatchOrderId = dispatchOrder._id;
+                  }
+                }
+                
+                entry.referenceId = {
+                  _id: refDoc._id,
+                  orderNumber: orderNumber,
+                  dispatchOrderId: dispatchOrderId
                 };
               }
             }
