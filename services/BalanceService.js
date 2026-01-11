@@ -182,34 +182,68 @@ static async getSupplierBalanceSummary(supplierId) {
 
   /**
    * Get all pending logistics charges for a company (for payment distribution)
-   * FIFO based on confirmedAt - matches ledger display order
+   * FIFO based on confirmedAt from dispatch orders - matches ledger display order
+   * 
+   * Gets charges directly from ledger entries (type: 'logistics', transactionType: 'charge')
+   * and calculates remaining by subtracting only logistics payments (not supplier payments)
    */
   static async getPendingLogisticsCharges(logisticsCompanyId) {
-    const LogisticsCompany = require('../models/LogisticsCompany');
-    const company = await LogisticsCompany.findById(logisticsCompanyId);
-    const boxRate = company?.rates?.boxRate || 0;
+    // Get all charge entries for this logistics company from ledger
+    const chargeEntries = await Ledger.find({
+      type: 'logistics',
+      entityId: logisticsCompanyId,
+      transactionType: 'charge'
+    }).select('_id referenceId debit credit date createdAt').lean();
 
+    // Get the dispatch orders for these charges to get confirmedAt
+    const orderIds = chargeEntries
+      .filter(e => e.referenceId)
+      .map(e => e.referenceId);
+    
     const orders = await DispatchOrder.find({
-      logisticsCompany: logisticsCompanyId,
-      status: 'confirmed'
-    }).select('_id orderNumber totalBoxes createdAt confirmedAt').lean();
+      _id: { $in: orderIds }
+    }).select('_id orderNumber confirmedAt totalBoxes').lean();
 
+    // Create a map for quick lookup
+    const orderMap = new Map(orders.map(o => [o._id.toString(), o]));
+
+    // Calculate remaining balance for each charge
     const chargesWithBalances = await Promise.all(
-      orders.map(async (order) => {
-        const totalAmount = (order.totalBoxes || 0) * boxRate;
-        const payments = await Ledger.getOrderPayments(order._id);
-        const remainingBalance = totalAmount - payments.total;
+      chargeEntries.map(async (charge) => {
+        const order = charge.referenceId ? orderMap.get(charge.referenceId.toString()) : null;
+        const totalAmount = charge.debit || 0;
+
+        // Get ONLY logistics payments for this specific order (not supplier payments)
+        const logisticsPayments = await Ledger.aggregate([
+          {
+            $match: {
+              type: 'logistics',
+              entityId: new mongoose.Types.ObjectId(logisticsCompanyId),
+              referenceId: charge.referenceId,
+              transactionType: 'payment'
+            }
+          },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: '$credit' }
+            }
+          }
+        ]);
+
+        const totalPaid = logisticsPayments[0]?.total || 0;
+        const remainingBalance = totalAmount - totalPaid;
 
         return {
-          orderId: order._id,
-          orderNumber: order.orderNumber,
-          totalBoxes: order.totalBoxes || 0,
-          boxRate: boxRate,
+          chargeId: charge._id,
+          orderId: charge.referenceId,
+          orderNumber: order?.orderNumber || 'Unknown',
+          totalBoxes: order?.totalBoxes || 0,
           totalAmount: totalAmount,
-          totalPaid: payments.total,
+          totalPaid: totalPaid,
           remainingBalance: remainingBalance,
-          createdAt: order.createdAt,
-          confirmedAt: order.confirmedAt
+          chargeDate: charge.date,
+          confirmedAt: order?.confirmedAt || charge.createdAt // Use order confirmedAt, fallback to charge createdAt
         };
       })
     );
