@@ -359,9 +359,11 @@ ledgerSchema.statics.getBalanceLegacy = async function (type, entityId) {
 /**
  * Get payment summary for a specific order/reference
  * Returns: { cash: amount, bank: amount, total: amount }
+ * @param {ObjectId} referenceId - The order/reference ID
+ * @param {Object} session - Optional MongoDB session for transaction support
  */
-ledgerSchema.statics.getOrderPayments = async function (referenceId) {
-  const result = await this.aggregate([
+ledgerSchema.statics.getOrderPayments = async function (referenceId, session = null) {
+  const aggregation = this.aggregate([
     {
       $match: {
         referenceId: new mongoose.Types.ObjectId(referenceId),
@@ -375,6 +377,13 @@ ledgerSchema.statics.getOrderPayments = async function (referenceId) {
       }
     }
   ]);
+
+  // Add session to aggregation if provided
+  if (session) {
+    aggregation.session(session);
+  }
+
+  const result = await aggregation;
 
   const payments = {
     cash: 0,
@@ -446,8 +455,13 @@ ledgerSchema.statics.getOrderPurchaseTotal = async function (referenceId) {
 /**
  * Get return total for a specific order (credit entries from returns)
  */
-ledgerSchema.statics.getOrderReturnTotal = async function (referenceId) {
-  const result = await this.aggregate([
+/**
+ * Get total return value for a specific order
+ * @param {ObjectId} referenceId - The order/reference ID
+ * @param {Object} session - Optional MongoDB session for transaction support
+ */
+ledgerSchema.statics.getOrderReturnTotal = async function (referenceId, session = null) {
+  const aggregation = this.aggregate([
     {
       $match: {
         referenceId: new mongoose.Types.ObjectId(referenceId),
@@ -461,6 +475,13 @@ ledgerSchema.statics.getOrderReturnTotal = async function (referenceId) {
       }
     }
   ]);
+
+  // Add session to aggregation if provided
+  if (session) {
+    aggregation.session(session);
+  }
+
+  const result = await aggregation;
 
   return result[0]?.total || 0;
 };

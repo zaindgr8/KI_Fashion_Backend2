@@ -146,18 +146,26 @@ static async getSupplierBalanceSummary(supplierId) {
    * 
    * FIFO based on confirmedAt - First confirmed, first paid
    * This ensures payment distribution matches ledger display order
+   * 
+   * @param {string} supplierId - The supplier's MongoDB ObjectId
+   * @param {Object} session - Optional MongoDB session for transaction support
    */
-  static async getPendingOrdersForSupplier(supplierId) {
+  static async getPendingOrdersForSupplier(supplierId, session = null) {
+    const queryOptions = session ? { session } : {};
+    
     const orders = await DispatchOrder.find({
       supplier: supplierId,
       status: 'confirmed'
-    }).select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount createdAt confirmedAt').lean();
+    })
+    .select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount createdAt confirmedAt')
+    .session(session)
+    .lean();
 
     const ordersWithBalances = await Promise.all(
       orders.map(async (order) => {
         const currentValue = this.calculateCurrentOrderValue(order);
-        const payments = await Ledger.getOrderPayments(order._id);
-        const returnTotal = await Ledger.getOrderReturnTotal(order._id);
+        const payments = await Ledger.getOrderPayments(order._id, session);
+        const returnTotal = await Ledger.getOrderReturnTotal(order._id, session);
         const remainingBalance = currentValue - payments.total - returnTotal;
 
         return {
@@ -551,6 +559,9 @@ static async getSupplierBalanceSummary(supplierId) {
    * 
    * CRITICAL FIX: This method now correctly applies payments to oldest orders first
    * 
+   * IMPORTANT: This function uses MongoDB transactions to ensure atomic operations
+   * and prevent race conditions when multiple payments are made concurrently.
+   * 
    * Payment Distribution Logic:
    * 1. Get pending orders sorted by createdAt ASCENDING (oldest first)
    * 2. Apply payment to each order sequentially until:
@@ -568,173 +579,213 @@ static async getSupplierBalanceSummary(supplierId) {
     createdBy,
     description,
     date = new Date(),
-    session = null
+    session: externalSession = null
   }) {
-    // 1. Get pending orders sorted by confirmedAt ASCENDING (FIFO - first confirmed, first paid)
-    const pendingOrders = await this.getPendingOrdersForSupplier(supplierId);
-
-    console.log("\n========== PAYMENT DISTRIBUTION (FIFO) ==========");
-    console.log(`Supplier ID: ${supplierId}`);
-    console.log(`Payment Amount: €${amount.toFixed(2)}`);
-    console.log(`Payment Method: ${paymentMethod}`);
-    console.log(`Pending Orders (sorted by confirmation date - first confirmed first):`);
-    pendingOrders.forEach((order, index) => {
-      console.log(`  ${index + 1}. ${order.orderNumber} - Remaining: €${order.remainingBalance.toFixed(2)} (Confirmed: ${order.confirmedAt})`);
-    });
-    console.log("=================================================\n");
-
-    // Handle case when there are no pending orders - create advance/credit entry
-    if (pendingOrders.length === 0) {
-      console.log(`No pending orders found - Creating advance/credit entry for full amount: €${amount.toFixed(2)}`);
-
-      await Ledger.createEntry({
-        type: 'supplier',
-        entityId: supplierId,
-        entityModel: 'Supplier',
-        transactionType: 'payment',
-        // referenceId and referenceModel omitted - no dispatch order reference for advance payments
-        debit: 0,
-        credit: amount,
-        paymentMethod,
-        date,
-        description: description || `Advance payment (credit to supplier account - no pending orders)`,
-        createdBy,
-        paymentDetails: {
-          cashPayment: paymentMethod === 'cash' ? amount : 0,
-          bankPayment: paymentMethod === 'bank' ? amount : 0,
-          remainingBalance: 0
-        }
-      }, session);
-
-      console.log("\n========== DISTRIBUTION COMPLETE ==========");
-      console.log(`Total Distributed: €${amount.toFixed(2)}`);
-      console.log(`Orders Affected: 0`);
-      console.log(`Fully Paid Orders: 0`);
-      console.log(`Advance/Credit: €${amount.toFixed(2)}`);
-      console.log("==========================================\n");
-
-      return {
-        totalDistributed: amount,
-        distributions: [{
-          orderId: null,
-          orderNumber: 'ADVANCE_CREDIT',
-          amountApplied: amount,
-          previousRemaining: 0,
-          newRemaining: -amount, // Negative = supplier has credit
-          fullyPaid: false,
-          isAdvance: true,
-          totalAmount: undefined, // Not applicable
-          totalPaid: undefined // Not applicable
-        }],
-        remainingCredit: amount
-      };
+    // Use external session if provided, otherwise create a new transaction
+    const useExternalSession = externalSession !== null;
+    const session = useExternalSession ? externalSession : await mongoose.startSession();
+    
+    // Only start transaction if we created our own session
+    if (!useExternalSession) {
+      session.startTransaction({
+        readConcern: { level: 'snapshot' },
+        writeConcern: { w: 'majority' }
+      });
     }
 
-    let remainingAmount = amount;
-    const distributions = [];
+    try {
+      // 1. Get pending orders sorted by confirmedAt ASCENDING (FIFO - first confirmed, first paid)
+      // Pass session to ensure we read within the transaction
+      const pendingOrders = await this.getPendingOrdersForSupplier(supplierId, session);
 
-    // 2. Distribute payment across orders in FIFO order
-    for (let i = 0; i < pendingOrders.length; i++) {
-      if (remainingAmount <= 0) break;
+      console.log("\n========== PAYMENT DISTRIBUTION (FIFO) ==========");
+      console.log(`Supplier ID: ${supplierId}`);
+      console.log(`Payment Amount: €${amount.toFixed(2)}`);
+      console.log(`Payment Method: ${paymentMethod}`);
+      console.log(`Using Transaction: ${!useExternalSession ? 'Yes (internal)' : 'Yes (external)'}`);
+      console.log(`Pending Orders (sorted by confirmation date - first confirmed first):`);
+      pendingOrders.forEach((order, index) => {
+        console.log(`  ${index + 1}. ${order.orderNumber} - Remaining: €${order.remainingBalance.toFixed(2)} (Confirmed: ${order.confirmedAt})`);
+      });
+      console.log("=================================================\n");
 
-      const order = pendingOrders[i];
-      const orderRemaining = order.remainingBalance;
+      let result;
 
-      // Calculate payment for this specific order
-      // Pay exactly what the order needs, up to the remaining payment amount
-      const paymentForOrder = Math.min(remainingAmount, orderRemaining);
+      // Handle case when there are no pending orders - create advance/credit entry
+      if (pendingOrders.length === 0) {
+        console.log(`No pending orders found - Creating advance/credit entry for full amount: €${amount.toFixed(2)}`);
 
-      if (paymentForOrder > 0) {
-        // Calculate the new remaining balance for this order after this payment
-        const newOrderRemaining = orderRemaining - paymentForOrder;
-
-        console.log(`Applying €${paymentForOrder.toFixed(2)} to ${order.orderNumber} (Remaining after: €${newOrderRemaining.toFixed(2)})`);
-
-        // Create ledger entry linked to this specific order
         await Ledger.createEntry({
           type: 'supplier',
           entityId: supplierId,
           entityModel: 'Supplier',
           transactionType: 'payment',
-          referenceId: order._id,
-          referenceModel: 'DispatchOrder',
+          // referenceId and referenceModel omitted - no dispatch order reference for advance payments
           debit: 0,
-          credit: paymentForOrder,
+          credit: amount,
           paymentMethod,
           date,
-          description: description || `Distributed payment to ${order.orderNumber}`,
+          description: description || `Advance payment (credit to supplier account - no pending orders)`,
           createdBy,
           paymentDetails: {
-            cashPayment: paymentMethod === 'cash' ? paymentForOrder : 0,
-            bankPayment: paymentMethod === 'bank' ? paymentForOrder : 0,
-            remainingBalance: Math.max(0, newOrderRemaining)
+            cashPayment: paymentMethod === 'cash' ? amount : 0,
+            bankPayment: paymentMethod === 'bank' ? amount : 0,
+            remainingBalance: 0
           }
         }, session);
 
-        distributions.push({
-          orderId: order._id,
-          orderNumber: order.orderNumber,
-          amountApplied: paymentForOrder,
-          previousRemaining: orderRemaining,
-          newRemaining: newOrderRemaining,
-          fullyPaid: newOrderRemaining === 0,
-          totalAmount: order.totalAmount,
-          totalPaid: order.totalPaid
-        });
+        console.log("\n========== DISTRIBUTION COMPLETE ==========");
+        console.log(`Total Distributed: €${amount.toFixed(2)}`);
+        console.log(`Orders Affected: 0`);
+        console.log(`Fully Paid Orders: 0`);
+        console.log(`Advance/Credit: €${amount.toFixed(2)}`);
+        console.log("==========================================\n");
 
-        remainingAmount -= paymentForOrder;
+        result = {
+          totalDistributed: amount,
+          distributions: [{
+            orderId: null,
+            orderNumber: 'ADVANCE_CREDIT',
+            amountApplied: amount,
+            previousRemaining: 0,
+            newRemaining: -amount, // Negative = supplier has credit
+            fullyPaid: false,
+            isAdvance: true,
+            totalAmount: undefined, // Not applicable
+            totalPaid: undefined // Not applicable
+          }],
+          remainingCredit: amount
+        };
+      } else {
+        // Process payment distribution
+        let remainingAmount = amount;
+        const distributions = [];
+
+        // 2. Distribute payment across orders in FIFO order
+        for (let i = 0; i < pendingOrders.length; i++) {
+          if (remainingAmount <= 0) break;
+
+          const order = pendingOrders[i];
+          const orderRemaining = order.remainingBalance;
+
+          // Calculate payment for this specific order
+          // Pay exactly what the order needs, up to the remaining payment amount
+          const paymentForOrder = Math.min(remainingAmount, orderRemaining);
+
+          if (paymentForOrder > 0) {
+            // Calculate the new remaining balance for this order after this payment
+            const newOrderRemaining = orderRemaining - paymentForOrder;
+
+            console.log(`Applying €${paymentForOrder.toFixed(2)} to ${order.orderNumber} (Remaining after: €${newOrderRemaining.toFixed(2)})`);
+
+            // Create ledger entry linked to this specific order
+            await Ledger.createEntry({
+              type: 'supplier',
+              entityId: supplierId,
+              entityModel: 'Supplier',
+              transactionType: 'payment',
+              referenceId: order._id,
+              referenceModel: 'DispatchOrder',
+              debit: 0,
+              credit: paymentForOrder,
+              paymentMethod,
+              date,
+              description: description || `Distributed payment to ${order.orderNumber}`,
+              createdBy,
+              paymentDetails: {
+                cashPayment: paymentMethod === 'cash' ? paymentForOrder : 0,
+                bankPayment: paymentMethod === 'bank' ? paymentForOrder : 0,
+                remainingBalance: Math.max(0, newOrderRemaining)
+              }
+            }, session);
+
+            distributions.push({
+              orderId: order._id,
+              orderNumber: order.orderNumber,
+              amountApplied: paymentForOrder,
+              previousRemaining: orderRemaining,
+              newRemaining: newOrderRemaining,
+              fullyPaid: newOrderRemaining === 0,
+              totalAmount: order.totalAmount,
+              totalPaid: order.totalPaid
+            });
+
+            remainingAmount -= paymentForOrder;
+          }
+        }
+
+        // 3. Handle excess payment (if any)
+        // If payment exceeds all order balances, create advance/credit entry
+        if (remainingAmount > 0) {
+          console.log(`\nExcess payment: €${remainingAmount.toFixed(2)} - Creating advance/credit entry`);
+
+          await Ledger.createEntry({
+            type: 'supplier',
+            entityId: supplierId,
+            entityModel: 'Supplier',
+            transactionType: 'payment', // Keep as 'payment' for consistency
+            // referenceId and referenceModel omitted - no dispatch order reference for excess payments
+            debit: 0,
+            credit: remainingAmount,
+            paymentMethod,
+            date,
+            description: description || `Advance payment (credit to supplier account)`,
+            createdBy,
+            paymentDetails: {
+              cashPayment: paymentMethod === 'cash' ? remainingAmount : 0,
+              bankPayment: paymentMethod === 'bank' ? remainingAmount : 0,
+              remainingBalance: 0 // No remaining balance for excess/credit entries
+            }
+          }, session);
+
+          distributions.push({
+            orderId: null,
+            orderNumber: 'ADVANCE_CREDIT',
+            amountApplied: remainingAmount,
+            previousRemaining: 0,
+            newRemaining: -remainingAmount, // Negative = supplier has credit
+            fullyPaid: false,
+            isAdvance: true,
+            totalAmount: undefined, // Not applicable
+            totalPaid: undefined // Not applicable
+          });
+        }
+
+        console.log("\n========== DISTRIBUTION COMPLETE ==========");
+        console.log(`Total Distributed: €${amount.toFixed(2)}`);
+        console.log(`Orders Affected: ${distributions.filter(d => !d.isAdvance).length}`);
+        console.log(`Fully Paid Orders: ${distributions.filter(d => d.fullyPaid).length}`);
+        console.log(`Advance/Credit: €${(remainingAmount > 0 ? remainingAmount : 0).toFixed(2)}`);
+        console.log("==========================================\n");
+
+        result = {
+          totalDistributed: amount,
+          distributions,
+          remainingCredit: remainingAmount > 0 ? remainingAmount : 0
+        };
+      }
+
+      // Commit the transaction if we created our own session
+      if (!useExternalSession) {
+        await session.commitTransaction();
+        console.log("Transaction committed successfully");
+      }
+
+      return result;
+
+    } catch (error) {
+      // Abort the transaction if we created our own session
+      if (!useExternalSession) {
+        await session.abortTransaction();
+        console.error("Transaction aborted due to error:", error.message);
+      }
+      throw error;
+    } finally {
+      // End the session if we created our own
+      if (!useExternalSession) {
+        session.endSession();
       }
     }
-
-    // 3. Handle excess payment (if any)
-    // If payment exceeds all order balances, create advance/credit entry
-    if (remainingAmount > 0) {
-      console.log(`\nExcess payment: €${remainingAmount.toFixed(2)} - Creating advance/credit entry`);
-
-      await Ledger.createEntry({
-        type: 'supplier',
-        entityId: supplierId,
-        entityModel: 'Supplier',
-        transactionType: 'payment', // Keep as 'payment' for consistency
-        // referenceId and referenceModel omitted - no dispatch order reference for excess payments
-        debit: 0,
-        credit: remainingAmount,
-        paymentMethod,
-        date,
-        description: description || `Advance payment (credit to supplier account)`,
-        createdBy,
-        paymentDetails: {
-          cashPayment: paymentMethod === 'cash' ? remainingAmount : 0,
-          bankPayment: paymentMethod === 'bank' ? remainingAmount : 0,
-          remainingBalance: 0 // No remaining balance for excess/credit entries
-        }
-      }, session);
-
-      distributions.push({
-        orderId: null,
-        orderNumber: 'ADVANCE_CREDIT',
-        amountApplied: remainingAmount,
-        previousRemaining: 0,
-        newRemaining: -remainingAmount, // Negative = supplier has credit
-        fullyPaid: false,
-        isAdvance: true,
-        totalAmount: undefined, // Not applicable
-        totalPaid: undefined // Not applicable
-      });
-    }
-
-    console.log("\n========== DISTRIBUTION COMPLETE ==========");
-    console.log(`Total Distributed: €${amount.toFixed(2)}`);
-    console.log(`Orders Affected: ${distributions.filter(d => !d.isAdvance).length}`);
-    console.log(`Fully Paid Orders: ${distributions.filter(d => d.fullyPaid).length}`);
-    console.log(`Advance/Credit: €${(remainingAmount > 0 ? remainingAmount : 0).toFixed(2)}`);
-    console.log("==========================================\n");
-
-    return {
-      totalDistributed: amount,
-      distributions,
-      remainingCredit: remainingAmount > 0 ? remainingAmount : 0
-    };
   }
 
   /**
