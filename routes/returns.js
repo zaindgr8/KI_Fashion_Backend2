@@ -388,6 +388,10 @@ router.post('/product-return', auth, async (req, res) => {
     }
 
     // Create ledger entry
+    // Get current supplier balance using BalanceService (accurate aggregation-based calculation)
+    const currentSupplierBalance = await BalanceService.getSupplierBalance(supplierId);
+    const newSupplierBalance = currentSupplierBalance - totalReturnValue;
+
     await Ledger.createEntry({
       type: 'supplier',
       entityId: supplierId,
@@ -400,7 +404,12 @@ router.post('/product-return', auth, async (req, res) => {
       date: returnDoc.returnedAt,
       description: `Product Return - ${processedItems.length} item(s) worth £${totalReturnValue.toFixed(2)}${commonDispatchOrderId ? ` (Order: ${commonDispatchOrderId})` : ''}`,
       remarks: `Return ID: ${returnDoc._id}`,
-      createdBy: req.user._id
+      createdBy: req.user._id,
+      paymentDetails: {
+        cashPayment: 0,
+        bankPayment: 0,
+        remainingBalance: newSupplierBalance
+      }
     });
 
     // Update supplier balance (reduce what we owe them)

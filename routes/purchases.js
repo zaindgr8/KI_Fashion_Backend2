@@ -507,7 +507,7 @@ router.get('/', auth, async (req, res) => {
       exchangeRate: 1, percentage: 1, supplierPaymentTotal: 1, totalBoxes: 1,
       'paymentDetails.paymentStatus': 1, 'paymentDetails.cashPayment': 1,
       'paymentDetails.bankPayment': 1, 'paymentDetails.remainingBalance': 1,
-      supplierUser: 1, supplierName: 1, deliveryStatus: 1
+      supplierUser: 1, supplierName: 1, deliveryStatus: 1, landedPrice: 1
     };
 
     // Execute Query
@@ -539,6 +539,11 @@ router.get('/', auth, async (req, res) => {
 
       // Map items and collect image keys
       const items = (purchase.items || []).map(item => {
+        // Debug logs
+        console.log('===== ITEM DEBUG =====');
+        console.log('item:', item);
+        console.log('item.landedPrice:', item.landedPrice);
+        
         // Collect image keys for batch signing (only from productImage as requested)
         if (Array.isArray(item.productImage)) {
           item.productImage.forEach(key => key && imageKeys.add(key));
@@ -574,6 +579,7 @@ router.get('/', auth, async (req, res) => {
           product: product,
           productType: productType,
           costPrice: item.costPrice,
+          landedPrice: item.landedPrice,
           landedTotal: item.landedTotal,
           // ADD: Include full color and size arrays for proper display
           primaryColor: primaryColorArray,
@@ -598,6 +604,19 @@ router.get('/', auth, async (req, res) => {
         ...items.map(i => i.productName)
       ].filter(Boolean).join(' ');
 
+      // Extract landedPrice from purchase (may be array or number)
+      let purchaseLandedPrice = 0;
+      if (Array.isArray(purchase.landedPrice) && purchase.landedPrice.length > 0) {
+        purchaseLandedPrice = purchase.landedPrice[0];
+      } else if (typeof purchase.landedPrice === 'number') {
+        purchaseLandedPrice = purchase.landedPrice;
+      }
+
+      // Debug logs for purchase
+      console.log('===== PURCHASE DEBUG =====');
+      console.log('purchase.landedPrice:', purchase.landedPrice);
+      console.log('extracted purchaseLandedPrice:', purchaseLandedPrice);
+
       return {
         id: purchase._id.toString(),
         purchaseNumber: purchase.orderNumber,
@@ -618,6 +637,7 @@ router.get('/', auth, async (req, res) => {
         percentage: purchase.percentage,
         supplierPaymentTotal: purchase.supplierPaymentTotal,
         totalBoxes: purchase.totalBoxes || 0,
+        landedPrice: purchaseLandedPrice,
         searchText
       };
     });

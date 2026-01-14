@@ -16,6 +16,17 @@ const BalanceService = require('../services/BalanceService');
 
 const router = express.Router();
 
+/**
+ * Truncate a number to 2 decimal places (no rounding)
+ * Example: 14.554472 -> 14.55, 19.125456 -> 19.12, 13.337555 -> 13.33
+ * @param {number} value - The number to truncate
+ * @returns {number} The truncated number with at most 2 decimal places
+ */
+const truncateToTwoDecimals = (value) => {
+  if (typeof value !== 'number' || isNaN(value)) return 0;
+  return Math.floor(value * 100) / 100;
+};
+
 // Configure multer for memory storage
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -542,11 +553,10 @@ router.post('/manual', auth, async (req, res) => {
         season = product.season;
       } else if (item.productCode) {
         // Try to find existing product by code
+        // Try to find existing product by code AND supplier
         product = await Product.findOne({
-          $or: [
-            { sku: item.productCode.toUpperCase() },
-            { productCode: item.productCode }
-          ]
+          sku: item.productCode.toUpperCase(),
+          supplier: value.supplier // Use the supplier from the dispatch order
         });
 
         if (product) {
@@ -572,8 +582,9 @@ router.post('/manual', auth, async (req, res) => {
 
       // Calculate landed price (for inventory valuation - WITH profit margin)
       // Formula: (cost price / exchange rate) × (1 + percentage/100)
-      const landedPrice = (costPrice / exchangeRate) * (1 + (percentage / 100));
-      const landedTotal = landedPrice * item.quantity;
+      // Truncate to 2 decimal places (no rounding) for database storage
+      const landedPrice = truncateToTwoDecimals((costPrice / exchangeRate) * (1 + (percentage / 100)));
+      const landedTotal = truncateToTwoDecimals(landedPrice * item.quantity);
 
       itemsWithDetails.push({
         product: product ? product._id : undefined,
@@ -588,7 +599,7 @@ router.post('/manual', auth, async (req, res) => {
         quantity: item.quantity,
         supplierPaymentAmount: supplierPaymentAmount,
         landedPrice: landedPrice,
-        landedTotal: item.landedTotal || landedTotal, // Use provided or calculated
+        landedTotal: item.landedTotal ? truncateToTwoDecimals(item.landedTotal) : landedTotal, // Use provided (truncated) or calculated
         productImage: item.productImage || undefined
       });
     }
@@ -821,7 +832,7 @@ router.post('/manual', auth, async (req, res) => {
     try {
       await Supplier.findByIdAndUpdate(
         supplier._id,
-        { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: finalRemainingBalance } }
+        { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: discountedSupplierPaymentTotal - cashPayment - bankPayment } }
       );
     } catch (supplierError) {
       console.error(`Error updating supplier balance:`, supplierError);
@@ -847,6 +858,7 @@ router.post('/manual', auth, async (req, res) => {
           const newProduct = new Product({
             name: item.productName || 'Unknown Product',
             sku: item.productCode?.toUpperCase() || 'UNKNOWN',
+            supplier: supplier._id, // Associate product with supplier
             productCode: item.productCode,
             season: item.season,
             category: 'General',
@@ -869,8 +881,11 @@ router.post('/manual', auth, async (req, res) => {
             item.product = newProduct._id;
           } catch (productError) {
             if (productError.code === 11000) {
-              // Duplicate SKU - find existing
-              const existingProduct = await Product.findOne({ sku: item.productCode?.toUpperCase() });
+              // Duplicate SKU+supplier - find existing for this supplier
+              const existingProduct = await Product.findOne({
+                sku: item.productCode?.toUpperCase(),
+                supplier: supplier._id
+              });
               if (existingProduct) {
                 item.product = existingProduct._id;
               } else {
@@ -1211,7 +1226,8 @@ router.get('/:id', auth, async (req, res) => {
       .lean();
 
     // order is already a plain object from .lean()
-    const orderObj = { ...order, returns };
+    const enrichedOrder = await BalanceService.enrichOrderWithPaymentStatus({ ...order, returns });
+    const orderObj = enrichedOrder;
 
     // Convert images to signed URLs
     await convertDispatchOrderImages(orderObj);
@@ -1319,6 +1335,8 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
     if (logisticsCompany) {
       dispatchOrder.logisticsCompany = logisticsCompany;
       dispatchOrder.markModified('logisticsCompany');
+      // Re-populate to ensure we have the full object for response/calculations
+      await dispatchOrder.populate('logisticsCompany', 'name code contactInfo rates');
     }
     if (dispatchDate) {
       dispatchOrder.dispatchDate = new Date(dispatchDate);
@@ -1382,8 +1400,9 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
       const supplierPaymentItemTotal = supplierPaymentAmount * confirmedQty;
       supplierPaymentTotal += supplierPaymentItemTotal;
 
-      const landedPrice = (costPrice / finalExchangeRate) * (1 + (finalPercentage / 100));
-      const landedPriceItemTotal = landedPrice * confirmedQty;
+      // Truncate to 2 decimal places (no rounding) for database storage
+      const landedPrice = truncateToTwoDecimals((costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
+      const landedPriceItemTotal = truncateToTwoDecimals(landedPrice * confirmedQty);
       landedPriceTotal += landedPriceItemTotal;
 
       return {
@@ -1402,8 +1421,9 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
     // Apply discount to supplierPaymentTotal
     const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
 
-    const subtotal = landedPriceTotal;
-    const grandTotal = Math.max(0, subtotal - totalDiscount);
+    // Truncate subtotal and grandTotal to 2 decimal places
+    const subtotal = truncateToTwoDecimals(landedPriceTotal);
+    const grandTotal = truncateToTwoDecimals(Math.max(0, subtotal - totalDiscount));
 
     // Update dispatch order status to pending-approval (DO NOT process inventory or ledger)
     dispatchOrder.status = 'pending-approval';
@@ -1416,9 +1436,9 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
     dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
     dispatchOrder.grandTotal = grandTotal;
     dispatchOrder.paymentDetails = {
-      cashPayment: (parseFloat(cashPayment) || 0) / finalExchangeRate,
-      bankPayment: (parseFloat(bankPayment) || 0) / finalExchangeRate,
-      remainingBalance: (discountedSupplierPaymentTotal / finalExchangeRate) - ((parseFloat(cashPayment) || 0) / finalExchangeRate) - ((parseFloat(bankPayment) || 0) / finalExchangeRate),
+      cashPayment: (parseFloat(cashPayment) || 0),
+      bankPayment: (parseFloat(bankPayment) || 0),
+      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
       paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
         ? 'paid'
         : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
@@ -1511,6 +1531,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
     if (logisticsCompany) {
       dispatchOrder.logisticsCompany = logisticsCompany;
       dispatchOrder.markModified('logisticsCompany');
+      // Re-populate to ensure we have rates for ledger calculation later
+      await dispatchOrder.populate('logisticsCompany', 'name code contactInfo rates');
     }
     if (dispatchDate) {
       dispatchOrder.dispatchDate = new Date(dispatchDate);
@@ -1589,8 +1611,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
 
       // Landed price (for inventory valuation - WITH profit margin)
       // Formula: (cost price / exchange rate) × (1 + percentage/100)
-      const landedPrice = (costPrice / finalExchangeRate) * (1 + (finalPercentage / 100));
-      const landedPriceItemTotal = landedPrice * confirmedQty;
+      // Truncate to 2 decimal places (no rounding) for database storage
+      const landedPrice = truncateToTwoDecimals((costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
+      const landedPriceItemTotal = truncateToTwoDecimals(landedPrice * confirmedQty);
       landedPriceTotal += landedPriceItemTotal;
 
       return {
@@ -1609,8 +1632,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // Apply discount to supplierPaymentTotal (what admin pays supplier)
     const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
 
-    const subtotal = landedPriceTotal;
-    const grandTotal = Math.max(0, subtotal - totalDiscount);
+    // Truncate subtotal and grandTotal to 2 decimal places
+    const subtotal = truncateToTwoDecimals(landedPriceTotal);
+    const grandTotal = truncateToTwoDecimals(Math.max(0, subtotal - totalDiscount));
 
     // ==========================================
     // STEP 1: Process products and inventory FIRST (before changing order status)
@@ -1676,26 +1700,23 @@ router.post('/:id/confirm', auth, async (req, res) => {
         const landedPrice = item.landedPrice || itemsWithPrices[index].landedPrice;
 
         // Find or create Product
-        // STRICT CHECK: Check if product exists with this SKU or Code
-        // We prioritize SKU as it is the unique identifier
+        // SUPPLIER-SCOPED: Look for product with this SKU FROM THIS SUPPLIER
         const productCodeTrimmed = item.productCode ? item.productCode.trim() : '';
         const productCodeUpper = productCodeTrimmed.toUpperCase();
+        const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
 
-        console.log(`[Confirm Order] Looking for product with code: "${productCodeTrimmed}" (uppercase: "${productCodeUpper}")`);
+        console.log(`[Confirm Order] Looking for product with code: "${productCodeTrimmed}" from supplier: ${supplierId}`);
 
+        // First, try to find a product with matching SKU AND supplier
         let product = await Product.findOne({
-          $or: [
-            { sku: productCodeUpper },                      // Standardized SKU (uppercase)
-            { productCode: productCodeTrimmed },           // Literal code match (case-sensitive)
-            { sku: productCodeTrimmed },                   // Just in case SKU wasn't uppercased in DB (legacy)
-            { productCode: { $regex: new RegExp(`^${productCodeTrimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } } // Case-insensitive productCode match
-          ]
+          sku: productCodeUpper,
+          supplier: supplierId
         });
 
         if (product) {
-          console.log(`[Confirm Order] Found existing product: ${product.name} (SKU: ${product.sku}, Code: ${product.productCode || 'N/A'}, isActive: ${product.isActive})`);
+          console.log(`[Confirm Order] Found existing product for supplier: ${product.name} (SKU: ${product.sku}, Supplier: ${product.supplier}, isActive: ${product.isActive})`);
         } else {
-          console.log(`[Confirm Order] Product not found, will create new product with code: "${productCodeTrimmed}"`);
+          console.log(`[Confirm Order] Product not found for supplier ${supplierId}, will create new product with code: "${productCodeTrimmed}"`);
         }
 
         if (!product) {
@@ -1716,6 +1737,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
           product = new Product({
             name: item.productName,
             sku: item.productCode.toUpperCase(),
+            supplier: supplierId, // Associate product with supplier
             productCode: item.productCode,
             season: season,
             category: 'General',
@@ -1742,11 +1764,14 @@ router.post('/:id/confirm', auth, async (req, res) => {
 
           try {
             await product.save();
-            console.log(`[Confirm Order] Created new product: ${product.name} (${product.sku})`);
+            console.log(`[Confirm Order] Created new product: ${product.name} (${product.sku}) for supplier ${supplierId}`);
           } catch (productError) {
-            // If product creation fails (e.g., duplicate SKU), try to find again
+            // If product creation fails (e.g., duplicate SKU+supplier), try to find again
             if (productError.code === 11000) {
-              product = await Product.findOne({ sku: item.productCode.toUpperCase() });
+              product = await Product.findOne({
+                sku: item.productCode.toUpperCase(),
+                supplier: supplierId
+              });
               if (!product) {
                 const error = `Failed to create product and refetch failed: ${productError.message}`;
                 console.error(`[Confirm Order] Item ${index} ${error}`);
@@ -2049,9 +2074,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal; // Use discounted amount
     dispatchOrder.grandTotal = grandTotal; // Landed total after discount (for inventory valuation)
     dispatchOrder.paymentDetails = {
-      cashPayment: (parseFloat(cashPayment) || 0) / finalExchangeRate,
-      bankPayment: (parseFloat(bankPayment) || 0) / finalExchangeRate,
-      remainingBalance: (discountedSupplierPaymentTotal / finalExchangeRate) - ((parseFloat(cashPayment) || 0) / finalExchangeRate) - ((parseFloat(bankPayment) || 0) / finalExchangeRate),
+      cashPayment: (parseFloat(cashPayment) || 0),
+      bankPayment: (parseFloat(bankPayment) || 0),
+      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
       paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
         ? 'paid'
         : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
@@ -2061,51 +2086,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.confirmedQuantities = confirmedQuantities;
 
     // ==========================================
-    // CREDIT APPLICATION: Check if supplier owes admin and auto-apply credit
+    // CREDIT APPLICATION: DISABLED - Manual payment application only
     // ==========================================
 
-    // Get current supplier balance BEFORE this order is recorded
-    const currentSupplierBalance = await Ledger.getBalance('supplier', dispatchOrder.supplier._id);
+    // Automatic credit application disabled - credits must be manually applied through payment modal
     let creditApplied = 0;
-
-    console.log(`[Confirm Order] Checking supplier balance for credit application:`);
-    console.log(`  - Supplier ID: ${dispatchOrder.supplier._id}`);
-    console.log(`  - Current ledger balance: ${currentSupplierBalance}`);
-    console.log(`  - Order remaining balance (before credit): ${dispatchOrder.paymentDetails.remainingBalance}`);
-
-    // If balance is negative, supplier owes admin - we can apply credit
-    // Negative balance in ledger = credits > debits = admin paid more than owed = supplier owes admin
-    if (currentSupplierBalance < 0) {
-      const availableCredit = Math.abs(currentSupplierBalance);
-      const amountNeeded = dispatchOrder.paymentDetails.remainingBalance;
-
-      // Apply credit: min of available credit and amount needed
-      creditApplied = Math.min(availableCredit, amountNeeded);
-
-      if (creditApplied > 0) {
-        console.log(`[Confirm Order] APPLYING CREDIT:`);
-        console.log(`  - Supplier has €${availableCredit.toFixed(2)} credit (owes admin)`);
-        console.log(`  - Amount needed: €${amountNeeded.toFixed(2)}`);
-        console.log(`  - Credit to apply: €${creditApplied.toFixed(2)}`);
-        console.log(`  - New remaining balance: €${(amountNeeded - creditApplied).toFixed(2)}`);
-
-        // Update payment details with credit applied
-        dispatchOrder.paymentDetails.creditApplied = creditApplied;
-        dispatchOrder.paymentDetails.remainingBalance = amountNeeded - creditApplied;
-
-        // Recalculate payment status
-        const totalPaid = (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) + creditApplied;
-        if (totalPaid >= discountedSupplierPaymentTotal) {
-          dispatchOrder.paymentDetails.paymentStatus = 'paid';
-        } else if (totalPaid > 0) {
-          dispatchOrder.paymentDetails.paymentStatus = 'partial';
-        } else {
-          dispatchOrder.paymentDetails.paymentStatus = 'pending';
-        }
-      }
-    } else {
-      console.log(`[Confirm Order] No credit to apply (balance >= 0 means admin owes supplier or neutral)`);
-    }
 
     // Update prices on items
     dispatchOrder.items.forEach((item, index) => {
@@ -2194,29 +2179,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
       console.log(`[Confirm Order] Created bank payment ledger entry: £${bankPaymentAmount}`);
     }
 
-    // Create credit application entry if credit was applied from supplier's existing debt
-    if (creditApplied > 0) {
-      await Ledger.createEntry({
-        type: 'supplier',
-        entityId: dispatchOrder.supplier._id,
-        entityModel: 'Supplier',
-        transactionType: 'credit_application',
-        referenceId: dispatchOrder._id,
-        referenceModel: 'DispatchOrder',
-        debit: 0,
-        credit: creditApplied,
-        date: new Date(),
-        description: `Credit applied from previous overpayment to Dispatch Order ${dispatchOrder.orderNumber} - €${creditApplied.toFixed(2)} offset against supplier debt`,
-        paymentDetails: {
-          cashPayment: 0,
-          bankPayment: 0,
-          creditApplied: creditApplied,
-          remainingBalance: dispatchOrder.paymentDetails.remainingBalance
-        },
-        createdBy: req.user._id
-      });
-      console.log(`[Confirm Order] Created credit application ledger entry: €${creditApplied.toFixed(2)}`);
-    }
+    // Credit application entry - DISABLED (automatic credit application disabled)
+    // Credits must be manually applied through payment modal
 
     try {
       if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {
@@ -2429,6 +2393,10 @@ router.post('/:id/return', auth, async (req, res) => {
     if (dispatchOrder.status === 'confirmed') {
       const totalReturnedItems = returnItemsData.reduce((sum, item) => sum + item.returnedQuantity, 0);
 
+      // Get current supplier balance using BalanceService (accurate aggregation-based calculation)
+      const currentSupplierBalance = await BalanceService.getSupplierBalance(dispatchOrder.supplier._id);
+      const newSupplierBalance = currentSupplierBalance - totalReturnValue;
+
       await Ledger.createEntry({
         type: 'supplier',
         entityId: dispatchOrder.supplier._id,
@@ -2441,7 +2409,12 @@ router.post('/:id/return', auth, async (req, res) => {
         date: new Date(),
         description: `Return from Dispatch Order ${dispatchOrder.orderNumber} - ${totalReturnedItems} items worth €${totalReturnValue.toFixed(2)} (adjusted from balance)`,
         remarks: `Return ID: ${returnDoc._id}`,
-        createdBy: req.user._id
+        createdBy: req.user._id,
+        paymentDetails: {
+          cashPayment: 0,
+          bankPayment: 0,
+          remainingBalance: newSupplierBalance
+        }
       });
 
       // Update supplier balance (reduce by return amount)
@@ -2462,22 +2435,23 @@ router.post('/:id/return', auth, async (req, res) => {
         };
       });
 
-      // Update payment details - reduce remaining balance by return value
-      const currentRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0;
-      const newRemaining = Math.max(0, currentRemaining - totalReturnValue);
+      // Update payment details - reduce per-order remaining balance by return value
+      const currentOrderRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0;
+      const newOrderRemaining = Math.max(0, currentOrderRemaining - totalReturnValue);
 
       dispatchOrder.paymentDetails = {
         ...dispatchOrder.paymentDetails,
-        remainingBalance: newRemaining,
+        remainingBalance: newOrderRemaining,
         // Update payment status if now fully paid
-        paymentStatus: newRemaining <= 0 ? 'paid' :
+        paymentStatus: newOrderRemaining <= 0 ? 'paid' :
           (dispatchOrder.paymentDetails?.cashPayment || 0) +
             (dispatchOrder.paymentDetails?.bankPayment || 0) +
             (dispatchOrder.paymentDetails?.creditApplied || 0) > 0
             ? 'partial' : 'pending'
       };
 
-      console.log(`[Return] Updated remainingBalance: €${currentRemaining.toFixed(2)} -> €${newRemaining.toFixed(2)} (return value: €${totalReturnValue.toFixed(2)})`);
+      console.log(`[Return] Updated order remainingBalance: €${currentOrderRemaining.toFixed(2)} -> €${newOrderRemaining.toFixed(2)} (return value: €${totalReturnValue.toFixed(2)})`);
+      console.log(`[Return] Supplier balance updated: ${currentSupplierBalance} -> ${newSupplierBalance}`);
 
 
       // Reduce inventory for returned items
@@ -2908,12 +2882,12 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
           }
 
           const landedPrice = item.landedPrice || itemsWithPrices[index].landedPrice;
+          const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
 
+          // SUPPLIER-SCOPED: Look for product with this SKU from this supplier
           let product = await Product.findOne({
-            $or: [
-              { sku: item.productCode.toUpperCase() },
-              { productCode: item.productCode }
-            ]
+            sku: item.productCode.toUpperCase(),
+            supplier: supplierId
           });
 
           if (!product) {
@@ -2925,6 +2899,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
             product = new Product({
               name: item.productName,
               sku: item.productCode.toUpperCase(),
+              supplier: supplierId, // Associate product with supplier
               productCode: item.productCode,
               season: season,
               category: 'General', // Default category since we no longer use ProductType
@@ -2945,7 +2920,10 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
               await product.save();
             } catch (productError) {
               if (productError.code === 11000) {
-                product = await Product.findOne({ sku: item.productCode.toUpperCase() });
+                product = await Product.findOne({
+                  sku: item.productCode.toUpperCase(),
+                  supplier: supplierId
+                });
               } else {
                 console.error(`Error creating product for item ${index}:`, productError);
                 continue;
@@ -3485,7 +3463,11 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
     const item = dispatchOrder.items[itemIndex];
     if (item.productCode) {
       try {
-        let product = await Product.findOne({ code: item.productCode });
+        const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
+        let product = await Product.findOne({
+          sku: item.productCode.toUpperCase(),
+          supplier: supplierId
+        });
 
         if (product) {
           // Update existing product - add image if not already present
@@ -3718,15 +3700,14 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
     const item = dispatchOrder.items[itemIndex];
     let product = null;
 
-    // Find product by reference or productCode
+    // Find product by reference or productCode (supplier-scoped)
+    const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
     if (item.product) {
       product = await Product.findById(item.product);
     } else if (item.productCode) {
       product = await Product.findOne({
-        $or: [
-          { sku: item.productCode.toUpperCase() },
-          { productCode: item.productCode }
-        ]
+        sku: item.productCode.toUpperCase(),
+        supplier: supplierId
       });
     }
 
