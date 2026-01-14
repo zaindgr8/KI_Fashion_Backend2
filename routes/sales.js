@@ -238,7 +238,8 @@ router.post('/', auth, async (req, res) => {
         });
       }
 
-      // Check if product requires variant selection
+      // Validation check for variant selection removed as per user request
+      /* 
       if (product.variantTracking && product.variantTracking.enabled) {
         if (!item.variant || !item.variant.size || !item.variant.color) {
           return res.status(400).json({
@@ -247,6 +248,7 @@ router.post('/', auth, async (req, res) => {
           });
         }
       }
+      */
 
       const inventory = inventoryMap.get(item.product.toString ? item.product.toString() : item.product);
       if (!inventory) {
