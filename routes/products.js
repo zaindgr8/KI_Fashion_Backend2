@@ -432,6 +432,7 @@ router.get('/', auth, async (req, res) => {
             minStockLevel: inventory.minStockLevel || 0,
             maxStockLevel: inventory.maxStockLevel || 0,
             reorderLevel: inventory.reorderLevel || 0,
+            averageCostPrice: inventory.averageCostPrice || 0,
           }
         };
       }
