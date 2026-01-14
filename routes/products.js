@@ -115,6 +115,7 @@ async function attachQrCode(product, userId) {
 }
 
 const PRODUCT_POPULATE_PATHS = [
+  { path: 'supplier', select: 'name company phone email' },
   { path: 'suppliers.supplier', select: 'name company phone email' },
   { path: 'createdBy', select: 'name' },
   { path: 'qrCode.generatedBy', select: 'name' }
@@ -407,6 +408,35 @@ router.get('/', auth, async (req, res) => {
     productsQuery = populateProductQuery(productsQuery);
 
     let products = await productsQuery.lean();
+
+    // Fetch inventory data for each product
+    const productIds = products.map(p => p._id);
+    const inventories = await Inventory.find({ product: { $in: productIds } }).lean();
+    
+    // Create a map of product ID to inventory
+    const inventoryMap = {};
+    inventories.forEach(inv => {
+      inventoryMap[inv.product.toString()] = inv;
+    });
+
+    // Merge inventory data into products
+    products = products.map(product => {
+      const inventory = inventoryMap[product._id.toString()];
+      if (inventory) {
+        return {
+          ...product,
+          inventory: {
+            currentStock: inventory.currentStock || 0,
+            availableStock: inventory.availableStock || 0,
+            reservedStock: inventory.reservedStock || 0,
+            minStockLevel: inventory.minStockLevel || 0,
+            maxStockLevel: inventory.maxStockLevel || 0,
+            reorderLevel: inventory.reorderLevel || 0,
+          }
+        };
+      }
+      return product;
+    });
 
     if (lowStock === 'true') {
       products = products.filter(product =>
