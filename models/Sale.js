@@ -106,6 +106,28 @@ const saleSchema = new mongoose.Schema({
         type: String,
         trim: true
       }
+    },
+    // Packet-based selling fields
+    packetStock: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PacketStock'
+    },
+    isPacketSale: {
+      type: Boolean,
+      default: false
+    },
+    packetBarcode: {
+      type: String,
+      trim: true
+    },
+    packetComposition: [{
+      size: String,
+      color: String,
+      quantity: Number
+    }],
+    totalItemsPerPacket: {
+      type: Number,
+      min: 1
     }
   }],
   subtotal: {

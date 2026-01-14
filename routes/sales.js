@@ -8,12 +8,14 @@ const Buyer = require('../models/Buyer');
 const Product = require('../models/Product');
 const Ledger = require('../models/Ledger');
 const User = require('../models/User');
+const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
 const { generateSaleQR } = require('../utils/qrCode');
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
 const { sendInvoiceEmails } = require('../utils/emailService');
 const { generateSignedUrls } = require('../utils/imageUpload');
 const BalanceService = require('../services/BalanceService');
+const { normalizeBarcode, parseBarcodeType } = require('../utils/barcodeGenerator');
 
 const router = express.Router();
 
@@ -167,6 +169,109 @@ const calculateTotals = (items, totalDiscount = 0, shippingCost = 0) => {
     grandTotal: Math.max(0, grandTotal)
   };
 };
+
+/**
+ * @route   POST /api/sales/lookup-barcode
+ * @desc    Lookup packet by barcode for adding to sale cart
+ * @access  Private
+ */
+router.post('/lookup-barcode', auth, async (req, res) => {
+  try {
+    const { barcode } = req.body;
+    
+    if (!barcode) {
+      return res.status(400).json({
+        success: false,
+        message: 'Barcode is required'
+      });
+    }
+    
+    const normalizedBarcode = normalizeBarcode(barcode);
+    const barcodeInfo = parseBarcodeType(normalizedBarcode);
+    
+    if (!barcodeInfo.isValid) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid barcode format. Expected PKT-XXXXXXXX or LSE-XXXXXXXX'
+      });
+    }
+    
+    const packetStock = await PacketStock.findOne({ 
+      barcode: normalizedBarcode, 
+      isActive: true 
+    })
+      .populate('product', 'name sku productCode images pricing season')
+      .populate('supplier', 'name company');
+    
+    if (!packetStock) {
+      return res.status(404).json({
+        success: false,
+        message: 'Packet not found. Check barcode and try again.'
+      });
+    }
+    
+    const actualAvailable = packetStock.availablePackets - packetStock.reservedPackets;
+    
+    if (actualAvailable <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No stock available for this packet',
+        data: {
+          barcode: packetStock.barcode,
+          productName: packetStock.product?.name,
+          availablePackets: 0
+        }
+      });
+    }
+    
+    // Convert product images to signed URLs if present
+    let productImages = [];
+    if (packetStock.product?.images && packetStock.product.images.length > 0) {
+      try {
+        productImages = await generateSignedUrls(packetStock.product.images);
+      } catch (imgError) {
+        console.warn('Failed to generate signed URLs for product images:', imgError.message);
+        productImages = packetStock.product.images;
+      }
+    }
+    
+    return res.json({
+      success: true,
+      data: {
+        packetStockId: packetStock._id,
+        barcode: packetStock.barcode,
+        isLoose: packetStock.isLoose,
+        product: {
+          _id: packetStock.product?._id,
+          name: packetStock.product?.name,
+          sku: packetStock.product?.sku,
+          productCode: packetStock.product?.productCode,
+          images: productImages,
+          season: packetStock.product?.season
+        },
+        supplier: {
+          _id: packetStock.supplier?._id,
+          name: packetStock.supplier?.name || packetStock.supplier?.company
+        },
+        composition: packetStock.composition,
+        totalItemsPerPacket: packetStock.totalItemsPerPacket,
+        availablePackets: actualAvailable,
+        // Pricing info
+        suggestedSellingPrice: packetStock.suggestedSellingPrice,
+        landedPricePerPacket: packetStock.landedPricePerPacket,
+        costPricePerPacket: packetStock.costPricePerPacket,
+        // For cart display
+        compositionText: packetStock.composition.map(c => `${c.color}/${c.size}×${c.quantity}`).join(', ')
+      }
+    });
+  } catch (error) {
+    console.error('Barcode lookup error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
 
 // Create sale
 router.post('/', auth, async (req, res) => {
