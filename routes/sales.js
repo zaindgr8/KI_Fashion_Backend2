@@ -115,6 +115,8 @@ const saleSchema = Joi.object({
   items: Joi.array().items(saleItemSchema).min(1).required(),
   totalDiscount: Joi.number().min(0).default(0),
   shippingCost: Joi.number().min(0).default(0),
+  cashPayment: Joi.number().min(0).default(0),
+  bankPayment: Joi.number().min(0).default(0),
   paymentMethod: Joi.string().valid('cash', 'card', 'bank_transfer', 'cheque', 'online', 'credit').optional(),
   saleType: Joi.string().valid('retail', 'wholesale', 'bulk').default('retail'),
   invoiceNumber: Joi.string().optional(),
