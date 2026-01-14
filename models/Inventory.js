@@ -342,14 +342,15 @@ inventorySchema.methods.addStockWithBatch = function(quantity, batchInfo, refere
   this.currentStock += quantity;
   this.lastStockUpdate = new Date();
 
-  // Update average cost price using weighted average
+  // Update average cost price using weighted average (using landedPrice for true acquisition cost)
   const totalValue = this.purchaseBatches.reduce((sum, batch) => {
-    return sum + (batch.remainingQuantity * batch.costPrice);
+    const price = batch.landedPrice || batch.costPrice; // Prefer landedPrice, fallback to costPrice
+    return sum + (batch.remainingQuantity * price);
   }, 0);
   const totalQuantity = this.purchaseBatches.reduce((sum, batch) => {
     return sum + batch.remainingQuantity;
   }, 0);
-  this.averageCostPrice = totalQuantity > 0 ? totalValue / totalQuantity : batchInfo.costPrice;
+  this.averageCostPrice = totalQuantity > 0 ? totalValue / totalQuantity : (batchInfo.landedPrice || batchInfo.costPrice);
 
   return this.save();
 };
