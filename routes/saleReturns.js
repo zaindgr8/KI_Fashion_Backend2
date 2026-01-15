@@ -1,11 +1,13 @@
 const express = require('express');
 const Joi = require('joi');
+const mongoose = require('mongoose');
 const SaleReturn = require('../models/SaleReturn');
 const Sale = require('../models/Sale');
 const Inventory = require('../models/Inventory');
 const Buyer = require('../models/Buyer');
 const Product = require('../models/Product');
 const Ledger = require('../models/Ledger');
+const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 const { generateSignedUrls } = require('../utils/imageUpload');
@@ -197,55 +199,92 @@ router.post('/', auth, async (req, res) => {
 
 // Helper function to process sale return (approve)
 async function processSaleReturn(returnId, userId) {
-  const saleReturn = await SaleReturn.findById(returnId)
-    .populate('sale')
-    .populate('items.product');
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  if (!saleReturn || saleReturn.status !== 'approved') {
-    return;
-  }
+  try {
+    const saleReturn = await SaleReturn.findById(returnId)
+      .populate('sale')
+      .populate('items.product')
+      .session(session);
 
-  // Update inventory - add stock back
-  for (const item of saleReturn.items) {
-    const inventory = await Inventory.findOne({ product: item.product._id });
-    if (inventory) {
-      // Get cost price from inventory
-      const costPrice = inventory.averageCostPrice || 0;
-      
-      await inventory.addStock(
-        item.returnedQuantity,
-        'SaleReturn',
-        saleReturn._id,
-        userId,
-        `Sale Return from Sale ${saleReturn.sale.saleNumber}`
-      );
+    if (!saleReturn || saleReturn.status !== 'approved') {
+      await session.abortTransaction();
+      session.endSession();
+      return;
     }
-  }
 
-  // Create ledger entries
-  // Credit buyer (reduces receivables)
-  await Ledger.createEntry({
-    type: 'buyer',
-    entityId: saleReturn.buyer,
-    entityModel: 'Buyer',
-    transactionType: 'return',
-    referenceId: saleReturn._id,
-    referenceModel: 'SaleReturn',
-    debit: 0,
-    credit: saleReturn.totalReturnValue,
-    date: new Date(),
-    description: `Sale Return from Sale ${saleReturn.sale.saleNumber}`,
-    createdBy: userId
-  });
+    // Get the original sale to check for packet sales
+    const originalSale = await Sale.findById(saleReturn.sale._id).session(session);
 
-  // Debit inventory value (cost price * quantity for each item)
-  let totalCostValue = 0;
-  for (const item of saleReturn.items) {
-    const inventory = await Inventory.findOne({ product: item.product._id });
-    if (inventory) {
-      const costPrice = inventory.averageCostPrice || 0;
-      totalCostValue += item.returnedQuantity * costPrice;
+    // Update inventory - add stock back
+    for (const item of saleReturn.items) {
+      const inventory = await Inventory.findOne({ product: item.product._id }).session(session);
+      if (inventory) {
+        // Get cost price from inventory
+        const costPrice = inventory.averageCostPrice || 0;
+        
+        await inventory.addStock(
+          item.returnedQuantity,
+          'SaleReturn',
+          saleReturn._id,
+          userId,
+          `Sale Return from Sale ${saleReturn.sale.saleNumber}`
+        );
+        await inventory.save({ session });
+      }
+
+      // Restore PacketStock if the original sale item was a packet sale
+      const originalSaleItem = originalSale?.items?.[item.itemIndex];
+      if (originalSaleItem?.isPacketSale && originalSaleItem?.packetStock) {
+        try {
+          const packetStock = await PacketStock.findById(originalSaleItem.packetStock).session(session);
+          if (packetStock) {
+            await packetStock.restorePackets(item.returnedQuantity, 'SaleReturn');
+            console.log(`[Sale Return] Restored ${item.returnedQuantity} packets to PacketStock ${packetStock.barcode}`);
+          }
+        } catch (packetError) {
+          console.error(`[Sale Return] Error restoring PacketStock:`, packetError.message);
+          // Continue processing - don't fail return for packet stock issues
+        }
+      }
     }
+
+    // Create ledger entries
+    // Credit buyer (reduces receivables)
+    await Ledger.createEntry({
+      type: 'buyer',
+      entityId: saleReturn.buyer,
+      entityModel: 'Buyer',
+      transactionType: 'return',
+      referenceId: saleReturn._id,
+      referenceModel: 'SaleReturn',
+      debit: 0,
+      credit: saleReturn.totalReturnValue,
+      date: new Date(),
+      description: `Sale Return from Sale ${saleReturn.sale.saleNumber}`,
+      createdBy: userId
+    });
+
+    // Debit inventory value (cost price * quantity for each item)
+    let totalCostValue = 0;
+    for (const item of saleReturn.items) {
+      const inventory = await Inventory.findOne({ product: item.product._id }).session(session);
+      if (inventory) {
+        const costPrice = inventory.averageCostPrice || 0;
+        totalCostValue += item.returnedQuantity * costPrice;
+      }
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+    console.log(`[Sale Return] Successfully processed return ${returnId} with transaction`);
+
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    console.error(`[Sale Return] Transaction failed for return ${returnId}:`, error.message);
+    throw error;
   }
 
   // Note: We don't have a separate inventory ledger, so we could create a general entry

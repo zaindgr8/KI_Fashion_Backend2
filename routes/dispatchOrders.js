@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const Joi = require('joi');
+const mongoose = require('mongoose');
 const DispatchOrder = require('../models/DispatchOrder');
 const LogisticsCompany = require('../models/LogisticsCompany');
 const Supplier = require('../models/Supplier');

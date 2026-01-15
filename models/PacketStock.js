@@ -119,9 +119,15 @@ const packetStockSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Compound index for faster lookups
+// Compound indexes for faster lookups
 packetStockSchema.index({ product: 1, supplier: 1, barcode: 1 });
 packetStockSchema.index({ barcode: 1, isActive: 1 });
+// Index for low stock queries
+packetStockSchema.index({ isActive: 1, availablePackets: 1 });
+// Index for product-specific packet lookups
+packetStockSchema.index({ product: 1, isActive: 1, availablePackets: -1 });
+// Index for supplier packet lookups
+packetStockSchema.index({ supplier: 1, isActive: 1 });
 
 // Virtual for available stock (packets not reserved)
 packetStockSchema.virtual('actualAvailable').get(function() {
@@ -183,6 +189,16 @@ packetStockSchema.methods.sellPackets = function(quantity) {
   this.availablePackets -= quantity;
   this.reservedPackets = Math.max(0, this.reservedPackets - quantity);
   this.soldPackets += quantity;
+  return this.save();
+};
+
+// Method to restore packets (for sale returns)
+packetStockSchema.methods.restorePackets = function(quantity, reason = 'SaleReturn') {
+  this.availablePackets += quantity;
+  // Decrement soldPackets if the reason is a return
+  if (reason === 'SaleReturn' && this.soldPackets >= quantity) {
+    this.soldPackets -= quantity;
+  }
   return this.save();
 };
 

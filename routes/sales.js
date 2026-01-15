@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const fs = require('fs');
 const path = require('path');
+const mongoose = require('mongoose');
 const Sale = require('../models/Sale');
 const Inventory = require('../models/Inventory');
 const Buyer = require('../models/Buyer');
@@ -168,6 +169,101 @@ const calculateTotals = (items, totalDiscount = 0, shippingCost = 0) => {
     totalTax,
     grandTotal: Math.max(0, grandTotal)
   };
+};
+
+/**
+ * Process sale delivery with atomic stock updates
+ * Ensures Inventory and PacketStock remain in sync
+ * @param {Object} sale - Sale document
+ * @param {Object} products - Map of productId to product
+ * @param {Object} inventories - Map of productId to inventory
+ * @param {string} userId - User ID processing the delivery
+ * @returns {Object} Result with updated counts
+ */
+const processDeliveryWithTransaction = async (sale, productMap, inventoryMap, userId) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  
+  const results = {
+    inventoryUpdated: 0,
+    packetsUpdated: 0,
+    errors: []
+  };
+  
+  try {
+    for (const item of sale.items) {
+      const product = productMap.get(item.product.toString());
+      const inventory = inventoryMap.get(item.product.toString());
+      
+      if (!inventory) {
+        results.errors.push(`Inventory not found for product ${item.product}`);
+        continue;
+      }
+      
+      const quantityToDeliver = item.quantity;
+      
+      // Handle variant-specific stock deduction
+      if (product && product.variantTracking && product.variantTracking.enabled && item.variant) {
+        await inventory.reduceVariantStock(
+          item.variant.size,
+          item.variant.color,
+          quantityToDeliver,
+          'Sale',
+          sale._id,
+          userId,
+          `Sale delivery: ${sale.saleNumber}`
+        );
+      } else {
+        // Legacy stock deduction (non-variant products)
+        const currentReservedStock = inventory.reservedStock || 0;
+        
+        inventory.currentStock = Math.max(0, inventory.currentStock - quantityToDeliver);
+        if (currentReservedStock > 0) {
+          inventory.reservedStock = Math.max(0, currentReservedStock - quantityToDeliver);
+        }
+        
+        inventory.stockMovements.push({
+          type: 'out',
+          quantity: quantityToDeliver,
+          reference: 'Sale',
+          referenceId: sale._id,
+          user: userId,
+          notes: `Sale delivery: ${sale.saleNumber}`,
+          date: new Date()
+        });
+        
+        inventory.lastStockUpdate = new Date();
+        await inventory.save({ session });
+      }
+      
+      results.inventoryUpdated++;
+      
+      // Update PacketStock atomically if this is a packet sale
+      if (item.isPacketSale && item.packetStock) {
+        const packetStock = await PacketStock.findById(item.packetStock).session(session);
+        if (packetStock) {
+          packetStock.availablePackets = Math.max(0, packetStock.availablePackets - item.quantity);
+          packetStock.reservedPackets = Math.max(0, packetStock.reservedPackets - item.quantity);
+          packetStock.soldPackets += item.quantity;
+          await packetStock.save({ session });
+          results.packetsUpdated++;
+        }
+      }
+    }
+    
+    await session.commitTransaction();
+    session.endSession();
+    
+    console.log(`[Sale Delivery] Transaction completed for ${sale.saleNumber}: ${results.inventoryUpdated} inventory, ${results.packetsUpdated} packets updated`);
+    return { success: true, ...results };
+    
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    
+    console.error(`[Sale Delivery] Transaction failed for ${sale.saleNumber}:`, error.message);
+    return { success: false, error: error.message, ...results };
+  }
 };
 
 /**
@@ -489,6 +585,29 @@ router.post('/', auth, async (req, res) => {
 
             await inventory.save();
             console.log(`Stock reserved for product ${item.product}: reservedStock=${inventory.reservedStock}`);
+          }
+
+          // Handle PacketStock if this is a packet sale
+          if (item.isPacketSale && item.packetStock) {
+            try {
+              const packetStock = await PacketStock.findById(item.packetStock);
+              if (packetStock) {
+                // For distributor sales (auto-delivered), directly sell packets
+                // For regular sales (pending delivery), reserve packets
+                if (isDistributor) {
+                  await packetStock.sellPackets(item.quantity);
+                  console.log(`PacketStock sold (distributor) for ${packetStock.barcode}: ${item.quantity} packets`);
+                } else {
+                  await packetStock.reservePackets(item.quantity);
+                  console.log(`PacketStock reserved for ${packetStock.barcode}: ${item.quantity} packets`);
+                }
+              } else {
+                console.warn(`PacketStock not found for ID ${item.packetStock} when creating sale ${saleNumber}`);
+              }
+            } catch (packetError) {
+              console.error(`Error handling PacketStock for sale ${saleNumber}:`, packetError);
+              // Continue - don't fail sale creation for packet issues
+            }
           }
         } catch (inventoryError) {
           console.error(`Error reserving stock for product ${item.product}:`, inventoryError);
@@ -1015,69 +1134,64 @@ router.patch('/:id/delivered', auth, async (req, res) => {
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
     const inventoryMap = new Map(inventories.map(inv => [inv.product.toString(), inv]));
 
-    // Update inventory for each item using pre-fetched data
-    for (const item of sale.items) {
-      const product = productMap.get(item.product.toString());
-      const inventory = inventoryMap.get(item.product.toString());
+    // Process delivery with atomic transaction for stock updates
+    const deliveryResult = await processDeliveryWithTransaction(sale, productMap, inventoryMap, req.user._id);
+    
+    if (!deliveryResult.success) {
+      console.error(`[Sale Delivery] Transaction failed for ${sale.saleNumber}, falling back to non-transactional update`);
+      // Fallback: Continue with non-transactional approach for backward compatibility
+      // This ensures delivery still works even if transactions fail
+      for (const item of sale.items) {
+        const product = productMap.get(item.product.toString());
+        const inventory = inventoryMap.get(item.product.toString());
 
-      if (!inventory) {
-        console.warn(`Inventory not found for product ${item.product} in sale ${sale.saleNumber}`);
-        continue;
-      }
-
-      try {
-        const quantityToDeliver = item.quantity;
-
-        // Handle variant-specific stock deduction
-        if (product && product.variantTracking && product.variantTracking.enabled && item.variant) {
-          // Reduce variant stock
-          await inventory.reduceVariantStock(
-            item.variant.size,
-            item.variant.color,
-            quantityToDeliver,
-            'Sale',
-            sale._id,
-            req.user._id,
-            `Sale delivery: ${sale.saleNumber}`
-          );
-          console.log(`Variant stock reduced for product ${item.product} (${item.variant.color}-${item.variant.size}): ${quantityToDeliver}`);
-        } else {
-          // Legacy stock deduction (non-variant products)
-          const currentReservedStock = inventory.reservedStock || 0;
-
-          // Validate we have enough stock
-          if (inventory.currentStock < quantityToDeliver) {
-            console.error(`Insufficient stock for product ${item.product}. Current: ${inventory.currentStock}, Required: ${quantityToDeliver}`);
-            // Still proceed but log the issue
-          }
-
-          // Decrement current stock
-          inventory.currentStock = Math.max(0, inventory.currentStock - quantityToDeliver);
-
-          // Decrement reserved stock (only if it was reserved)
-          if (currentReservedStock > 0) {
-            inventory.reservedStock = Math.max(0, currentReservedStock - quantityToDeliver);
-          }
-
-          // Add stock movement record
-          inventory.stockMovements.push({
-            type: 'out',
-            quantity: quantityToDeliver,
-            reference: 'Sale',
-            referenceId: sale._id,
-            user: req.user._id,
-            notes: `Sale delivery: ${sale.saleNumber}`,
-            date: new Date()
-          });
-
-          inventory.lastStockUpdate = new Date();
-          await inventory.save();
-
-          console.log(`Inventory updated for product ${item.product}: currentStock=${inventory.currentStock}, reservedStock=${inventory.reservedStock}`);
+        if (!inventory) {
+          console.warn(`Inventory not found for product ${item.product} in sale ${sale.saleNumber}`);
+          continue;
         }
-      } catch (inventoryError) {
-        console.error(`Error updating inventory for product ${item.product}:`, inventoryError);
-        // Continue with other items even if one fails
+
+        try {
+          const quantityToDeliver = item.quantity;
+
+          // Handle variant-specific stock deduction
+          if (product && product.variantTracking && product.variantTracking.enabled && item.variant) {
+            await inventory.reduceVariantStock(
+              item.variant.size,
+              item.variant.color,
+              quantityToDeliver,
+              'Sale',
+              sale._id,
+              req.user._id,
+              `Sale delivery: ${sale.saleNumber}`
+            );
+          } else {
+            const currentReservedStock = inventory.reservedStock || 0;
+            inventory.currentStock = Math.max(0, inventory.currentStock - quantityToDeliver);
+            if (currentReservedStock > 0) {
+              inventory.reservedStock = Math.max(0, currentReservedStock - quantityToDeliver);
+            }
+            inventory.stockMovements.push({
+              type: 'out',
+              quantity: quantityToDeliver,
+              reference: 'Sale',
+              referenceId: sale._id,
+              user: req.user._id,
+              notes: `Sale delivery: ${sale.saleNumber}`,
+              date: new Date()
+            });
+            inventory.lastStockUpdate = new Date();
+            await inventory.save();
+          }
+
+          if (item.isPacketSale && item.packetStock) {
+            const packetStock = await PacketStock.findById(item.packetStock);
+            if (packetStock) {
+              await packetStock.sellPackets(item.quantity);
+            }
+          }
+        } catch (itemError) {
+          console.error(`Error processing item ${item.product}:`, itemError);
+        }
       }
     }
 
@@ -1208,6 +1322,20 @@ router.delete('/:id', auth, async (req, res) => {
         { product: item.product },
         { $inc: { reservedStock: -item.quantity } }
       );
+
+      // Release PacketStock reservation if this is a packet sale
+      if (item.isPacketSale && item.packetStock) {
+        try {
+          const packetStock = await PacketStock.findById(item.packetStock);
+          if (packetStock) {
+            await packetStock.releaseReservedPackets(item.quantity);
+            console.log(`PacketStock released for ${packetStock.barcode}: ${item.quantity} packets`);
+          }
+        } catch (packetError) {
+          console.error(`Error releasing PacketStock for sale ${sale.saleNumber}:`, packetError);
+          // Continue - don't fail cancellation for packet release issues
+        }
+      }
     }
 
     sale.deliveryStatus = 'cancelled';
