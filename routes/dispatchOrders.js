@@ -1963,6 +1963,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
             exchangeRate: batchInfo.exchangeRate,
             notes: `Dispatch Order ${dispatchOrder.orderNumber} - With variants`
           });
+          
+          // Recalculate weighted average cost from all batches
+          inventory.recalculateAverageCost();
           await inventory.save();
 
           console.log(`[Confirm Order] Added ${confirmedQuantity} units with variants and batch tracking to inventory for ${product.name}`);

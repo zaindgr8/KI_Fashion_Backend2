@@ -61,6 +61,17 @@ static async getSupplierBalanceSummary(supplierId) {
   const currentBalance = await this.getSupplierBalance(supplierId);
   return { currentBalance };
 }
+
+  /**
+   * Get buyer balance summary (simple format for API responses)
+   * @param {string} buyerId - The buyer's MongoDB ObjectId
+   * @returns {Object} { currentBalance: number }
+   */
+  static async getBuyerBalanceSummary(buyerId) {
+    const currentBalance = await this.getBuyerBalance(buyerId);
+    return { currentBalance };
+  }
+
   // =====================================================
   // ORDER-LEVEL BALANCE METHODS
   // =====================================================
@@ -786,6 +797,295 @@ static async getSupplierBalanceSummary(supplierId) {
         session.endSession();
       }
     }
+  }
+
+  // =====================================================
+  // BUYER PAYMENT DISTRIBUTION METHODS
+  // =====================================================
+
+  /**
+   * Get pending sales for a buyer (sales with remaining balance)
+   * Sorted by saleDate ASCENDING (FIFO - first sale, first paid)
+   * @param {string} buyerId - The buyer's MongoDB ObjectId
+   * @param {Object} session - Optional MongoDB session for transactions
+   * @returns {Array} Array of pending sales with remaining balances
+   */
+  static async getPendingSalesForBuyer(buyerId, session = null) {
+    const Sale = require('../models/Sale');
+    
+    // Find sales that are not fully paid
+    const sales = await Sale.find({
+      buyer: buyerId,
+      paymentStatus: { $in: ['pending', 'partial'] }
+    })
+      .sort({ saleDate: 1 }) // Oldest first (FIFO)
+      .session(session)
+      .lean();
+    
+    // Calculate remaining balance for each sale
+    return sales.map(sale => {
+      const totalPaid = (sale.cashPayment || 0) + (sale.bankPayment || 0);
+      const grandTotal = sale.grandTotal || 0;
+      const remainingBalance = Math.max(0, grandTotal - totalPaid);
+      
+      return {
+        _id: sale._id,
+        saleNumber: sale.saleNumber,
+        saleDate: sale.saleDate,
+        grandTotal: grandTotal,
+        totalPaid: totalPaid,
+        remainingBalance: remainingBalance
+      };
+    }).filter(sale => sale.remainingBalance > 0); // Only include sales with remaining balance
+  }
+
+  /**
+   * Distribute a buyer payment across pending sales (FIFO - oldest first)
+   * Similar to distributeUniversalPayment but for buyers/sales
+   * @param {Object} params - Payment distribution parameters
+   * @returns {Object} Distribution result with affected sales
+   */
+  static async distributeBuyerPayment({
+    buyerId,
+    amount,
+    paymentMethod,
+    createdBy,
+    description,
+    date = new Date(),
+    session: externalSession = null
+  }) {
+    const Sale = require('../models/Sale');
+    
+    // Use external session if provided, otherwise create a new transaction
+    const useExternalSession = externalSession !== null;
+    const session = useExternalSession ? externalSession : await mongoose.startSession();
+    
+    if (!useExternalSession) {
+      session.startTransaction({
+        readConcern: { level: 'snapshot' },
+        writeConcern: { w: 'majority' }
+      });
+    }
+
+    try {
+      // 1. Get pending sales sorted by saleDate ASCENDING (FIFO)
+      const pendingSales = await this.getPendingSalesForBuyer(buyerId, session);
+
+      console.log("\n========== BUYER PAYMENT DISTRIBUTION (FIFO) ==========");
+      console.log(`Buyer ID: ${buyerId}`);
+      console.log(`Payment Amount: £${amount.toFixed(2)}`);
+      console.log(`Payment Method: ${paymentMethod}`);
+      console.log(`Pending Sales (sorted by date - oldest first):`);
+      pendingSales.forEach((sale, index) => {
+        console.log(`  ${index + 1}. ${sale.saleNumber} - Remaining: £${sale.remainingBalance.toFixed(2)} (Date: ${sale.saleDate})`);
+      });
+      console.log("=======================================================\n");
+
+      let result;
+
+      // Handle case when there are no pending sales - create advance/credit entry
+      if (pendingSales.length === 0) {
+        console.log(`No pending sales found - Creating advance/credit entry for full amount: £${amount.toFixed(2)}`);
+
+        await Ledger.createEntry({
+          type: 'buyer',
+          entityId: buyerId,
+          entityModel: 'Buyer',
+          transactionType: 'receipt',
+          debit: 0,
+          credit: amount,
+          paymentMethod,
+          date,
+          description: description || `Advance payment (credit to buyer account - no pending sales)`,
+          createdBy,
+          paymentDetails: {
+            cashPayment: paymentMethod === 'cash' ? amount : 0,
+            bankPayment: paymentMethod === 'bank' ? amount : 0,
+            remainingBalance: 0
+          }
+        }, session);
+
+        result = {
+          totalDistributed: amount,
+          distributions: [{
+            saleId: null,
+            saleNumber: 'ADVANCE_CREDIT',
+            amountApplied: amount,
+            previousRemaining: 0,
+            newRemaining: -amount,
+            fullyPaid: false,
+            isAdvance: true
+          }],
+          remainingCredit: amount
+        };
+      } else {
+        // Process payment distribution
+        let remainingAmount = amount;
+        const distributions = [];
+
+        // 2. Distribute payment across sales in FIFO order
+        for (let i = 0; i < pendingSales.length; i++) {
+          if (remainingAmount <= 0) break;
+
+          const sale = pendingSales[i];
+          const saleRemaining = sale.remainingBalance;
+
+          // Calculate payment for this specific sale
+          const paymentForSale = Math.min(remainingAmount, saleRemaining);
+
+          if (paymentForSale > 0) {
+            const newSaleRemaining = saleRemaining - paymentForSale;
+
+            console.log(`Applying £${paymentForSale.toFixed(2)} to ${sale.saleNumber} (Remaining after: £${newSaleRemaining.toFixed(2)})`);
+
+            // Create ledger entry linked to this specific sale
+            await Ledger.createEntry({
+              type: 'buyer',
+              entityId: buyerId,
+              entityModel: 'Buyer',
+              transactionType: 'receipt',
+              referenceId: sale._id,
+              referenceModel: 'Sale',
+              debit: 0,
+              credit: paymentForSale,
+              paymentMethod,
+              date,
+              description: description || `Distributed payment to ${sale.saleNumber}`,
+              createdBy,
+              paymentDetails: {
+                cashPayment: paymentMethod === 'cash' ? paymentForSale : 0,
+                bankPayment: paymentMethod === 'bank' ? paymentForSale : 0,
+                remainingBalance: Math.max(0, newSaleRemaining)
+              }
+            }, session);
+
+            // Update the Sale model
+            const saleDoc = await Sale.findById(sale._id).session(session);
+            if (saleDoc) {
+              if (paymentMethod === 'cash') {
+                saleDoc.cashPayment = (saleDoc.cashPayment || 0) + paymentForSale;
+              } else {
+                saleDoc.bankPayment = (saleDoc.bankPayment || 0) + paymentForSale;
+              }
+              
+              // Determine new payment status
+              const newTotalPaid = (saleDoc.cashPayment || 0) + (saleDoc.bankPayment || 0);
+              if (newTotalPaid >= saleDoc.grandTotal) {
+                saleDoc.paymentStatus = 'paid';
+              } else if (newTotalPaid > 0) {
+                saleDoc.paymentStatus = 'partial';
+              }
+              
+              await saleDoc.save({ session });
+            }
+
+            distributions.push({
+              saleId: sale._id,
+              saleNumber: sale.saleNumber,
+              amountApplied: paymentForSale,
+              previousRemaining: saleRemaining,
+              newRemaining: newSaleRemaining,
+              fullyPaid: newSaleRemaining === 0,
+              totalAmount: sale.grandTotal,
+              totalPaid: sale.totalPaid + paymentForSale
+            });
+
+            remainingAmount -= paymentForSale;
+          }
+        }
+
+        // 3. Handle excess payment (if any)
+        if (remainingAmount > 0) {
+          console.log(`\nExcess payment: £${remainingAmount.toFixed(2)} - Creating advance/credit entry`);
+
+          await Ledger.createEntry({
+            type: 'buyer',
+            entityId: buyerId,
+            entityModel: 'Buyer',
+            transactionType: 'receipt',
+            debit: 0,
+            credit: remainingAmount,
+            paymentMethod,
+            date,
+            description: description || `Advance payment (credit to buyer account)`,
+            createdBy,
+            paymentDetails: {
+              cashPayment: paymentMethod === 'cash' ? remainingAmount : 0,
+              bankPayment: paymentMethod === 'bank' ? remainingAmount : 0,
+              remainingBalance: 0
+            }
+          }, session);
+
+          distributions.push({
+            saleId: null,
+            saleNumber: 'ADVANCE_CREDIT',
+            amountApplied: remainingAmount,
+            previousRemaining: 0,
+            newRemaining: -remainingAmount,
+            fullyPaid: false,
+            isAdvance: true
+          });
+        }
+
+        console.log("\n========== DISTRIBUTION COMPLETE ==========");
+        console.log(`Total Distributed: £${amount.toFixed(2)}`);
+        console.log(`Sales Affected: ${distributions.filter(d => !d.isAdvance).length}`);
+        console.log(`Fully Paid Sales: ${distributions.filter(d => d.fullyPaid).length}`);
+        console.log(`Advance/Credit: £${(remainingAmount > 0 ? remainingAmount : 0).toFixed(2)}`);
+        console.log("==========================================\n");
+
+        result = {
+          totalDistributed: amount,
+          distributions,
+          remainingCredit: remainingAmount > 0 ? remainingAmount : 0
+        };
+      }
+
+      // Commit the transaction if we created our own session
+      if (!useExternalSession) {
+        await session.commitTransaction();
+        console.log("Buyer payment distribution transaction committed successfully");
+      }
+
+      return result;
+
+    } catch (error) {
+      if (!useExternalSession) {
+        await session.abortTransaction();
+        console.error("Buyer payment distribution transaction aborted:", error.message);
+      }
+      throw error;
+    } finally {
+      if (!useExternalSession) {
+        session.endSession();
+      }
+    }
+  }
+
+  /**
+   * Record a debit adjustment for a buyer (manual charge to increase what buyer owes)
+   * @param {Object} params - Adjustment parameters
+   * @returns {Object} Created ledger entry
+   */
+  static async recordBuyerDebitAdjustment({
+    buyerId,
+    amount,
+    description,
+    createdBy,
+    date = new Date(),
+    session = null
+  }) {
+    return await Ledger.createEntry({
+      type: 'buyer',
+      entityId: buyerId,
+      entityModel: 'Buyer',
+      transactionType: 'adjustment',
+      debit: amount,
+      credit: 0,
+      date,
+      description: description || 'Manual debit adjustment',
+      createdBy
+    }, session);
   }
 
   /**

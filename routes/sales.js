@@ -984,11 +984,10 @@ router.get('/', auth, async (req, res) => {
 
     const sales = await Sale.find(query)
       .populate('buyer', 'name company')
-      .populate('items.product', 'name sku')
+      .populate('items.product', 'name sku productCode images pricing')
       .populate('deliveryPersonnel', 'name phone')
       .populate('createdBy', 'name')
       .sort({ saleDate: -1 })
-      .limit(limit * 1)
       .limit(limit * 1)
       .skip((page - 1) * limit)
       .lean();

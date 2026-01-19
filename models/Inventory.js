@@ -253,6 +253,30 @@ inventorySchema.methods.addStockWithVariants = function(quantity, variantComposi
   return this.save();
 };
 
+// Recalculate average cost price from purchase batches (weighted average)
+// Call this after manually adding batches to purchaseBatches array
+inventorySchema.methods.recalculateAverageCost = function() {
+  if (!this.purchaseBatches || this.purchaseBatches.length === 0) {
+    return this;
+  }
+  
+  const totalValue = this.purchaseBatches.reduce((sum, batch) => {
+    const price = batch.landedPrice || batch.costPrice || 0;
+    return sum + (batch.remainingQuantity * price);
+  }, 0);
+  
+  const totalQuantity = this.purchaseBatches.reduce((sum, batch) => {
+    return sum + batch.remainingQuantity;
+  }, 0);
+  
+  if (totalQuantity > 0) {
+    this.averageCostPrice = totalValue / totalQuantity;
+    this.totalValue = this.currentStock * this.averageCostPrice;
+  }
+  
+  return this;
+};
+
 // Reserve variant stock
 inventorySchema.methods.reserveVariantStock = function(size, color, quantity) {
   const variant = this.variantComposition.find(

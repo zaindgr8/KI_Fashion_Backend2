@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 
 const Ledger = require("../models/Ledger");
 const DispatchOrder = require("../models/DispatchOrder");
+const Sale = require("../models/Sale");
 const Supplier = require("../models/Supplier");
 const Buyer = require("../models/Buyer");
 const LogisticsCompany = require("../models/LogisticsCompany");
@@ -472,6 +473,123 @@ router.get("/buyer/:id", auth, async (req, res) => {
     });
   } catch (error) {
     console.error("Get buyer ledger error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+});
+
+/**
+ * GET /ledger/buyers
+ * Get all buyer ledgers aggregated (similar to /suppliers endpoint)
+ */
+router.get("/buyers", auth, async (req, res) => {
+  try {
+    const { page = 1, limit = 100, buyerId, startDate, endDate, transactionType } = req.query;
+
+    const query = {
+      type: "buyer",
+    };
+
+    // Filter by specific buyer if provided
+    if (buyerId && buyerId !== "all") {
+      query.entityId = buyerId;
+    }
+
+    // Add transaction type filter if provided
+    if (transactionType && transactionType !== "all") {
+      query.transactionType = transactionType;
+    }
+
+    if (startDate || endDate) {
+      query.date = {};
+      if (startDate) query.date.$gte = new Date(startDate);
+      if (endDate) query.date.$lte = new Date(endDate);
+    }
+
+    // Find entries
+    let entries = await Ledger.find(query)
+      .populate("createdBy", "name")
+      .populate("entityId", "name company email phone") // Populate buyer info
+      .lean()
+      .sort({ date: -1, createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit);
+
+    // Populate reference documents dynamically (Sale, SaleReturn)
+    entries = await Promise.all(
+      entries.map(async (entry) => {
+        if (entry.referenceId && entry.referenceModel) {
+          try {
+            let refDoc;
+            if (entry.referenceModel === "Sale") {
+              refDoc = await Sale.findById(entry.referenceId)
+                .select("saleNumber items grandTotal paymentStatus")
+                .lean();
+              if (refDoc) {
+                entry.referenceId = {
+                  _id: refDoc._id,
+                  saleNumber: refDoc.saleNumber,
+                  grandTotal: refDoc.grandTotal,
+                  paymentStatus: refDoc.paymentStatus,
+                  itemCount: refDoc.items?.length || 0,
+                };
+              }
+            } else if (entry.referenceModel === "SaleReturn") {
+              const SaleReturn = mongoose.model("SaleReturn");
+              refDoc = await SaleReturn.findById(entry.referenceId)
+                .select("returnNumber totalReturnValue")
+                .lean();
+              if (refDoc) {
+                entry.referenceId = {
+                  _id: refDoc._id,
+                  returnNumber: refDoc.returnNumber,
+                  totalReturnValue: refDoc.totalReturnValue,
+                };
+              }
+            }
+          } catch (err) {
+            console.error("Error populating buyer reference:", err);
+          }
+        }
+        return entry;
+      })
+    );
+
+    const total = await Ledger.countDocuments(query);
+
+    // Calculate total balance using BalanceService (SSOT)
+    let totalBalance = 0;
+    if (buyerId && buyerId !== "all") {
+      // Single buyer balance
+      totalBalance = await BalanceService.getBuyerBalance(buyerId);
+    } else {
+      // Total balance across all buyers
+      totalBalance = await BalanceService.getTotalBuyerBalance();
+    }
+
+    res.json({
+      success: true,
+      data: {
+        entries,
+        totalBalance,
+        buyerCount:
+          buyerId && buyerId !== "all"
+            ? 1
+            : await Ledger.distinct("entityId", { type: "buyer" }).then(
+              (ids) => ids.length
+            ),
+      },
+      pagination: {
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        totalItems: total,
+        itemsPerPage: limit,
+      },
+    });
+  } catch (error) {
+    console.error("Get all buyer ledgers error:", error);
     res.status(500).json({
       success: false,
       message: "Server error",
@@ -1075,6 +1193,43 @@ router.post("/entry", auth, async (req, res) => {
         );
       }
 
+      // Handle buyer receipt - sync Sale model payment status
+      if (
+        entryData.type === "buyer" &&
+        entryData.transactionType === "receipt" &&
+        entryData.referenceId &&
+        entryData.referenceModel === "Sale"
+      ) {
+        const saleId = entryData.referenceId;
+        const sale = await Sale.findById(saleId);
+        
+        if (sale) {
+          const paymentAmount = entryData.credit || 0;
+          const paymentMethod = entryData.paymentMethod || "cash";
+          
+          // Increment payment amounts
+          if (paymentMethod === "cash") {
+            sale.cashPayment = (sale.cashPayment || 0) + paymentAmount;
+          } else {
+            sale.bankPayment = (sale.bankPayment || 0) + paymentAmount;
+          }
+          
+          // Calculate new total paid
+          const totalPaid = (sale.cashPayment || 0) + (sale.bankPayment || 0);
+          const grandTotal = sale.grandTotal || 0;
+          
+          // Update payment status
+          if (totalPaid >= grandTotal) {
+            sale.paymentStatus = "paid";
+          } else if (totalPaid > 0) {
+            sale.paymentStatus = "partial";
+          }
+          
+          await sale.save({ session });
+          console.log(`[Buyer Receipt] Updated Sale ${sale.saleNumber} - Status: ${sale.paymentStatus}, Total Paid: £${totalPaid.toFixed(2)}`);
+        }
+      }
+
       const entry = await Ledger.createEntry(entryData, session);
 
       // Commit transaction
@@ -1582,6 +1737,142 @@ router.post("/logistics/:id/debit-adjustment", auth, async (req, res) => {
     });
   } catch (error) {
     console.error("Record logistics debit adjustment error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to record adjustment"
+    });
+  }
+});
+
+/**
+ * POST /ledger/buyer/:id/distribute-payment
+ * Distribute a bulk payment across pending sales for a buyer (FIFO - oldest first)
+ */
+router.post("/buyer/:id/distribute-payment", auth, async (req, res) => {
+  try {
+    const { amount, paymentMethod, date, description } = req.body;
+
+    // Verify buyer exists
+    const buyerExists = await Buyer.findById(req.params.id);
+    if (!buyerExists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Buyer not found'
+      });
+    }
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount must be greater than 0"
+      });
+    }
+
+    if (!paymentMethod || !['cash', 'bank'].includes(paymentMethod)) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment method must be 'cash' or 'bank'"
+      });
+    }
+
+    // Get current balance before payment
+    const beforeBalance = await BalanceService.getBuyerBalance(req.params.id);
+
+    // Distribute payment using BalanceService
+    const result = await BalanceService.distributeBuyerPayment({
+      buyerId: req.params.id,
+      amount: parseFloat(amount),
+      paymentMethod,
+      date: date ? new Date(date) : new Date(),
+      description,
+      createdBy: req.user._id,
+    });
+
+    // Get updated balance
+    const afterBalance = await BalanceService.getBuyerBalance(req.params.id);
+
+    res.json({
+      success: true,
+      message: `Payment of £${parseFloat(amount).toFixed(2)} distributed successfully`,
+      data: {
+        payment: {
+          amount: parseFloat(amount),
+          method: paymentMethod,
+          date: date || new Date()
+        },
+        distribution: {
+          salesAffected: result.distributions.filter(d => !d.isAdvance).length,
+          fullyPaidSales: result.distributions.filter(d => d.fullyPaid).length,
+          distributedAmount: result.totalDistributed,
+          advanceAmount: result.remainingCredit || 0
+        },
+        balance: {
+          before: beforeBalance,
+          after: afterBalance,
+          change: beforeBalance - afterBalance
+        },
+        distributions: result.distributions.map(d => ({
+          saleReference: d.saleNumber,
+          originalAmount: d.totalAmount,
+          previouslyPaid: d.totalPaid || 0,
+          currentPayment: d.amountApplied,
+          remainingBalance: d.newRemaining,
+          status: d.fullyPaid ? 'PAID' : d.isAdvance ? 'ADVANCE' : 'PARTIAL'
+        }))
+      }
+    });
+
+  } catch (error) {
+    console.error("Distribute buyer payment error:", error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to distribute payment",
+      ...(process.env.NODE_ENV === 'development' && {
+        stack: error.stack
+      })
+    });
+  }
+});
+
+/**
+ * POST /ledger/buyer/:id/debit-adjustment
+ * Create a manual debit adjustment for a buyer (e.g., correction, fee, etc.)
+ */
+router.post("/buyer/:id/debit-adjustment", auth, async (req, res) => {
+  try {
+    const { amount, date, description } = req.body;
+
+    // Verify buyer exists
+    const buyerExists = await Buyer.findById(req.params.id);
+    if (!buyerExists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Buyer not found'
+      });
+    }
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount must be greater than 0"
+      });
+    }
+
+    const entry = await BalanceService.recordBuyerDebitAdjustment({
+      buyerId: req.params.id,
+      amount: parseFloat(amount),
+      date: date ? new Date(date) : new Date(),
+      description,
+      createdBy: req.user._id
+    });
+
+    res.json({
+      success: true,
+      message: "Debit adjustment recorded",
+      data: entry
+    });
+  } catch (error) {
+    console.error("Record buyer debit adjustment error:", error);
     res.status(500).json({
       success: false,
       message: error.message || "Failed to record adjustment"
