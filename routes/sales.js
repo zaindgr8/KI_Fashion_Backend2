@@ -87,7 +87,18 @@ const saleItemSchema = Joi.object({
   quantity: Joi.number().min(1).required(),
   unitPrice: Joi.number().min(0).required(),
   discount: Joi.number().min(0).default(0),
-  taxRate: Joi.number().min(0).default(0)
+  taxRate: Joi.number().min(0).default(0),
+  // Packet-based selling fields
+  isPacketSale: Joi.boolean().default(false),
+  packetStock: Joi.string().optional(),
+  packetBarcode: Joi.string().optional(),
+  packetComposition: Joi.array().items(Joi.object({
+    size: Joi.string().optional(),
+    color: Joi.string().optional(),
+    quantity: Joi.number().optional()
+  })).optional(),
+  totalItemsPerPacket: Joi.number().min(1).optional(),
+  packetQuantity: Joi.number().min(1).optional() // Original packet count before conversion to items
 });
 
 const saleSchema = Joi.object({
