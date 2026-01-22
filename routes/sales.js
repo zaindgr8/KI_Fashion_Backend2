@@ -562,14 +562,14 @@ router.post('/', auth, async (req, res) => {
       bankPayment,
       paymentStatus,
       isManualSale,
-      // For distributor purchases, mark as delivered (purchase completed)
-      deliveryStatus: (req.user.role === 'distributor' || req.user.role === 'buyer') ? 'delivered' : 'pending',
+      // Auto-deliver all sales - stock is deducted immediately
+      deliveryStatus: 'delivered',
       createdBy: req.user._id
     });
 
     await sale.save();
 
-    // Reserve stock for each item (skip for manual sales if needed, or make optional)
+    // Deduct stock for each item immediately (auto-delivered sales)
     if (!isManualSale) {
       for (const item of req.body.items) {
         try {
@@ -580,38 +580,46 @@ router.post('/', auth, async (req, res) => {
             continue;
           }
 
-          // Reserve variant-specific stock if applicable
+          // Deduct variant-specific stock if applicable
           if (product && product.variantTracking && product.variantTracking.enabled && item.variant) {
-            await inventory.reserveVariantStock(item.variant.size, item.variant.color, item.quantity);
-            console.log(`Variant stock reserved for product ${item.product} (${item.variant.color}-${item.variant.size}): ${item.quantity}`);
+            await inventory.reduceVariantStock(
+              item.variant.size,
+              item.variant.color,
+              item.quantity,
+              'Sale',
+              sale._id,
+              req.user._id,
+              `Sale: ${saleNumber}`
+            );
+            console.log(`Variant stock deducted for product ${item.product} (${item.variant.color}-${item.variant.size}): ${item.quantity}`);
           } else {
-            // Reserve total stock (legacy behavior)
-            const currentReservedStock = inventory.reservedStock || 0;
-            inventory.reservedStock = currentReservedStock + item.quantity;
-
-            // Validate we have enough available stock
-            if (inventory.availableStock < item.quantity) {
-              console.warn(`Insufficient available stock for product ${item.product}. Available: ${inventory.availableStock}, Required: ${item.quantity}`);
-            }
-
+            // Deduct from total stock directly
+            inventory.currentStock = Math.max(0, inventory.currentStock - item.quantity);
+            
+            inventory.stockMovements.push({
+              type: 'out',
+              quantity: item.quantity,
+              reference: 'Sale',
+              referenceId: sale._id,
+              user: req.user._id,
+              notes: `Sale: ${saleNumber}`,
+              date: new Date()
+            });
+            
+            inventory.lastStockUpdate = new Date();
             await inventory.save();
-            console.log(`Stock reserved for product ${item.product}: reservedStock=${inventory.reservedStock}`);
+            console.log(`Stock deducted for product ${item.product}: currentStock=${inventory.currentStock}`);
           }
 
-          // Handle PacketStock if this is a packet sale
+          // Handle PacketStock - always use sellPackets (no more reservation)
           if (item.isPacketSale && item.packetStock) {
             try {
               const packetStock = await PacketStock.findById(item.packetStock);
               if (packetStock) {
-                // For distributor sales (auto-delivered), directly sell packets
-                // For regular sales (pending delivery), reserve packets
-                if (isDistributor) {
-                  await packetStock.sellPackets(item.quantity);
-                  console.log(`PacketStock sold (distributor) for ${packetStock.barcode}: ${item.quantity} packets`);
-                } else {
-                  await packetStock.reservePackets(item.quantity);
-                  console.log(`PacketStock reserved for ${packetStock.barcode}: ${item.quantity} packets`);
-                }
+                // Calculate packet quantity from item quantity and totalItemsPerPacket
+                const packetQty = item.packetQuantity || Math.ceil(item.quantity / (item.totalItemsPerPacket || 1));
+                await packetStock.sellPackets(packetQty);
+                console.log(`PacketStock sold for ${packetStock.barcode}: ${packetQty} packets`);
               } else {
                 console.warn(`PacketStock not found for ID ${item.packetStock} when creating sale ${saleNumber}`);
               }
@@ -621,7 +629,7 @@ router.post('/', auth, async (req, res) => {
             }
           }
         } catch (inventoryError) {
-          console.error(`Error reserving stock for product ${item.product}:`, inventoryError);
+          console.error(`Error deducting stock for product ${item.product}:`, inventoryError);
           // Continue with other items even if one fails
         }
       }
