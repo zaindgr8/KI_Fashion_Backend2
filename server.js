@@ -155,6 +155,7 @@ app.use("/api/packet-stock", require("./routes/packetStock"));
 
 app.use("/api/ledger", require("./routes/ledger"));
 app.use("/api/balances", require("./routes/balances"));
+app.use("/api/payments", require("./routes/payments"));
 app.use("/api/sale-returns", require("./routes/saleReturns"));
 app.use("/api/images", require("./routes/images"));
 app.use("/api/logistics-payables", require("./routes/logisticsPayables"));
