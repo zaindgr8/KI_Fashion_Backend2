@@ -96,7 +96,7 @@ const saleItemSchema = Joi.object({
     size: Joi.string().optional(),
     color: Joi.string().optional(),
     quantity: Joi.number().optional()
-  })).optional(),
+  }).unknown(true)).optional(),
   totalItemsPerPacket: Joi.number().min(1).optional(),
   packetQuantity: Joi.number().min(1).optional() // Original packet count before conversion to items
 });
