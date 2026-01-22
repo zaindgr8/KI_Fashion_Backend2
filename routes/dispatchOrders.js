@@ -1976,76 +1976,169 @@ router.post('/:id/confirm', auth, async (req, res) => {
           const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
           const productId = product._id;
           
-          // Group packets by their composition to count duplicates
-          const packetGroups = new Map();
+          // Check if this is a loose item configuration (packets with isLoose: true)
+          const hasLooseItems = item.packets.some(p => p.isLoose === true);
           
-          for (const packet of item.packets) {
-            // Generate deterministic barcode for this packet composition
-            const barcode = generatePacketBarcode(
-              supplierId.toString(),
-              productId.toString(),
-              packet.composition,
-              false // isLoose = false for packets
-            );
+          if (hasLooseItems) {
+            // ==========================================
+            // LOOSE ITEMS: Create separate barcode for each color/size combination
+            // ==========================================
+            console.log(`[Confirm Order] Processing loose items for ${product.name}`);
             
-            if (packetGroups.has(barcode)) {
-              packetGroups.get(barcode).count += 1;
-            } else {
-              packetGroups.set(barcode, {
-                barcode,
-                composition: packet.composition,
-                totalItemsPerPacket: packet.totalItems || packet.composition.reduce((sum, c) => sum + c.quantity, 0),
-                count: 1
-              });
+            // Merge all compositions from loose packets and group by color/size
+            const looseItemGroups = new Map();
+            
+            for (const packet of item.packets) {
+              if (!packet.isLoose) continue;
+              
+              for (const comp of packet.composition) {
+                const key = `${comp.color}|${comp.size}`;
+                if (looseItemGroups.has(key)) {
+                  looseItemGroups.get(key).quantity += comp.quantity;
+                } else {
+                  looseItemGroups.set(key, {
+                    color: comp.color,
+                    size: comp.size,
+                    quantity: comp.quantity
+                  });
+                }
+              }
             }
-          }
-          
-          // Create or update PacketStock for each unique packet configuration
-          for (const [barcode, packetGroup] of packetGroups) {
-            try {
-              // Calculate cost per packet (landed price × items per packet)
-              const costPerPacket = batchInfo.costPrice * packetGroup.totalItemsPerPacket;
-              const landedPerPacket = batchInfo.landedPrice * packetGroup.totalItemsPerPacket;
-              
-              // Find existing packet stock or create new
-              let packetStock = await PacketStock.findOne({ barcode });
-              
-              if (packetStock) {
-                // Add to existing stock
-                await packetStock.addStock(
-                  packetGroup.count,
-                  dispatchOrder._id,
-                  costPerPacket,
-                  landedPerPacket
+            
+            // Create PacketStock for each color/size combination
+            for (const [key, looseItem] of looseItemGroups) {
+              try {
+                // Single-item composition for this color/size
+                const singleComposition = [{
+                  size: looseItem.size,
+                  color: looseItem.color,
+                  quantity: 1
+                }];
+                
+                // Generate unique barcode for this color/size combination
+                const looseBarcode = generatePacketBarcode(
+                  supplierId.toString(),
+                  productId.toString(),
+                  singleComposition,
+                  true // isLoose = true
                 );
-                console.log(`[Confirm Order] Added ${packetGroup.count} packets to existing PacketStock ${barcode}`);
+                
+                // Find existing packet stock or create new
+                let packetStock = await PacketStock.findOne({ barcode: looseBarcode });
+                
+                if (packetStock) {
+                  // Add to existing stock
+                  await packetStock.addStock(
+                    looseItem.quantity,
+                    dispatchOrder._id,
+                    batchInfo.costPrice,
+                    batchInfo.landedPrice
+                  );
+                  console.log(`[Confirm Order] Added ${looseItem.quantity} loose items (${looseItem.color}/${looseItem.size}) to existing PacketStock ${looseBarcode}`);
+                } else {
+                  // Create new packet stock for this loose item variant
+                  packetStock = new PacketStock({
+                    barcode: looseBarcode,
+                    product: productId,
+                    supplier: supplierId,
+                    composition: singleComposition,
+                    totalItemsPerPacket: 1,
+                    availablePackets: looseItem.quantity,
+                    costPricePerPacket: batchInfo.costPrice,
+                    landedPricePerPacket: batchInfo.landedPrice,
+                    suggestedSellingPrice: batchInfo.landedPrice * 1.20,
+                    isLoose: true,
+                    dispatchOrderHistory: [{
+                      dispatchOrderId: dispatchOrder._id,
+                      quantity: looseItem.quantity,
+                      costPricePerPacket: batchInfo.costPrice,
+                      landedPricePerPacket: batchInfo.landedPrice,
+                      addedAt: new Date()
+                    }]
+                  });
+                  await packetStock.save();
+                  console.log(`[Confirm Order] Created new loose item PacketStock ${looseBarcode} (${looseItem.color}/${looseItem.size}) with ${looseItem.quantity} items`);
+                }
+              } catch (looseStockError) {
+                console.error(`[Confirm Order] Failed to create/update loose PacketStock for ${looseItem.color}/${looseItem.size}:`, looseStockError.message);
+                // Don't fail the entire confirmation if packet stock creation fails
+              }
+            }
+          } else {
+            // ==========================================
+            // REGULAR PACKETS: One barcode per packet composition
+            // ==========================================
+            // Group packets by their composition to count duplicates
+            const packetGroups = new Map();
+            
+            for (const packet of item.packets) {
+              // Generate deterministic barcode for this packet composition
+              const barcode = generatePacketBarcode(
+                supplierId.toString(),
+                productId.toString(),
+                packet.composition,
+                false // isLoose = false for packets
+              );
+              
+              if (packetGroups.has(barcode)) {
+                packetGroups.get(barcode).count += 1;
               } else {
-                // Create new packet stock
-                packetStock = new PacketStock({
+                packetGroups.set(barcode, {
                   barcode,
-                  product: productId,
-                  supplier: supplierId,
-                  composition: packetGroup.composition,
-                  totalItemsPerPacket: packetGroup.totalItemsPerPacket,
-                  availablePackets: packetGroup.count,
-                  costPricePerPacket: costPerPacket,
-                  landedPricePerPacket: landedPerPacket,
-                  suggestedSellingPrice: landedPerPacket * 1.20,
-                  isLoose: false,
-                  dispatchOrderHistory: [{
-                    dispatchOrderId: dispatchOrder._id,
-                    quantity: packetGroup.count,
+                  composition: packet.composition,
+                  totalItemsPerPacket: packet.totalItems || packet.composition.reduce((sum, c) => sum + c.quantity, 0),
+                  count: 1
+                });
+              }
+            }
+            
+            // Create or update PacketStock for each unique packet configuration
+            for (const [barcode, packetGroup] of packetGroups) {
+              try {
+                // Calculate cost per packet (landed price × items per packet)
+                const costPerPacket = batchInfo.costPrice * packetGroup.totalItemsPerPacket;
+                const landedPerPacket = batchInfo.landedPrice * packetGroup.totalItemsPerPacket;
+                
+                // Find existing packet stock or create new
+                let packetStock = await PacketStock.findOne({ barcode });
+                
+                if (packetStock) {
+                  // Add to existing stock
+                  await packetStock.addStock(
+                    packetGroup.count,
+                    dispatchOrder._id,
+                    costPerPacket,
+                    landedPerPacket
+                  );
+                  console.log(`[Confirm Order] Added ${packetGroup.count} packets to existing PacketStock ${barcode}`);
+                } else {
+                  // Create new packet stock
+                  packetStock = new PacketStock({
+                    barcode,
+                    product: productId,
+                    supplier: supplierId,
+                    composition: packetGroup.composition,
+                    totalItemsPerPacket: packetGroup.totalItemsPerPacket,
+                    availablePackets: packetGroup.count,
                     costPricePerPacket: costPerPacket,
                     landedPricePerPacket: landedPerPacket,
-                    addedAt: new Date()
-                  }]
-                });
-                await packetStock.save();
-                console.log(`[Confirm Order] Created new PacketStock ${barcode} with ${packetGroup.count} packets`);
+                    suggestedSellingPrice: landedPerPacket * 1.20,
+                    isLoose: false,
+                    dispatchOrderHistory: [{
+                      dispatchOrderId: dispatchOrder._id,
+                      quantity: packetGroup.count,
+                      costPricePerPacket: costPerPacket,
+                      landedPricePerPacket: landedPerPacket,
+                      addedAt: new Date()
+                    }]
+                  });
+                  await packetStock.save();
+                  console.log(`[Confirm Order] Created new PacketStock ${barcode} with ${packetGroup.count} packets`);
+                }
+              } catch (packetStockError) {
+                console.error(`[Confirm Order] Failed to create/update PacketStock for barcode ${barcode}:`, packetStockError.message);
+                // Don't fail the entire confirmation if packet stock creation fails
               }
-            } catch (packetStockError) {
-              console.error(`[Confirm Order] Failed to create/update PacketStock for barcode ${barcode}:`, packetStockError.message);
-              // Don't fail the entire confirmation if packet stock creation fails
             }
           }
         } else {
