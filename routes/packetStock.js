@@ -517,4 +517,253 @@ router.post('/generate-barcode', auth, async (req, res) => {
   }
 });
 
+/**
+ * @route   POST /api/packet-stock/:id/break
+ * @desc    Break a packet and optionally sell some items, creating loose stock for remaining items
+ * @access  Private
+ * 
+ * This endpoint supports two modes:
+ * 1. Break during inventory management (no sale) - just creates loose stock
+ * 2. Break during sale - sells specific items and creates loose stock for remainder
+ */
+router.post('/:id/break', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      itemsToSell = [],  // Array of { size, color, quantity } to sell
+      saleReference = null,  // Optional: Sale ID if breaking during sale
+      notes = '',
+      mode = 'inventory'  // 'inventory' (just break) or 'sale' (break and sell)
+    } = req.body;
+    
+    // Find the packet stock
+    const packetStock = await PacketStock.findById(id)
+      .populate('product', 'name sku productCode')
+      .populate('supplier', 'name company');
+    
+    if (!packetStock) {
+      return res.status(404).json({
+        success: false,
+        message: 'Packet stock not found'
+      });
+    }
+    
+    if (packetStock.isLoose) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot break a loose item. This is already a single-item stock.'
+      });
+    }
+    
+    const actualAvailable = packetStock.availablePackets - packetStock.reservedPackets;
+    if (actualAvailable <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No packets available to break'
+      });
+    }
+    
+    // Validate itemsToSell against composition
+    const compositionMap = new Map();
+    packetStock.composition.forEach(c => {
+      const key = `${c.size}-${c.color}`;
+      compositionMap.set(key, c.quantity);
+    });
+    
+    // Check if itemsToSell is valid
+    let totalItemsToSell = 0;
+    for (const item of itemsToSell) {
+      const key = `${item.size}-${item.color}`;
+      const availableInPacket = compositionMap.get(key) || 0;
+      
+      if (item.quantity > availableInPacket) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot sell ${item.quantity} of ${item.color}/${item.size}. Only ${availableInPacket} available in packet.`
+        });
+      }
+      
+      if (item.quantity <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Quantity must be greater than 0'
+        });
+      }
+      
+      totalItemsToSell += item.quantity;
+    }
+    
+    // Calculate remaining items after selling
+    const remainingItems = [];
+    for (const comp of packetStock.composition) {
+      const sellItem = itemsToSell.find(s => s.size === comp.size && s.color === comp.color);
+      const soldQty = sellItem ? sellItem.quantity : 0;
+      const remaining = comp.quantity - soldQty;
+      
+      if (remaining > 0) {
+        remainingItems.push({
+          size: comp.size,
+          color: comp.color,
+          quantity: remaining
+        });
+      }
+    }
+    
+    // Decrement the packet count
+    packetStock.availablePackets -= 1;
+    
+    // Create or update loose stock for remaining items (if any)
+    let looseStockResult = null;
+    if (remainingItems.length > 0) {
+      looseStockResult = await PacketStock.findOrCreateLooseStock(
+        packetStock.product._id,
+        packetStock.supplier._id,
+        remainingItems,
+        packetStock._id
+      );
+      
+      // Copy pricing from original packet, prorated
+      if (looseStockResult.isNew) {
+        const totalRemainingItems = remainingItems.reduce((sum, r) => sum + r.quantity, 0);
+        const pricePerItem = packetStock.landedPricePerPacket / packetStock.totalItemsPerPacket;
+        
+        looseStockResult.looseStock.costPricePerPacket = pricePerItem * totalRemainingItems;
+        looseStockResult.looseStock.landedPricePerPacket = pricePerItem * totalRemainingItems;
+        looseStockResult.looseStock.suggestedSellingPrice = looseStockResult.looseStock.landedPricePerPacket * 1.20;
+        await looseStockResult.looseStock.save();
+      }
+    }
+    
+    // Record break history
+    packetStock.breakHistory.push({
+      brokenAt: new Date(),
+      brokenBy: req.user._id,
+      itemsSold: itemsToSell,
+      remainingItems: remainingItems,
+      loosePacketStockCreated: looseStockResult?.looseStock?._id || null,
+      saleReference: saleReference,
+      notes: notes
+    });
+    
+    await packetStock.save();
+    
+    // Build response
+    const response = {
+      success: true,
+      message: `Packet broken successfully. ${itemsToSell.length > 0 ? `${totalItemsToSell} items marked for sale.` : ''} ${remainingItems.length > 0 ? `${remainingItems.reduce((s, r) => s + r.quantity, 0)} items moved to loose stock.` : 'No remaining items.'}`,
+      data: {
+        originalPacket: {
+          id: packetStock._id,
+          barcode: packetStock.barcode,
+          remainingPackets: packetStock.availablePackets
+        },
+        itemsSold: itemsToSell,
+        itemsRemaining: remainingItems,
+        looseStock: looseStockResult ? {
+          id: looseStockResult.looseStock._id,
+          barcode: looseStockResult.looseStock.barcode,
+          isNew: looseStockResult.isNew,
+          totalItems: remainingItems.reduce((s, r) => s + r.quantity, 0),
+          availableUnits: looseStockResult.looseStock.availablePackets
+        } : null,
+        pricing: {
+          originalPacketPrice: packetStock.landedPricePerPacket,
+          pricePerItem: packetStock.landedPricePerPacket / packetStock.totalItemsPerPacket,
+          soldItemsValue: (packetStock.landedPricePerPacket / packetStock.totalItemsPerPacket) * totalItemsToSell,
+          looseStockValue: looseStockResult?.looseStock?.landedPricePerPacket || 0
+        }
+      }
+    };
+    
+    console.log(`[Packet Break] Packet ${packetStock.barcode} broken by user ${req.user._id}. Sold: ${totalItemsToSell} items. Remaining: ${remainingItems.reduce((s, r) => s + r.quantity, 0)} items.`);
+    
+    return res.json(response);
+    
+  } catch (error) {
+    console.error('Break packet error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+/**
+ * @route   GET /api/packet-stock/loose/:productId
+ * @desc    Get all loose stock entries for a product (for returns)
+ * @access  Private
+ */
+router.get('/loose/:productId', auth, async (req, res) => {
+  try {
+    const { productId } = req.params;
+    
+    const looseStocks = await PacketStock.find({
+      product: productId,
+      isLoose: true,
+      isActive: true,
+      availablePackets: { $gt: 0 }
+    })
+      .populate('supplier', 'name company')
+      .sort({ updatedAt: -1 });
+    
+    return res.json({
+      success: true,
+      data: looseStocks
+    });
+  } catch (error) {
+    console.error('Get loose stock error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
+/**
+ * @route   POST /api/packet-stock/loose/:id/add-items
+ * @desc    Add items back to existing loose stock (for returns)
+ * @access  Private
+ */
+router.post('/loose/:id/add-items', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { quantity = 1, reason = 'Return', notes = '' } = req.body;
+    
+    const looseStock = await PacketStock.findById(id);
+    
+    if (!looseStock) {
+      return res.status(404).json({
+        success: false,
+        message: 'Loose stock not found'
+      });
+    }
+    
+    if (!looseStock.isLoose) {
+      return res.status(400).json({
+        success: false,
+        message: 'This is a packet stock, not loose stock. Use different endpoint for packets.'
+      });
+    }
+    
+    await looseStock.addLooseItems(quantity, reason);
+    
+    console.log(`[Loose Stock] Added ${quantity} units to loose stock ${looseStock.barcode}. Reason: ${reason}. Notes: ${notes}`);
+    
+    return res.json({
+      success: true,
+      message: `Added ${quantity} unit(s) to loose stock`,
+      data: {
+        barcode: looseStock.barcode,
+        newAvailable: looseStock.availablePackets
+      }
+    });
+  } catch (error) {
+    console.error('Add to loose stock error:', error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
 module.exports = router;

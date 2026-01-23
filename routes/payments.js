@@ -621,7 +621,7 @@ router.get('/:paymentNumber/receipt', auth, async (req, res) => {
     // Format receipt data
     const receiptData = {
       receiptNumber: payment.paymentNumber,
-      date: payment.paymentDate,
+      date: payment.createdAt || payment.paymentDate,
       customer: {
         name: payment.customerId?.name || 'Unknown',
         company: payment.customerId?.company || '',

@@ -110,6 +110,43 @@ const packetStockSchema = new mongoose.Schema({
     generatedAt: Date
   },
   
+  // Break history - tracks when packets are broken and items sold individually
+  breakHistory: [{
+    brokenAt: {
+      type: Date,
+      default: Date.now
+    },
+    brokenBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    },
+    itemsSold: [{
+      size: String,
+      color: String,
+      quantity: Number
+    }],
+    remainingItems: [{
+      size: String,
+      color: String,
+      quantity: Number
+    }],
+    loosePacketStockCreated: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PacketStock'
+    },
+    saleReference: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Sale'
+    },
+    notes: String
+  }],
+
+  // Reference to parent packet if this is a broken/orphan stock
+  parentPacketStock: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'PacketStock'
+  },
+
   // Status
   isActive: {
     type: Boolean,
@@ -200,6 +237,71 @@ packetStockSchema.methods.restorePackets = function(quantity, reason = 'SaleRetu
     this.soldPackets -= quantity;
   }
   return this.save();
+};
+
+// Method to add loose items back (for returns to existing loose stock)
+packetStockSchema.methods.addLooseItems = function(quantity, reason = 'SaleReturn') {
+  if (!this.isLoose) {
+    throw new Error('Cannot add loose items to a packet stock. Use restorePackets instead.');
+  }
+  this.availablePackets += quantity;
+  return this.save();
+};
+
+// Static method to find or create loose stock for remaining items after breaking
+packetStockSchema.statics.findOrCreateLooseStock = async function(productId, supplierId, composition, parentPacketStockId) {
+  const { generatePacketBarcode } = require('../utils/barcodeGenerator');
+  const QRCode = require('qrcode');
+  
+  // Generate barcode for this loose composition
+  const barcode = generatePacketBarcode(supplierId.toString(), productId.toString(), composition, true);
+  
+  // Calculate total items
+  const totalItems = composition.reduce((sum, item) => sum + item.quantity, 0);
+  
+  // Find existing loose stock with same barcode
+  let looseStock = await this.findOne({ barcode, isActive: true });
+  
+  if (looseStock) {
+    // Add to existing loose stock
+    looseStock.availablePackets += 1;
+    await looseStock.save();
+    return { looseStock, isNew: false };
+  }
+  
+  // Create new loose stock entry
+  looseStock = new this({
+    barcode,
+    product: productId,
+    supplier: supplierId,
+    composition,
+    totalItemsPerPacket: totalItems,
+    availablePackets: 1,
+    reservedPackets: 0,
+    soldPackets: 0,
+    isLoose: true,
+    parentPacketStock: parentPacketStockId,
+    dispatchOrderHistory: []
+  });
+  
+  // Generate QR code
+  try {
+    const qrDataUrl = await QRCode.toDataURL(barcode, {
+      errorCorrectionLevel: 'M',
+      type: 'image/png',
+      scale: 6,
+      margin: 1
+    });
+    looseStock.qrCode = {
+      dataUrl: qrDataUrl,
+      generatedAt: new Date()
+    };
+  } catch (qrError) {
+    console.warn('QR code generation failed for loose stock:', qrError.message);
+  }
+  
+  await looseStock.save();
+  return { looseStock, isNew: true };
 };
 
 // Pre-save: validate composition sum equals totalItemsPerPacket

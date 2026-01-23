@@ -11,6 +11,7 @@ const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 const { generateSignedUrls } = require('../utils/imageUpload');
+const { generatePacketBarcode } = require('../utils/barcodeGenerator');
 
 const router = express.Router();
 
@@ -234,14 +235,62 @@ async function processSaleReturn(returnId, userId) {
         await inventory.save({ session });
       }
 
-      // Restore PacketStock if the original sale item was a packet sale
+      // Handle PacketStock restoration
       const originalSaleItem = originalSale?.items?.[item.itemIndex];
+      
       if (originalSaleItem?.isPacketSale && originalSaleItem?.packetStock) {
         try {
           const packetStock = await PacketStock.findById(originalSaleItem.packetStock).session(session);
+          
           if (packetStock) {
-            await packetStock.restorePackets(item.returnedQuantity, 'SaleReturn');
-            console.log(`[Sale Return] Restored ${item.returnedQuantity} packets to PacketStock ${packetStock.barcode}`);
+            // Check if the packet was broken (has break history referencing this sale)
+            const breakRecord = packetStock.breakHistory?.find(
+              bh => bh.saleReference?.toString() === saleReturn.sale._id.toString()
+            );
+            
+            if (breakRecord && breakRecord.loosePacketStockCreated) {
+              // This was a broken packet sale - return items to loose stock
+              const looseStock = await PacketStock.findById(breakRecord.loosePacketStockCreated).session(session);
+              
+              if (looseStock && looseStock.isLoose) {
+                // Add the returned items back to loose stock
+                looseStock.availablePackets += item.returnedQuantity;
+                await looseStock.save({ session });
+                console.log(`[Sale Return] Added ${item.returnedQuantity} items back to loose stock ${looseStock.barcode}`);
+              } else {
+                // Loose stock not found, try to find/create matching loose stock
+                console.warn(`[Sale Return] Loose stock ${breakRecord.loosePacketStockCreated} not found. Creating new entry.`);
+                
+                // Get the composition from break record
+                const returnComposition = breakRecord.itemsSold || [];
+                if (returnComposition.length > 0) {
+                  // Find or create loose stock for returned items
+                  const product = await Product.findById(item.product._id).session(session);
+                  const supplier = packetStock.supplier;
+                  
+                  if (product && supplier) {
+                    const { looseStock: newLooseStock } = await PacketStock.findOrCreateLooseStock(
+                      item.product._id,
+                      supplier,
+                      returnComposition,
+                      packetStock._id
+                    );
+                    
+                    // The findOrCreateLooseStock already adds 1, so add remaining if needed
+                    if (item.returnedQuantity > 1) {
+                      newLooseStock.availablePackets += (item.returnedQuantity - 1);
+                      await newLooseStock.save({ session });
+                    }
+                    
+                    console.log(`[Sale Return] Created/updated loose stock ${newLooseStock.barcode} for returned items`);
+                  }
+                }
+              }
+            } else {
+              // Regular packet sale (not broken) - restore full packets
+              await packetStock.restorePackets(item.returnedQuantity, 'SaleReturn');
+              console.log(`[Sale Return] Restored ${item.returnedQuantity} packets to PacketStock ${packetStock.barcode}`);
+            }
           }
         } catch (packetError) {
           console.error(`[Sale Return] Error restoring PacketStock:`, packetError.message);
