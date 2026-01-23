@@ -612,45 +612,75 @@ router.post('/:id/break', auth, async (req, res) => {
     // Decrement the packet count
     packetStock.availablePackets -= 1;
     
-    // Create or update loose stock for remaining items (if any)
-    let looseStockResult = null;
+    // Create separate loose stock entries for each remaining variant (size/color combination)
+    const looseStocksCreated = [];
+    const pricePerItem = packetStock.landedPricePerPacket / packetStock.totalItemsPerPacket;
+    
     if (remainingItems.length > 0) {
-      looseStockResult = await PacketStock.findOrCreateLooseStock(
-        packetStock.product._id,
-        packetStock.supplier._id,
-        remainingItems,
-        packetStock._id
-      );
-      
-      // Copy pricing from original packet, prorated
-      if (looseStockResult.isNew) {
-        const totalRemainingItems = remainingItems.reduce((sum, r) => sum + r.quantity, 0);
-        const pricePerItem = packetStock.landedPricePerPacket / packetStock.totalItemsPerPacket;
+      for (const remainingItem of remainingItems) {
+        // Create single-item composition for this variant
+        const singleVariantComposition = [{
+          size: remainingItem.size,
+          color: remainingItem.color,
+          quantity: 1  // Each loose stock unit represents 1 item
+        }];
         
-        looseStockResult.looseStock.costPricePerPacket = pricePerItem * totalRemainingItems;
-        looseStockResult.looseStock.landedPricePerPacket = pricePerItem * totalRemainingItems;
-        looseStockResult.looseStock.suggestedSellingPrice = looseStockResult.looseStock.landedPricePerPacket * 1.20;
-        await looseStockResult.looseStock.save();
+        // Find or create loose stock for this specific variant
+        const { looseStock, isNew } = await PacketStock.findOrCreateLooseStock(
+          packetStock.product._id,
+          packetStock.supplier._id,
+          singleVariantComposition,
+          packetStock._id
+        );
+        
+        // For newly created loose stock, set the pricing
+        if (isNew) {
+          looseStock.costPricePerPacket = pricePerItem;
+          looseStock.landedPricePerPacket = pricePerItem;
+          looseStock.suggestedSellingPrice = pricePerItem * 1.20;
+          await looseStock.save();
+        }
+        
+        // Add additional units if quantity > 1 (first unit already added by findOrCreateLooseStock)
+        if (remainingItem.quantity > 1) {
+          looseStock.availablePackets += (remainingItem.quantity - 1);
+          await looseStock.save();
+        }
+        
+        // Track this loose stock creation
+        looseStocksCreated.push({
+          looseStockId: looseStock._id,
+          barcode: looseStock.barcode,
+          size: remainingItem.size,
+          color: remainingItem.color,
+          quantity: remainingItem.quantity
+        });
+        
+        console.log(`[Packet Break] Created/updated loose stock ${looseStock.barcode} for ${remainingItem.color}/${remainingItem.size} x${remainingItem.quantity}`);
       }
     }
     
-    // Record break history
+    // Record break history with new array format
     packetStock.breakHistory.push({
       brokenAt: new Date(),
       brokenBy: req.user._id,
       itemsSold: itemsToSell,
       remainingItems: remainingItems,
-      loosePacketStockCreated: looseStockResult?.looseStock?._id || null,
+      loosePacketStocksCreated: looseStocksCreated,
+      // Keep backward compatibility - set first loose stock as the legacy field
+      loosePacketStockCreated: looseStocksCreated.length > 0 ? looseStocksCreated[0].looseStockId : null,
       saleReference: saleReference,
       notes: notes
     });
     
     await packetStock.save();
     
-    // Build response
+    // Build response with detailed loose stock info
+    const totalRemainingItems = remainingItems.reduce((s, r) => s + r.quantity, 0);
+    
     const response = {
       success: true,
-      message: `Packet broken successfully. ${itemsToSell.length > 0 ? `${totalItemsToSell} items marked for sale.` : ''} ${remainingItems.length > 0 ? `${remainingItems.reduce((s, r) => s + r.quantity, 0)} items moved to loose stock.` : 'No remaining items.'}`,
+      message: `Packet broken successfully. ${itemsToSell.length > 0 ? `${totalItemsToSell} items marked for sale.` : ''} ${remainingItems.length > 0 ? `${totalRemainingItems} items moved to ${looseStocksCreated.length} loose stock variant(s).` : 'No remaining items.'}`,
       data: {
         originalPacket: {
           id: packetStock._id,
@@ -659,23 +689,32 @@ router.post('/:id/break', auth, async (req, res) => {
         },
         itemsSold: itemsToSell,
         itemsRemaining: remainingItems,
-        looseStock: looseStockResult ? {
-          id: looseStockResult.looseStock._id,
-          barcode: looseStockResult.looseStock.barcode,
-          isNew: looseStockResult.isNew,
-          totalItems: remainingItems.reduce((s, r) => s + r.quantity, 0),
-          availableUnits: looseStockResult.looseStock.availablePackets
+        looseStocks: looseStocksCreated.map(ls => ({
+          id: ls.looseStockId,
+          barcode: ls.barcode,
+          size: ls.size,
+          color: ls.color,
+          quantity: ls.quantity,
+          pricePerItem: pricePerItem
+        })),
+        // Keep backward compatible single looseStock response
+        looseStock: looseStocksCreated.length > 0 ? {
+          id: looseStocksCreated[0].looseStockId,
+          barcode: looseStocksCreated[0].barcode,
+          isNew: true,
+          totalItems: totalRemainingItems,
+          availableUnits: totalRemainingItems
         } : null,
         pricing: {
           originalPacketPrice: packetStock.landedPricePerPacket,
-          pricePerItem: packetStock.landedPricePerPacket / packetStock.totalItemsPerPacket,
-          soldItemsValue: (packetStock.landedPricePerPacket / packetStock.totalItemsPerPacket) * totalItemsToSell,
-          looseStockValue: looseStockResult?.looseStock?.landedPricePerPacket || 0
+          pricePerItem: pricePerItem,
+          soldItemsValue: pricePerItem * totalItemsToSell,
+          looseStockValue: pricePerItem * totalRemainingItems
         }
       }
     };
     
-    console.log(`[Packet Break] Packet ${packetStock.barcode} broken by user ${req.user._id}. Sold: ${totalItemsToSell} items. Remaining: ${remainingItems.reduce((s, r) => s + r.quantity, 0)} items.`);
+    console.log(`[Packet Break] Packet ${packetStock.barcode} broken by user ${req.user._id}. Sold: ${totalItemsToSell} items. Remaining: ${totalRemainingItems} items across ${looseStocksCreated.length} variants.`);
     
     return res.json(response);
     

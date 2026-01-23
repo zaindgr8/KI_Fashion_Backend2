@@ -130,10 +130,22 @@ const packetStockSchema = new mongoose.Schema({
       color: String,
       quantity: Number
     }],
+    // DEPRECATED: Use loosePacketStocksCreated instead (kept for backward compatibility)
     loosePacketStockCreated: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'PacketStock'
     },
+    // Array of loose stocks created - one per unique variant (size/color)
+    loosePacketStocksCreated: [{
+      looseStockId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'PacketStock'
+      },
+      barcode: String,
+      size: String,
+      color: String,
+      quantity: Number
+    }],
     saleReference: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Sale'

@@ -248,41 +248,95 @@ async function processSaleReturn(returnId, userId) {
               bh => bh.saleReference?.toString() === saleReturn.sale._id.toString()
             );
             
-            if (breakRecord && breakRecord.loosePacketStockCreated) {
+            if (breakRecord) {
               // This was a broken packet sale - return items to loose stock
-              const looseStock = await PacketStock.findById(breakRecord.loosePacketStockCreated).session(session);
+              // Check for new array format first, then fall back to old format
+              const looseStocksInfo = breakRecord.loosePacketStocksCreated || [];
+              const hasNewFormat = looseStocksInfo.length > 0;
               
-              if (looseStock && looseStock.isLoose) {
-                // Add the returned items back to loose stock
-                looseStock.availablePackets += item.returnedQuantity;
-                await looseStock.save({ session });
-                console.log(`[Sale Return] Added ${item.returnedQuantity} items back to loose stock ${looseStock.barcode}`);
-              } else {
-                // Loose stock not found, try to find/create matching loose stock
-                console.warn(`[Sale Return] Loose stock ${breakRecord.loosePacketStockCreated} not found. Creating new entry.`);
+              if (hasNewFormat) {
+                // New format: multiple loose stocks per variant
+                // Find which loose stocks correspond to the returned items
+                const returnedItems = breakRecord.itemsSold || [];
                 
-                // Get the composition from break record
-                const returnComposition = breakRecord.itemsSold || [];
-                if (returnComposition.length > 0) {
-                  // Find or create loose stock for returned items
-                  const product = await Product.findById(item.product._id).session(session);
-                  const supplier = packetStock.supplier;
+                for (const soldItem of returnedItems) {
+                  // Find the loose stock for this variant
+                  const looseStockInfo = looseStocksInfo.find(
+                    ls => ls.size === soldItem.size && ls.color === soldItem.color
+                  );
                   
-                  if (product && supplier) {
+                  if (looseStockInfo) {
+                    const looseStock = await PacketStock.findById(looseStockInfo.looseStockId).session(session);
+                    
+                    if (looseStock && looseStock.isLoose) {
+                      // Add the returned quantity back to this variant's loose stock
+                      const returnQty = soldItem.quantity; // Return same quantity that was sold
+                      looseStock.availablePackets += returnQty;
+                      await looseStock.save({ session });
+                      console.log(`[Sale Return] Added ${returnQty} items back to loose stock ${looseStock.barcode} (${soldItem.color}/${soldItem.size})`);
+                    }
+                  } else {
+                    // No loose stock found for this variant - create new one
+                    console.warn(`[Sale Return] No loose stock found for variant ${soldItem.color}/${soldItem.size}. Creating new entry.`);
+                    
+                    const singleVariantComposition = [{
+                      size: soldItem.size,
+                      color: soldItem.color,
+                      quantity: 1
+                    }];
+                    
                     const { looseStock: newLooseStock } = await PacketStock.findOrCreateLooseStock(
                       item.product._id,
-                      supplier,
-                      returnComposition,
+                      packetStock.supplier,
+                      singleVariantComposition,
                       packetStock._id
                     );
                     
-                    // The findOrCreateLooseStock already adds 1, so add remaining if needed
-                    if (item.returnedQuantity > 1) {
-                      newLooseStock.availablePackets += (item.returnedQuantity - 1);
+                    // Add remaining quantity (first unit already added)
+                    if (soldItem.quantity > 1) {
+                      newLooseStock.availablePackets += (soldItem.quantity - 1);
                       await newLooseStock.save({ session });
                     }
                     
-                    console.log(`[Sale Return] Created/updated loose stock ${newLooseStock.barcode} for returned items`);
+                    console.log(`[Sale Return] Created new loose stock ${newLooseStock.barcode} for returned items`);
+                  }
+                }
+              } else if (breakRecord.loosePacketStockCreated) {
+                // Old format: single loose stock for all remaining items (backward compatibility)
+                const looseStock = await PacketStock.findById(breakRecord.loosePacketStockCreated).session(session);
+                
+                if (looseStock && looseStock.isLoose) {
+                  // Add the returned items back to loose stock
+                  looseStock.availablePackets += item.returnedQuantity;
+                  await looseStock.save({ session });
+                  console.log(`[Sale Return] Added ${item.returnedQuantity} items back to loose stock ${looseStock.barcode} (legacy format)`);
+                } else {
+                  // Loose stock not found, try to find/create matching loose stock
+                  console.warn(`[Sale Return] Loose stock ${breakRecord.loosePacketStockCreated} not found. Creating new entry.`);
+                  
+                  // Get the composition from break record
+                  const returnComposition = breakRecord.itemsSold || [];
+                  if (returnComposition.length > 0) {
+                    // Find or create loose stock for returned items
+                    const product = await Product.findById(item.product._id).session(session);
+                    const supplier = packetStock.supplier;
+                    
+                    if (product && supplier) {
+                      const { looseStock: newLooseStock } = await PacketStock.findOrCreateLooseStock(
+                        item.product._id,
+                        supplier,
+                        returnComposition,
+                        packetStock._id
+                      );
+                      
+                      // The findOrCreateLooseStock already adds 1, so add remaining if needed
+                      if (item.returnedQuantity > 1) {
+                        newLooseStock.availablePackets += (item.returnedQuantity - 1);
+                        await newLooseStock.save({ session });
+                      }
+                      
+                      console.log(`[Sale Return] Created/updated loose stock ${newLooseStock.barcode} for returned items`);
+                    }
                   }
                 }
               }
