@@ -1009,4 +1009,664 @@ router.get('/stock-summary', auth, async (req, res) => {
   }
 });
 
+// ==========================================
+// NEW DETAILED REPORT ENDPOINTS
+// ==========================================
+
+// Import additional models for new reports
+const Return = require('../models/Return');
+const SaleReturn = require('../models/SaleReturn');
+const Payment = require('../models/Payment');
+
+// Profit & Loss Report
+router.get('/profit-loss', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const dateCondition = {};
+    if (startDate) dateCondition.$gte = new Date(startDate);
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      dateCondition.$lte = end;
+    }
+
+    // Total Sales
+    const salesAgg = await Sale.aggregate([
+      {
+        $match: {
+          ...(Object.keys(dateCondition).length > 0 && { saleDate: dateCondition })
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalSales: { $sum: '$grandTotal' }
+        }
+      }
+    ]);
+
+    // Sales Returns
+    const salesReturnsAgg = await SaleReturn.aggregate([
+      {
+        $match: {
+          status: 'approved',
+          ...(Object.keys(dateCondition).length > 0 && { returnedAt: dateCondition })
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalReturns: { $sum: '$totalReturnValue' }
+        }
+      }
+    ]);
+
+    // Total Purchases
+    const purchasesAgg = await DispatchOrder.aggregate([
+      {
+        $match: {
+          status: 'confirmed',
+          ...(Object.keys(dateCondition).length > 0 && { dispatchDate: dateCondition })
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalPurchases: { $sum: '$grandTotal' }
+        }
+      }
+    ]);
+
+    // Purchase Returns
+    const purchaseReturnsAgg = await Return.aggregate([
+      {
+        $match: {
+          ...(Object.keys(dateCondition).length > 0 && { returnedAt: dateCondition })
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalReturns: { $sum: '$totalReturnValue' }
+        }
+      }
+    ]);
+
+    // Expenses by category
+    const expensesAgg = await Expense.aggregate([
+      {
+        $match: {
+          status: 'approved',
+          ...(Object.keys(dateCondition).length > 0 && { expenseDate: dateCondition })
+        }
+      },
+      {
+        $lookup: {
+          from: 'costtypes',
+          localField: 'costType',
+          foreignField: '_id',
+          as: 'costTypeInfo'
+        }
+      },
+      { $unwind: { path: '$costTypeInfo', preserveNullAndEmptyArrays: true } },
+      {
+        $group: {
+          _id: '$costTypeInfo.name',
+          totalAmount: { $sum: { $add: ['$amount', { $ifNull: ['$taxAmount', 0] }] } }
+        }
+      }
+    ]);
+
+    const totalSales = salesAgg[0]?.totalSales || 0;
+    const salesReturns = salesReturnsAgg[0]?.totalReturns || 0;
+    const totalPurchases = purchasesAgg[0]?.totalPurchases || 0;
+    const purchaseReturns = purchaseReturnsAgg[0]?.totalReturns || 0;
+    const totalExpenses = expensesAgg.reduce((sum, e) => sum + e.totalAmount, 0);
+    
+    const netSales = totalSales - salesReturns;
+    const netPurchases = totalPurchases - purchaseReturns;
+    const grossProfit = netSales - netPurchases;
+    const netProfit = grossProfit - totalExpenses;
+    const profitMargin = netSales > 0 ? ((netProfit / netSales) * 100).toFixed(2) : 0;
+
+    res.json({
+      success: true,
+      data: {
+        totalSales,
+        salesReturns,
+        totalPurchases,
+        purchaseReturns,
+        totalExpenses,
+        expensesByCategory: expensesAgg,
+        grossProfit,
+        netProfit,
+        profitMargin
+      }
+    });
+  } catch (error) {
+    console.error('Profit/Loss report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Daily Sales Report
+router.get('/daily-sales', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.saleDate = {};
+      if (startDate) matchConditions.saleDate.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.saleDate.$lte = end;
+      }
+    }
+
+    const sales = await Sale.find(matchConditions)
+      .populate('buyer', 'name company')
+      .populate('items.product', 'name productCode')
+      .sort({ saleDate: -1 })
+      .lean();
+
+    // Calculate amounts
+    const salesWithAmounts = sales.map(sale => {
+      const amountPaid = (sale.cashPayment || 0) + (sale.bankPayment || 0);
+      return {
+        ...sale,
+        amountPaid,
+        balance: (sale.grandTotal || 0) - amountPaid
+      };
+    });
+
+    res.json({
+      success: true,
+      data: {
+        sales: salesWithAmounts,
+        summary: {
+          totalSales: sales.length,
+          totalAmount: sales.reduce((sum, s) => sum + (s.grandTotal || 0), 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Daily sales report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Daily Buying Report
+router.get('/daily-buying', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.dispatchDate = {};
+      if (startDate) matchConditions.dispatchDate.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.dispatchDate.$lte = end;
+      }
+    }
+
+    const purchases = await DispatchOrder.find(matchConditions)
+      .populate('supplier', 'name company')
+      .populate('items.product', 'name productCode')
+      .sort({ dispatchDate: -1 })
+      .lean();
+
+    // Calculate paid amounts from payments
+    const purchasesWithAmounts = await Promise.all(purchases.map(async (purchase) => {
+      const payments = await Payment.find({ 
+        dispatchOrder: purchase._id,
+        type: 'supplier'
+      }).lean();
+      
+      const amountPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+      
+      return {
+        ...purchase,
+        amountPaid,
+        balance: (purchase.grandTotal || 0) - amountPaid
+      };
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        purchases: purchasesWithAmounts,
+        summary: {
+          totalOrders: purchases.length,
+          totalAmount: purchases.reduce((sum, p) => sum + (p.grandTotal || 0), 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Daily buying report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Sales Product-wise Report
+router.get('/sales-product-wise', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.saleDate = {};
+      if (startDate) matchConditions.saleDate.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.saleDate.$lte = end;
+      }
+    }
+
+    const productSales = await Sale.aggregate([
+      { $match: matchConditions },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: '$items.product',
+          totalQuantity: { $sum: '$items.quantity' },
+          totalRevenue: { $sum: '$items.totalPrice' },
+          avgUnitPrice: { $avg: '$items.unitPrice' }
+        }
+      },
+      {
+        $lookup: {
+          from: 'products',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'productInfo'
+        }
+      },
+      { $unwind: { path: '$productInfo', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          productCode: '$productInfo.productCode',
+          productName: '$productInfo.name',
+          sku: '$productInfo.sku',
+          totalQuantity: 1,
+          totalRevenue: 1,
+          avgUnitPrice: 1
+        }
+      },
+      { $sort: { totalRevenue: -1 } }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        products: productSales,
+        summary: {
+          totalProducts: productSales.length,
+          totalQuantity: productSales.reduce((sum, p) => sum + p.totalQuantity, 0),
+          totalRevenue: productSales.reduce((sum, p) => sum + p.totalRevenue, 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Sales product-wise report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Buying Product-wise Report
+router.get('/buying-product-wise', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.dispatchDate = {};
+      if (startDate) matchConditions.dispatchDate.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.dispatchDate.$lte = end;
+      }
+    }
+
+    const productPurchases = await DispatchOrder.aggregate([
+      { $match: matchConditions },
+      { $unwind: '$items' },
+      {
+        $group: {
+          _id: '$items.product',
+          totalQuantity: { $sum: '$items.quantity' },
+          totalCost: { $sum: { $multiply: ['$items.quantity', '$items.costPrice'] } },
+          avgCostPrice: { $avg: '$items.costPrice' }
+        }
+      },
+      {
+        $lookup: {
+          from: 'products',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'productInfo'
+        }
+      },
+      { $unwind: { path: '$productInfo', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          productCode: '$productInfo.productCode',
+          productName: '$productInfo.name',
+          sku: '$productInfo.sku',
+          totalQuantity: 1,
+          totalCost: 1,
+          avgCostPrice: 1
+        }
+      },
+      { $sort: { totalCost: -1 } }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        products: productPurchases,
+        summary: {
+          totalProducts: productPurchases.length,
+          totalQuantity: productPurchases.reduce((sum, p) => sum + p.totalQuantity, 0),
+          totalCost: productPurchases.reduce((sum, p) => sum + p.totalCost, 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Buying product-wise report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Stock in Hand Report
+router.get('/stock-in-hand', auth, async (req, res) => {
+  try {
+    const stockData = await Inventory.aggregate([
+      { $match: { isActive: true } },
+      {
+        $lookup: {
+          from: 'products',
+          localField: 'product',
+          foreignField: '_id',
+          as: 'productInfo'
+        }
+      },
+      { $unwind: '$productInfo' },
+      {
+        $project: {
+          productCode: '$productInfo.productCode',
+          productName: '$productInfo.name',
+          sku: '$productInfo.sku',
+          currentStock: 1,
+          stockInHand: '$currentStock',
+          reorderLevel: 1,
+          averageCostPrice: 1,
+          totalValue: 1,
+          value: '$totalValue',
+          needsReorder: 1
+        }
+      },
+      { $sort: { currentStock: -1 } }
+    ]);
+
+    const summary = {
+      totalItems: stockData.length,
+      totalStock: stockData.reduce((sum, p) => sum + (p.currentStock || 0), 0),
+      totalValue: stockData.reduce((sum, p) => sum + (p.totalValue || 0), 0),
+      lowStockCount: stockData.filter(p => p.needsReorder).length
+    };
+
+    res.json({
+      success: true,
+      data: {
+        products: stockData,
+        stockLevels: stockData,
+        summary
+      }
+    });
+  } catch (error) {
+    console.error('Stock in hand report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Receivables Report
+router.get('/receivables', auth, async (req, res) => {
+  try {
+    const receivables = await Sale.aggregate([
+      {
+        $group: {
+          _id: '$buyer',
+          totalSales: { $sum: '$grandTotal' },
+          amountReceived: { $sum: { $add: [{ $ifNull: ['$cashPayment', 0] }, { $ifNull: ['$bankPayment', 0] }] } },
+          lastSaleDate: { $max: '$saleDate' },
+          orderCount: { $sum: 1 }
+        }
+      },
+      {
+        $lookup: {
+          from: 'buyers',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'buyerInfo'
+        }
+      },
+      { $unwind: { path: '$buyerInfo', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          name: '$buyerInfo.name',
+          company: '$buyerInfo.company',
+          totalSales: 1,
+          amountReceived: 1,
+          amountGiven: '$amountReceived',
+          outstanding: { $subtract: ['$totalSales', '$amountReceived'] },
+          ledgerBalance: { $subtract: ['$totalSales', '$amountReceived'] },
+          lastPaymentDate: '$lastSaleDate',
+          lastPurchaseDate: '$lastSaleDate',
+          orderCount: 1
+        }
+      },
+      { $match: { outstanding: { $gt: 0 } } },
+      { $sort: { outstanding: -1 } }
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        customers: receivables,
+        receivables,
+        summary: {
+          totalCustomers: receivables.length,
+          totalOutstanding: receivables.reduce((sum, r) => sum + r.outstanding, 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Receivables report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Payables Report
+router.get('/payables', auth, async (req, res) => {
+  try {
+    // Get all dispatch orders grouped by supplier
+    const purchasesBySupplier = await DispatchOrder.aggregate([
+      {
+        $group: {
+          _id: '$supplier',
+          totalPurchases: { $sum: '$grandTotal' },
+          lastPurchaseDate: { $max: '$dispatchDate' },
+          orderCount: { $sum: 1 }
+        }
+      },
+      {
+        $lookup: {
+          from: 'suppliers',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'supplierInfo'
+        }
+      },
+      { $unwind: { path: '$supplierInfo', preserveNullAndEmptyArrays: true } }
+    ]);
+
+    // Get payments by supplier
+    const paymentsBySupplier = await Payment.aggregate([
+      { $match: { type: 'supplier' } },
+      {
+        $group: {
+          _id: '$supplier',
+          totalPaid: { $sum: '$amount' },
+          lastPaymentDate: { $max: '$paymentDate' }
+        }
+      }
+    ]);
+
+    // Merge data
+    const payables = purchasesBySupplier.map(purchase => {
+      const payment = paymentsBySupplier.find(p => 
+        p._id?.toString() === purchase._id?.toString()
+      );
+      const amountPaid = payment?.totalPaid || 0;
+      const outstanding = (purchase.totalPurchases || 0) - amountPaid;
+      
+      return {
+        _id: purchase._id,
+        name: purchase.supplierInfo?.name,
+        supplierName: purchase.supplierInfo?.name,
+        company: purchase.supplierInfo?.company,
+        totalPurchases: purchase.totalPurchases,
+        totalAmount: purchase.totalPurchases,
+        amountPaid,
+        outstanding,
+        balance: outstanding,
+        lastPaymentDate: payment?.lastPaymentDate || purchase.lastPurchaseDate,
+        orderCount: purchase.orderCount
+      };
+    }).filter(p => p.outstanding > 0);
+
+    res.json({
+      success: true,
+      data: {
+        suppliers: payables,
+        payables,
+        summary: {
+          totalSuppliers: payables.length,
+          totalOutstanding: payables.reduce((sum, p) => sum + p.outstanding, 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Payables report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Activity Log Report (placeholder - requires ActivityLog model)
+router.get('/activity-log', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    // For now, return empty data since ActivityLog model doesn't exist yet
+    // You can implement this later by creating an ActivityLog model and middleware
+    
+    res.json({
+      success: true,
+      data: {
+        activities: [],
+        logs: [],
+        message: 'Activity logging is not yet implemented. Create an ActivityLog model and middleware to track user activities.'
+      }
+    });
+  } catch (error) {
+    console.error('Activity log report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Sales Returns Report
+router.get('/sales-returns', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.returnedAt = {};
+      if (startDate) matchConditions.returnedAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.returnedAt.$lte = end;
+      }
+    }
+
+    const returns = await SaleReturn.find(matchConditions)
+      .populate('sale', 'saleNumber')
+      .populate('buyer', 'name company')
+      .populate('items.product', 'name productCode')
+      .sort({ returnedAt: -1 })
+      .lean();
+
+    res.json({
+      success: true,
+      data: {
+        returns,
+        summary: {
+          totalReturns: returns.length,
+          totalValue: returns.reduce((sum, r) => sum + (r.totalReturnValue || 0), 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Sales returns report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Buying Returns Report
+router.get('/buying-returns', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.returnedAt = {};
+      if (startDate) matchConditions.returnedAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.returnedAt.$lte = end;
+      }
+    }
+
+    const returns = await Return.find(matchConditions)
+      .populate('dispatchOrder', 'orderNumber')
+      .populate('supplier', 'name company')
+      .populate('items.product', 'name productCode')
+      .sort({ returnedAt: -1 })
+      .lean();
+
+    res.json({
+      success: true,
+      data: {
+        returns,
+        summary: {
+          totalReturns: returns.length,
+          totalValue: returns.reduce((sum, r) => sum + (r.totalReturnValue || 0), 0)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Buying returns report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;

@@ -489,7 +489,13 @@ router.get('/all', auth, async (req, res) => {
       endDate
     } = req.query;
 
-    const query = { paymentType: 'customer' };
+    // Query for customer payments - include payments where paymentType is 'customer' OR not set (legacy)
+    const query = { 
+      $or: [
+        { paymentType: 'customer' },
+        { paymentType: { $exists: false } }
+      ]
+    };
 
     if (status !== 'all') {
       query.status = status;
