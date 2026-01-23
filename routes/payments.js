@@ -33,7 +33,7 @@ router.post('/customer', auth, async (req, res) => {
   });
 
   try {
-    const { customerId, amount, paymentMethod, date, description } = req.body;
+    const { customerId, amount, paymentMethod, date, description, paymentDirection = 'credit', debitReason } = req.body;
 
     // Validation
     if (!customerId) {
@@ -57,6 +57,25 @@ router.post('/customer', auth, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Payment method must be 'cash' or 'bank'"
+      });
+    }
+
+    // Validate paymentDirection
+    if (!['credit', 'debit'].includes(paymentDirection)) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: "Payment direction must be 'credit' or 'debit'"
+      });
+    }
+
+    // Validate debitReason if direction is debit
+    const validDebitReasons = ['refund', 'credit_note', 'price_adjustment', 'goodwill', 'other'];
+    if (paymentDirection === 'debit' && (!debitReason || !validDebitReasons.includes(debitReason))) {
+      await session.abortTransaction();
+      return res.status(400).json({
+        success: false,
+        message: 'Debit reason is required for debit transactions. Valid reasons: ' + validDebitReasons.join(', ')
       });
     }
 
@@ -85,6 +104,10 @@ router.post('/customer', auth, async (req, res) => {
     console.log(`Customer: ${customer.name} (${customerId})`);
     console.log(`Amount: £${parseFloat(amount).toFixed(2)}`);
     console.log(`Method: ${paymentMethod}`);
+    console.log(`Direction: ${paymentDirection}`);
+    if (paymentDirection === 'debit') {
+      console.log(`Debit Reason: ${debitReason}`);
+    }
     console.log(`Balance Before: £${balanceBefore.toFixed(2)}`);
     console.log(`Pending Sales: ${pendingSales.length}`);
     console.log("================================================\n");
@@ -93,6 +116,108 @@ router.post('/customer', auth, async (req, res) => {
     let remainingAmount = parseFloat(amount);
     let advanceAmount = 0;
 
+    // Handle DEBIT transactions (we owe customer - refund/credit)
+    if (paymentDirection === 'debit') {
+      // For debit transactions, create a single ledger entry that increases customer credit
+      const debitReasonLabels = {
+        'refund': 'Refund',
+        'credit_note': 'Credit Note',
+        'price_adjustment': 'Price Adjustment',
+        'goodwill': 'Goodwill Credit',
+        'other': 'Adjustment'
+      };
+      
+      const debitLedgerEntry = await Ledger.createEntry({
+        type: 'buyer',
+        entityId: customerId,
+        entityModel: 'Buyer',
+        transactionType: 'adjustment',
+        debit: remainingAmount, // Debit increases what we owe them (their credit)
+        credit: 0,
+        paymentMethod,
+        date: paymentDate,
+        description: description || `${debitReasonLabels[debitReason]} - ${paymentNumber}`,
+        createdBy: req.user._id,
+        paymentDetails: {
+          cashPayment: paymentMethod === 'cash' ? remainingAmount : 0,
+          bankPayment: paymentMethod === 'bank' ? remainingAmount : 0,
+          remainingBalance: 0
+        }
+      }, session);
+
+      distributions.push({
+        saleId: null,
+        saleNumber: debitReasonLabels[debitReason].toUpperCase(),
+        amountApplied: remainingAmount,
+        previousBalance: 0,
+        newBalance: remainingAmount,
+        ledgerEntryId: debitLedgerEntry._id,
+        isAdvance: false
+      });
+
+      console.log(`Debit transaction: £${remainingAmount.toFixed(2)} credited to customer (${debitReasonLabels[debitReason]})`);
+      
+      // Balance after for debit = balance increases (we owe more)
+      const balanceAfterDebit = balanceBefore + parseFloat(amount);
+
+      // Create the Payment record for debit
+      const payment = new Payment({
+        paymentNumber,
+        paymentType: 'customer',
+        paymentDirection: 'debit',
+        debitReason,
+        customerId,
+        totalAmount: parseFloat(amount),
+        cashAmount: paymentMethod === 'cash' ? parseFloat(amount) : 0,
+        bankAmount: paymentMethod === 'bank' ? parseFloat(amount) : 0,
+        paymentMethod,
+        paymentDate,
+        description,
+        distributions,
+        advanceAmount: 0,
+        balanceBefore,
+        balanceAfter: balanceAfterDebit,
+        status: 'active',
+        createdBy: req.user._id
+      });
+
+      await payment.save({ session });
+      await session.commitTransaction();
+
+      console.log("\n========== DEBIT PAYMENT CREATED ==========");
+      console.log(`Payment Number: ${paymentNumber}`);
+      console.log(`Debit Reason: ${debitReasonLabels[debitReason]}`);
+      console.log(`Amount: £${parseFloat(amount).toFixed(2)}`);
+      console.log(`Balance After: £${balanceAfterDebit.toFixed(2)}`);
+      console.log("============================================\n");
+
+      const populatedPayment = await Payment.findById(payment._id)
+        .populate('customerId', 'name company email phone')
+        .populate('createdBy', 'name')
+        .lean();
+
+      return res.status(201).json({
+        success: true,
+        message: `${debitReasonLabels[debitReason]} ${paymentNumber} created successfully`,
+        data: {
+          payment: populatedPayment,
+          summary: {
+            paymentNumber,
+            customerName: customer.name,
+            totalAmount: parseFloat(amount),
+            paymentMethod,
+            paymentDirection: 'debit',
+            debitReason,
+            salesAffected: 0,
+            advanceAmount: 0,
+            balanceBefore,
+            balanceAfter: balanceAfterDebit
+          }
+        }
+      });
+    }
+
+    // Handle CREDIT transactions (customer pays us - original behavior)
     // Distribute payment across sales (FIFO)
     if (pendingSales.length === 0) {
       // No pending sales - entire payment is advance
@@ -238,6 +363,7 @@ router.post('/customer', auth, async (req, res) => {
     const payment = new Payment({
       paymentNumber,
       paymentType: 'customer',
+      paymentDirection: 'credit',
       customerId,
       totalAmount: parseFloat(amount),
       cashAmount: paymentMethod === 'cash' ? parseFloat(amount) : 0,
@@ -633,7 +759,9 @@ router.get('/:paymentNumber/receipt', auth, async (req, res) => {
         totalAmount: payment.totalAmount,
         paymentMethod: payment.paymentMethod,
         cashAmount: payment.cashAmount,
-        bankAmount: payment.bankAmount
+        bankAmount: payment.bankAmount,
+        paymentDirection: payment.paymentDirection || 'credit',
+        debitReason: payment.debitReason || null
       },
       distributions: payment.distributions.map(d => ({
         reference: d.saleNumber,

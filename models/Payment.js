@@ -29,6 +29,21 @@ const paymentSchema = new mongoose.Schema({
     required: true
   },
 
+  // Payment direction: 'credit' = customer pays us, 'debit' = we owe customer (refund/adjustment)
+  paymentDirection: {
+    type: String,
+    enum: ['credit', 'debit'],
+    default: 'credit',
+    required: true
+  },
+
+  // Reason for debit transactions (required when paymentDirection is 'debit')
+  debitReason: {
+    type: String,
+    enum: ['refund', 'credit_note', 'price_adjustment', 'goodwill', 'other'],
+    required: function() { return this.paymentDirection === 'debit'; }
+  },
+
   // Reference to the customer/buyer
   customerId: {
     type: mongoose.Schema.Types.ObjectId,
