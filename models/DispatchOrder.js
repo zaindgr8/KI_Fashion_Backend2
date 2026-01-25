@@ -276,6 +276,20 @@ const dispatchOrderSchema = new mongoose.Schema({
       ref: 'User'
     }
   },
+  barcodeData: [{
+    barcodeNumber: String,
+    productName: String,
+    productCode: String,
+    barcodeImage: String,
+    composition: [{
+      size: String,
+      color: String,
+      quantity: Number
+    }],
+    isLoose: Boolean,
+    packetNumber: Number
+  }],
+  barcodeGeneratedAt: Date,
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

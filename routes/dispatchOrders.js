@@ -4022,8 +4022,6 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
 // Get barcode data as JSON for a confirmed dispatch order
 router.get('/:id/barcode-data', auth, async (req, res) => {
   try {
-    const bwipjs = require('bwip-js');
-
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
       .populate('supplier', 'name company')
       .populate('items.product', 'name sku productCode');
@@ -4036,6 +4034,20 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
     if (dispatchOrder.status !== 'confirmed') {
       return sendResponse.error(res, 'Barcodes can only be generated for confirmed orders', 400);
     }
+
+    // Check if barcodes are already generated and stored in database
+    if (dispatchOrder.barcodeData && dispatchOrder.barcodeData.length > 0) {
+      return sendResponse.success(res, {
+        orderNumber: dispatchOrder.orderNumber,
+        supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
+        barcodes: dispatchOrder.barcodeData,
+        source: 'database',
+        generatedAt: dispatchOrder.barcodeGeneratedAt
+      });
+    }
+
+    // Barcodes not in database, generate them
+    const bwipjs = require('bwip-js');
 
     // Collect all barcodes to generate
     const barcodeData = [];
@@ -4137,7 +4149,9 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
     return sendResponse.success(res, {
       orderNumber: dispatchOrder.orderNumber,
       supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
-      barcodes: barcodeImages
+      barcodes: barcodeImages,
+      source: 'generated',
+      generatedAt: new Date()
     });
 
   } catch (error) {
@@ -4146,8 +4160,8 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
   }
 });
 
-// Generate and print barcodes for a confirmed dispatch order
-// Note: No auth required - this is a public print page. Access is limited by requiring valid order ID and confirmed status.
+// Generate barcodes and save to database for a confirmed dispatch order
+// Note: No auth required - this allows suppliers to generate barcodes via direct link
 router.get('/:id/barcodes', async (req, res) => {
   try {
     const bwipjs = require('bwip-js');
@@ -4160,7 +4174,7 @@ router.get('/:id/barcodes', async (req, res) => {
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    // Only allow viewing barcodes for confirmed orders
+    // Only allow generating barcodes for confirmed orders
     if (dispatchOrder.status !== 'confirmed') {
       return sendResponse.error(res, 'Barcodes can only be generated for confirmed orders', 400);
     }
@@ -4271,197 +4285,21 @@ router.get('/:id/barcodes', async (req, res) => {
       }
     }
 
-    // Generate HTML page with printable barcodes in a grid layout
-    const html = `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Barcodes - Order ${dispatchOrder.orderNumber}</title>
-  <style>
-    @page {
-      size: A4;
-      margin: 15mm;
-    }
-    
-    body {
-      font-family: Arial, sans-serif;
-      margin: 0;
-      padding: 20px;
-      background: #f5f5f5;
-    }
-    
-    .print-header {
-      text-align: center;
-      margin-bottom: 20px;
-      page-break-after: avoid;
-    }
-    
-    .print-header h1 {
-      margin: 0 0 5px 0;
-      font-size: 24px;
-      color: #333;
-    }
-    
-    .print-header p {
-      margin: 0;
-      color: #666;
-      font-size: 14px;
-    }
-    
-    .barcode-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 15px;
-      margin: 0 auto;
-    }
-    
-    .barcode-item {
-      background: white;
-      border: 2px solid #ddd;
-      border-radius: 8px;
-      padding: 15px;
-      text-align: center;
-      page-break-inside: avoid;
-      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    
-    .barcode-number {
-      font-size: 16px;
-      font-weight: bold;
-      color: #333;
-      margin-bottom: 10px;
-      font-family: 'Courier New', monospace;
-    }
-    
-    .barcode-image {
-      margin: 10px 0;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 80px;
-    }
-    
-    .barcode-image img {
-      max-width: 100%;
-      height: auto;
-    }
-    
-    .product-info {
-      margin-top: 10px;
-      padding-top: 10px;
-      border-top: 1px solid #eee;
-    }
-    
-    .product-name {
-      font-size: 13px;
-      font-weight: 600;
-      color: #555;
-      margin-bottom: 3px;
-    }
-    
-    .product-code {
-      font-size: 12px;
-      color: #888;
-      font-family: 'Courier New', monospace;
-    }
-    
-    .badge {
-      display: inline-block;
-      padding: 3px 8px;
-      border-radius: 4px;
-      font-size: 10px;
-      font-weight: 600;
-      margin-top: 5px;
-    }
-    
-    .badge-packet {
-      background: #e3f2fd;
-      color: #1976d2;
-    }
-    
-    .badge-loose {
-      background: #fff3e0;
-      color: #f57c00;
-    }
-    
-    @media print {
-      body {
-        background: white;
-        padding: 10mm;
-      }
-      
-      .no-print {
-        display: none;
-      }
-      
-      .barcode-item {
-        box-shadow: none;
-      }
-    }
-    
-    .print-button {
-      position: fixed;
-      top: 20px;
-      right: 20px;
-      padding: 12px 24px;
-      background: #1976d2;
-      color: white;
-      border: none;
-      border-radius: 6px;
-      font-size: 16px;
-      cursor: pointer;
-      box-shadow: 0 4px 6px rgba(0,0,0,0.2);
-      z-index: 1000;
-    }
-    
-    .print-button:hover {
-      background: #1565c0;
-    }
-  </style>
-</head>
-<body>
-  <button class="print-button no-print" onclick="window.print()">🖨️ Print Barcodes</button>
-  
-  <div class="print-header">
-    <h1>Barcode Labels</h1>
-    <p>Order: ${dispatchOrder.orderNumber} | Supplier: ${dispatchOrder.supplier?.name || 'N/A'} | Total Labels: ${barcodeImages.length}</p>
-  </div>
-  
-  <div class="barcode-grid">
-    ${barcodeImages.map(item => `
-      <div class="barcode-item">
-        <div class="barcode-number">${item.barcodeNumber}</div>
-        <div class="barcode-image">
-          <img src="${item.barcodeImage}" alt="${item.barcodeNumber}" />
-        </div>
-        <div class="product-info">
-          <div class="product-name">${item.productName}</div>
-          <div class="product-code">SKU: ${item.productCode}</div>
-          <span class="badge ${item.isLoose ? 'badge-loose' : 'badge-packet'}">
-            ${item.isLoose ? 'LOOSE' : 'PACKET'}
-          </span>
-        </div>
-      </div>
-    `).join('')}
-  </div>
-  
-  <script>
-    // Auto-open print dialog after page loads
-    window.onload = function() {
-      setTimeout(() => {
-        // Uncomment to auto-print on load
-        // window.print();
-      }, 500);
-    };
-  </script>
-</body>
-</html>
-    `;
+    // Save barcodes to database
+    dispatchOrder.barcodeData = barcodeImages;
+    dispatchOrder.barcodeGeneratedAt = new Date();
+    await dispatchOrder.save();
 
-    res.setHeader('Content-Type', 'text/html');
-    res.send(html);
+    console.log(`[Barcodes] Generated and saved ${barcodeImages.length} barcodes for order ${dispatchOrder.orderNumber}`);
+
+    // Return JSON response
+    return sendResponse.success(res, {
+      orderNumber: dispatchOrder.orderNumber,
+      supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
+      barcodes: barcodeImages,
+      generatedAt: dispatchOrder.barcodeGeneratedAt,
+      message: `Successfully generated ${barcodeImages.length} barcodes`
+    }, 'Barcodes generated and saved successfully');
 
   } catch (error) {
     console.error('Generate barcodes error:', error);
