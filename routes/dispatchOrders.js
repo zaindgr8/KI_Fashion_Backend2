@@ -2486,37 +2486,79 @@ router.post('/:id/confirm', auth, async (req, res) => {
         if (item.useVariantTracking && item.packets && item.packets.length > 0) {
           // Generate barcodes for packets
           for (const packet of item.packets) {
-            const packetBarcode = generatePacketBarcode(
-              supplierId,
-              productId,
-              packet.composition,
-              packet.isLoose || false
-            );
             
-            // Generate barcode image as dataURL (like QR codes)
-            const barcodeBuffer = await bwipjs.toBuffer({
-              bcid: 'code128',
-              text: packetBarcode,
-              scale: 3,
-              height: 10,
-              includetext: true,
-              textxalign: 'center',
-              textsize: 8
-            });
-            
-            const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-            
-            barcodeResults.push({
-              type: 'packet',
-              productName: item.productName,
-              productCode: item.productCode,
-              packetNumber: packet.packetNumber,
-              composition: packet.composition,
-              data: packetBarcode,
-              dataUrl: dataUrl,
-              isLoose: packet.isLoose || false,
-              generatedAt: new Date()
-            });
+            // If packet is marked as loose, generate SEPARATE barcode for EACH composition entry
+            if (packet.isLoose) {
+              for (const comp of packet.composition) {
+                // Generate unique barcode for each size/color combo
+                const looseBarcode = generateLooseItemBarcode(
+                  supplierId,
+                  productId,
+                  comp.size,
+                  comp.color
+                );
+                
+                // Generate barcode image as dataURL (like QR codes)
+                const barcodeBuffer = await bwipjs.toBuffer({
+                  bcid: 'code128',
+                  text: looseBarcode,
+                  scale: 3,
+                  height: 10,
+                  includetext: true,
+                  textxalign: 'center',
+                  textsize: 8
+                });
+                
+                const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+                
+                barcodeResults.push({
+                  type: 'loose',
+                  productName: item.productName,
+                  productCode: item.productCode,
+                  packetNumber: packet.packetNumber,
+                  size: comp.size,
+                  color: comp.color,
+                  quantity: comp.quantity,
+                  data: looseBarcode,
+                  dataUrl: dataUrl,
+                  isLoose: true,
+                  generatedAt: new Date()
+                });
+              }
+            } else {
+              // Regular packet - generate one barcode for entire packet
+              const packetBarcode = generatePacketBarcode(
+                supplierId,
+                productId,
+                packet.composition,
+                false
+              );
+              
+              // Generate barcode image as dataURL (like QR codes)
+              const barcodeBuffer = await bwipjs.toBuffer({
+                bcid: 'code128',
+                text: packetBarcode,
+                scale: 3,
+                height: 10,
+                includetext: true,
+                textxalign: 'center',
+                textsize: 8
+              });
+              
+              const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+              
+              barcodeResults.push({
+                type: 'packet',
+                productName: item.productName,
+                productCode: item.productCode,
+                packetNumber: packet.packetNumber,
+                composition: packet.composition,
+                data: packetBarcode,
+                dataUrl: dataUrl,
+                isLoose: false,
+                generatedAt: new Date()
+              });
+            }
           }
         } else {
           // Generate barcode for loose item (no packet structure)
@@ -4205,37 +4247,79 @@ router.get('/:id/barcodes', async (req, res) => {
       if (item.useVariantTracking && item.packets && item.packets.length > 0) {
         // Generate barcodes for packets
         for (const packet of item.packets) {
-          const packetBarcode = generatePacketBarcode(
-            supplierId,
-            productId,
-            packet.composition,
-            packet.isLoose || false
-          );
           
-          // Generate barcode image as dataURL (like QR codes)
-          const barcodeBuffer = await bwipjs.toBuffer({
-            bcid: 'code128',
-            text: packetBarcode,
-            scale: 3,
-            height: 10,
-            includetext: true,
-            textxalign: 'center',
-            textsize: 8
-          });
-          
-          const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-          
-          barcodeResults.push({
-            type: 'packet',
-            productName: item.productName,
-            productCode: item.productCode,
-            packetNumber: packet.packetNumber,
-            composition: packet.composition,
-            data: packetBarcode,
-            dataUrl: dataUrl,
-            isLoose: packet.isLoose || false,
-            generatedAt: new Date()
-          });
+          // If packet is marked as loose, generate SEPARATE barcode for EACH composition entry
+          if (packet.isLoose) {
+            for (const comp of packet.composition) {
+              // Generate unique barcode for each size/color combo
+              const looseBarcode = generateLooseItemBarcode(
+                supplierId,
+                productId,
+                comp.size,
+                comp.color
+              );
+              
+              // Generate barcode image as dataURL (like QR codes)
+              const barcodeBuffer = await bwipjs.toBuffer({
+                bcid: 'code128',
+                text: looseBarcode,
+                scale: 3,
+                height: 10,
+                includetext: true,
+                textxalign: 'center',
+                textsize: 8
+              });
+              
+              const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+              
+              barcodeResults.push({
+                type: 'loose',
+                productName: item.productName,
+                productCode: item.productCode,
+                packetNumber: packet.packetNumber,
+                size: comp.size,
+                color: comp.color,
+                quantity: comp.quantity,
+                data: looseBarcode,
+                dataUrl: dataUrl,
+                isLoose: true,
+                generatedAt: new Date()
+              });
+            }
+          } else {
+            // Regular packet - generate one barcode for entire packet
+            const packetBarcode = generatePacketBarcode(
+              supplierId,
+              productId,
+              packet.composition,
+              false
+            );
+            
+            // Generate barcode image as dataURL (like QR codes)
+            const barcodeBuffer = await bwipjs.toBuffer({
+              bcid: 'code128',
+              text: packetBarcode,
+              scale: 3,
+              height: 10,
+              includetext: true,
+              textxalign: 'center',
+              textsize: 8
+            });
+            
+            const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+            
+            barcodeResults.push({
+              type: 'packet',
+              productName: item.productName,
+              productCode: item.productCode,
+              packetNumber: packet.packetNumber,
+              composition: packet.composition,
+              data: packetBarcode,
+              dataUrl: dataUrl,
+              isLoose: false,
+              generatedAt: new Date()
+            });
+          }
         }
       } else {
         // Generate barcode for loose item
