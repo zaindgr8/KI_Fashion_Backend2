@@ -1268,47 +1268,27 @@ router.get('/sales-product-wise', auth, async (req, res) => {
       }
     }
 
-    const productSales = await Sale.aggregate([
-      { $match: matchConditions },
-      { $unwind: '$items' },
-      {
-        $group: {
-          _id: '$items.product',
-          totalQuantity: { $sum: '$items.quantity' },
-          totalRevenue: { $sum: '$items.totalPrice' },
-          avgUnitPrice: { $avg: '$items.unitPrice' }
+    // Get all sales with populated product details
+    const sales = await Sale.find(matchConditions)
+      .populate('buyer', 'name company')
+      .populate({
+        path: 'items.product',
+        select: 'name productCode sku',
+        populate: {
+          path: 'supplier',
+          select: 'name company'
         }
-      },
-      {
-        $lookup: {
-          from: 'products',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'productInfo'
-        }
-      },
-      { $unwind: { path: '$productInfo', preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          productCode: '$productInfo.productCode',
-          productName: '$productInfo.name',
-          sku: '$productInfo.sku',
-          totalQuantity: 1,
-          totalRevenue: 1,
-          avgUnitPrice: 1
-        }
-      },
-      { $sort: { totalRevenue: -1 } }
-    ]);
+      })
+      .sort({ saleDate: -1 })
+      .lean();
 
     res.json({
       success: true,
       data: {
-        products: productSales,
+        sales,
         summary: {
-          totalProducts: productSales.length,
-          totalQuantity: productSales.reduce((sum, p) => sum + p.totalQuantity, 0),
-          totalRevenue: productSales.reduce((sum, p) => sum + p.totalRevenue, 0)
+          totalSales: sales.length,
+          totalItems: sales.reduce((sum, s) => sum + (s.items?.length || 0), 0)
         }
       }
     });
@@ -1334,47 +1314,20 @@ router.get('/buying-product-wise', auth, async (req, res) => {
       }
     }
 
-    const productPurchases = await DispatchOrder.aggregate([
-      { $match: matchConditions },
-      { $unwind: '$items' },
-      {
-        $group: {
-          _id: '$items.product',
-          totalQuantity: { $sum: '$items.quantity' },
-          totalCost: { $sum: { $multiply: ['$items.quantity', '$items.costPrice'] } },
-          avgCostPrice: { $avg: '$items.costPrice' }
-        }
-      },
-      {
-        $lookup: {
-          from: 'products',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'productInfo'
-        }
-      },
-      { $unwind: { path: '$productInfo', preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          productCode: '$productInfo.productCode',
-          productName: '$productInfo.name',
-          sku: '$productInfo.sku',
-          totalQuantity: 1,
-          totalCost: 1,
-          avgCostPrice: 1
-        }
-      },
-      { $sort: { totalCost: -1 } }
-    ]);
+    // Get all purchases with populated product details
+    const purchases = await DispatchOrder.find(matchConditions)
+      .populate('supplier', 'name company')
+      .populate('items.product', 'name productCode sku')
+      .sort({ dispatchDate: -1 })
+      .lean();
 
     res.json({
       success: true,
       data: {
-        products: productPurchases,
+        purchases,
         summary: {
-          totalProducts: productPurchases.length,
-          totalQuantity: productPurchases.reduce((sum, p) => sum + p.totalQuantity, 0),
-          totalCost: productPurchases.reduce((sum, p) => sum + p.totalCost, 0)
+          totalPurchases: purchases.length,
+          totalItems: purchases.reduce((sum, p) => sum + (p.items?.length || 0), 0)
         }
       }
     });
