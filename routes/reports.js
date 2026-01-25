@@ -1491,11 +1491,14 @@ router.get('/receivables', auth, async (req, res) => {
         $project: {
           name: '$buyerInfo.name',
           company: '$buyerInfo.company',
+          email: '$buyerInfo.email',
+          phone: '$buyerInfo.phone',
           totalSales: 1,
           amountReceived: 1,
           amountGiven: '$amountReceived',
           outstanding: { $subtract: ['$totalSales', '$amountReceived'] },
           ledgerBalance: { $subtract: ['$totalSales', '$amountReceived'] },
+          remainingBalance: { $subtract: ['$totalSales', '$amountReceived'] },
           lastPaymentDate: '$lastSaleDate',
           lastPurchaseDate: '$lastSaleDate',
           orderCount: 1
@@ -1512,6 +1515,8 @@ router.get('/receivables', auth, async (req, res) => {
         receivables,
         summary: {
           totalCustomers: receivables.length,
+          totalSales: receivables.reduce((sum, r) => sum + r.totalSales, 0),
+          totalReceived: receivables.reduce((sum, r) => sum + r.amountReceived, 0),
           totalOutstanding: receivables.reduce((sum, r) => sum + r.outstanding, 0)
         }
       }
@@ -1525,12 +1530,17 @@ router.get('/receivables', auth, async (req, res) => {
 // Payables Report
 router.get('/payables', auth, async (req, res) => {
   try {
-    // Get all dispatch orders grouped by supplier (using supplierPaymentTotal - raw supplier amounts)
+    // Get all dispatch orders grouped by supplier with payment details
     const purchasesBySupplier = await DispatchOrder.aggregate([
       {
         $group: {
           _id: '$supplier',
           totalPurchases: { $sum: '$supplierPaymentTotal' },
+          totalPaid: { 
+            $sum: { 
+              $add: ['$paymentDetails.cashPayment', '$paymentDetails.bankPayment'] 
+            } 
+          },
           lastPurchaseDate: { $max: '$dispatchDate' },
           orderCount: { $sum: 1 }
         }
@@ -1546,37 +1556,27 @@ router.get('/payables', auth, async (req, res) => {
       { $unwind: { path: '$supplierInfo', preserveNullAndEmptyArrays: true } }
     ]);
 
-    // Get payments by supplier
-    const paymentsBySupplier = await Payment.aggregate([
-      { $match: { type: 'supplier' } },
-      {
-        $group: {
-          _id: '$supplier',
-          totalPaid: { $sum: '$amount' },
-          lastPaymentDate: { $max: '$paymentDate' }
-        }
-      }
-    ]);
-
-    // Merge data
+    // Merge and calculate outstanding
     const payables = purchasesBySupplier.map(purchase => {
-      const payment = paymentsBySupplier.find(p => 
-        p._id?.toString() === purchase._id?.toString()
-      );
-      const amountPaid = payment?.totalPaid || 0;
-      const outstanding = (purchase.totalPurchases || 0) - amountPaid;
+      const totalPurchases = purchase.totalPurchases || 0;
+      const totalPaid = purchase.totalPaid || 0;
+      const outstanding = totalPurchases - totalPaid;
       
       return {
         _id: purchase._id,
         name: purchase.supplierInfo?.name,
         supplierName: purchase.supplierInfo?.name,
         company: purchase.supplierInfo?.company,
-        totalPurchases: purchase.totalPurchases,
-        totalAmount: purchase.totalPurchases,
-        amountPaid,
+        email: purchase.supplierInfo?.email,
+        phone: purchase.supplierInfo?.phone,
+        totalPurchases: totalPurchases,
+        totalAmount: totalPurchases,
+        totalPaid: totalPaid,
+        amountPaid: totalPaid,
         outstanding,
+        remainingBalance: outstanding,
         balance: outstanding,
-        lastPaymentDate: payment?.lastPaymentDate || purchase.lastPurchaseDate,
+        lastPurchaseDate: purchase.lastPurchaseDate,
         orderCount: purchase.orderCount
       };
     }).filter(p => p.outstanding > 0);
@@ -1588,6 +1588,8 @@ router.get('/payables', auth, async (req, res) => {
         payables,
         summary: {
           totalSuppliers: payables.length,
+          totalPurchases: payables.reduce((sum, p) => sum + p.totalPurchases, 0),
+          totalPaid: payables.reduce((sum, p) => sum + p.totalPaid, 0),
           totalOutstanding: payables.reduce((sum, p) => sum + p.outstanding, 0)
         }
       }
