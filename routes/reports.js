@@ -1352,17 +1352,80 @@ router.get('/stock-in-hand', auth, async (req, res) => {
       },
       { $unwind: '$productInfo' },
       {
+        $lookup: {
+          from: 'suppliers',
+          localField: 'productInfo.supplier',
+          foreignField: '_id',
+          as: 'supplierInfo'
+        }
+      },
+      { $unwind: { path: '$supplierInfo', preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: 'dispatchorders',
+          let: { productId: '$product' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $in: ['$$productId', { $map: { input: '$items', as: 'item', in: '$$item.product' } }]
+                }
+              }
+            },
+            { $unwind: '$items' },
+            { $match: { $expr: { $eq: ['$items.product', '$$productId'] } } },
+            {
+              $group: {
+                _id: null,
+                totalBought: { $sum: '$items.quantity' }
+              }
+            }
+          ],
+          as: 'purchaseData'
+        }
+      },
+      {
+        $lookup: {
+          from: 'sales',
+          let: { productId: '$product' },
+          pipeline: [
+            {
+              $match: {
+                $expr: {
+                  $in: ['$$productId', { $map: { input: '$items', as: 'item', in: '$$item.product' } }]
+                }
+              }
+            },
+            { $unwind: '$items' },
+            { $match: { $expr: { $eq: ['$items.product', '$$productId'] } } },
+            {
+              $group: {
+                _id: null,
+                totalSold: { $sum: '$items.quantity' }
+              }
+            }
+          ],
+          as: 'salesData'
+        }
+      },
+      {
         $project: {
           productCode: '$productInfo.productCode',
           productName: '$productInfo.name',
           sku: '$productInfo.sku',
+          supplierName: '$supplierInfo.name',
+          color: { $arrayElemAt: ['$productInfo.color', 0] },
           currentStock: 1,
           stockInHand: '$currentStock',
           reorderLevel: 1,
           averageCostPrice: 1,
           totalValue: 1,
           value: '$totalValue',
-          needsReorder: 1
+          needsReorder: 1,
+          itemsBought: { $arrayElemAt: ['$purchaseData.totalBought', 0] },
+          itemsSold: { $arrayElemAt: ['$salesData.totalSold', 0] },
+          minSellPrice: '$productInfo.pricing.minSellingPrice',
+          variantComposition: 1
         }
       },
       { $sort: { currentStock: -1 } }
