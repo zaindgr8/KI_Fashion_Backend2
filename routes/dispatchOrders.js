@@ -1875,6 +1875,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
           continue;
         }
 
+        // CRITICAL: Update item.product so barcode generation can use the correct product ID
+        // This ensures barcodes match what's stored in PacketStock
+        item.product = product._id;
+        console.log(`[Confirm Order] Updated item.product to ${product._id} for barcode consistency`);
+
         // Find or create Inventory
         let inventory = await Inventory.findOne({ product: product._id });
 
@@ -2481,7 +2486,10 @@ router.post('/:id/confirm', auth, async (req, res) => {
       
       for (const item of dispatchOrder.items) {
         const supplierId = dispatchOrder.supplier._id.toString();
-        const productId = item.product ? item.product._id.toString() : 'manual';
+        // Handle both populated product (object with _id) and direct ObjectId reference
+        const productId = item.product 
+          ? (item.product._id ? item.product._id.toString() : item.product.toString())
+          : 'manual';
         
         if (item.useVariantTracking && item.packets && item.packets.length > 0) {
           // Generate barcodes for packets
@@ -4183,10 +4191,24 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
 
     // Check if barcodes are already generated and stored in database
     if (dispatchOrder.barcodeData && dispatchOrder.barcodeData.length > 0) {
+      // Validate that barcodes have proper structure (dataUrl and data fields)
+      const validBarcodes = dispatchOrder.barcodeData.filter(b => b.dataUrl && b.data);
+      
+      if (validBarcodes.length === 0) {
+        // Barcodes exist but are malformed - need regeneration
+        return sendResponse.success(res, {
+          orderNumber: dispatchOrder.orderNumber,
+          supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
+          barcodes: [],
+          source: 'invalid',
+          message: 'Existing barcode data is invalid or incomplete. Please regenerate barcodes using GET /:id/barcodes?force=true'
+        });
+      }
+      
       return sendResponse.success(res, {
         orderNumber: dispatchOrder.orderNumber,
         supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
-        barcodes: dispatchOrder.barcodeData,
+        barcodes: validBarcodes,
         source: 'database',
         generatedAt: dispatchOrder.barcodeGeneratedAt
       });
@@ -4210,8 +4232,12 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
 
 // Generate barcodes and save to database for a confirmed dispatch order
 // Note: No auth required - this allows suppliers to generate barcodes via direct link
+// Use ?force=true to regenerate existing barcodes
 router.get('/:id/barcodes', async (req, res) => {
   try {
+    const { force } = req.query;
+    const forceRegenerate = force === 'true' || force === '1';
+    
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
       .populate('supplier', 'name company')
       .populate('items.product', 'name sku productCode');
@@ -4225,8 +4251,8 @@ router.get('/:id/barcodes', async (req, res) => {
       return sendResponse.error(res, 'Barcodes can only be generated for confirmed orders', 400);
     }
 
-    // Check if barcodes already exist
-    if (dispatchOrder.barcodeData && dispatchOrder.barcodeData.length > 0) {
+    // Check if barcodes already exist (unless force regenerate is requested)
+    if (!forceRegenerate && dispatchOrder.barcodeData && dispatchOrder.barcodeData.length > 0) {
       return sendResponse.success(res, {
         orderNumber: dispatchOrder.orderNumber,
         supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
@@ -4235,6 +4261,8 @@ router.get('/:id/barcodes', async (req, res) => {
         message: `Retrieved ${dispatchOrder.barcodeData.length} existing barcodes`
       }, 'Barcodes already exist');
     }
+    
+    console.log(`[Barcodes] ${forceRegenerate ? 'Force regenerating' : 'Generating'} barcodes for order ${dispatchOrder.orderNumber}`);
 
     // Generate new barcodes using simplified logic like QR codes
     const bwipjs = require('bwip-js');
@@ -4242,7 +4270,25 @@ router.get('/:id/barcodes', async (req, res) => {
     
     for (const item of dispatchOrder.items) {
       const supplierId = dispatchOrder.supplier._id.toString();
-      const productId = item.product ? item.product._id.toString() : 'manual';
+      
+      // Get product ID - look it up if not populated
+      let productId = 'manual';
+      if (item.product) {
+        // Handle both populated product (object with _id) and direct ObjectId reference
+        productId = item.product._id ? item.product._id.toString() : item.product.toString();
+      } else if (item.productCode) {
+        // Look up product by productCode + supplier for existing orders
+        const product = await Product.findOne({
+          sku: item.productCode.toUpperCase(),
+          supplier: dispatchOrder.supplier._id
+        });
+        if (product) {
+          productId = product._id.toString();
+          console.log(`[Barcodes] Found product ${product._id} for code ${item.productCode}`);
+        } else {
+          console.log(`[Barcodes] No product found for code ${item.productCode}, using 'manual'`);
+        }
+      }
       
       if (item.useVariantTracking && item.packets && item.packets.length > 0) {
         // Generate barcodes for packets
