@@ -1177,6 +1177,7 @@ router.get('/daily-sales', auth, async (req, res) => {
       const amountPaid = (sale.cashPayment || 0) + (sale.bankPayment || 0);
       return {
         ...sale,
+        discount: sale.totalDiscount || 0,
         amountPaid,
         balance: (sale.grandTotal || 0) - amountPaid
       };
@@ -1188,7 +1189,8 @@ router.get('/daily-sales', auth, async (req, res) => {
         sales: salesWithAmounts,
         summary: {
           totalSales: sales.length,
-          totalAmount: sales.reduce((sum, s) => sum + (s.grandTotal || 0), 0)
+          totalAmount: sales.reduce((sum, s) => sum + (s.grandTotal || 0), 0),
+          totalDiscount: sales.reduce((sum, s) => sum + (s.totalDiscount || 0), 0)
         }
       }
     });
