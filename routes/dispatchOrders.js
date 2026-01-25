@@ -4174,6 +4174,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
 });
 
 // Get barcode data as JSON for a confirmed dispatch order
+// Auto-regenerates if barcodes are missing or invalid
 router.get('/:id/barcode-data', auth, async (req, res) => {
   try {
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
@@ -4194,34 +4195,173 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
       // Validate that barcodes have proper structure (dataUrl and data fields)
       const validBarcodes = dispatchOrder.barcodeData.filter(b => b.dataUrl && b.data);
       
-      if (validBarcodes.length === 0) {
-        // Barcodes exist but are malformed - need regeneration
+      if (validBarcodes.length > 0) {
         return sendResponse.success(res, {
           orderNumber: dispatchOrder.orderNumber,
           supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
-          barcodes: [],
-          source: 'invalid',
-          message: 'Existing barcode data is invalid or incomplete. Please regenerate barcodes using GET /:id/barcodes?force=true'
+          barcodes: validBarcodes,
+          source: 'database',
+          generatedAt: dispatchOrder.barcodeGeneratedAt
         });
       }
-      
-      return sendResponse.success(res, {
-        orderNumber: dispatchOrder.orderNumber,
-        supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
-        barcodes: validBarcodes,
-        source: 'database',
-        generatedAt: dispatchOrder.barcodeGeneratedAt
-      });
+      // If validBarcodes.length === 0, fall through to regeneration
+      console.log(`[Barcode-Data] Existing barcodes are invalid for order ${dispatchOrder.orderNumber}, regenerating...`);
     }
 
-    // No barcodes found in database - this shouldn't happen for confirmed orders
-    // but we'll return an empty result with helpful message
+    // No valid barcodes found - AUTO-REGENERATE instead of returning empty
+    console.log(`[Barcode-Data] Auto-generating barcodes for order ${dispatchOrder.orderNumber}`);
+    
+    const bwipjs = require('bwip-js');
+    const barcodeResults = [];
+    
+    for (const item of dispatchOrder.items) {
+      const supplierId = dispatchOrder.supplier._id.toString();
+      
+      // Get product ID - look it up if not populated
+      let productId = 'manual';
+      if (item.product) {
+        productId = item.product._id ? item.product._id.toString() : item.product.toString();
+      } else if (item.productCode) {
+        // Look up product by productCode + supplier
+        const product = await Product.findOne({
+          sku: item.productCode.toUpperCase(),
+          supplier: dispatchOrder.supplier._id
+        });
+        if (product) {
+          productId = product._id.toString();
+        }
+      }
+      
+      if (item.useVariantTracking && item.packets && item.packets.length > 0) {
+        // Generate barcodes for packets
+        for (const packet of item.packets) {
+          
+          // If packet is marked as loose, generate SEPARATE barcode for EACH composition entry
+          if (packet.isLoose) {
+            for (const comp of packet.composition) {
+              const looseBarcode = generateLooseItemBarcode(
+                supplierId,
+                productId,
+                comp.size,
+                comp.color
+              );
+              
+              const barcodeBuffer = await bwipjs.toBuffer({
+                bcid: 'code128',
+                text: looseBarcode,
+                scale: 3,
+                height: 10,
+                includetext: true,
+                textxalign: 'center',
+                textsize: 8
+              });
+              
+              const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+              
+              barcodeResults.push({
+                type: 'loose',
+                productName: item.productName,
+                productCode: item.productCode,
+                packetNumber: packet.packetNumber,
+                size: comp.size,
+                color: comp.color,
+                quantity: comp.quantity,
+                data: looseBarcode,
+                dataUrl: dataUrl,
+                isLoose: true,
+                generatedAt: new Date()
+              });
+            }
+          } else {
+            // Regular packet - generate one barcode for entire packet
+            const packetBarcode = generatePacketBarcode(
+              supplierId,
+              productId,
+              packet.composition,
+              false
+            );
+            
+            const barcodeBuffer = await bwipjs.toBuffer({
+              bcid: 'code128',
+              text: packetBarcode,
+              scale: 3,
+              height: 10,
+              includetext: true,
+              textxalign: 'center',
+              textsize: 8
+            });
+            
+            const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+            
+            barcodeResults.push({
+              type: 'packet',
+              productName: item.productName,
+              productCode: item.productCode,
+              packetNumber: packet.packetNumber,
+              composition: packet.composition,
+              data: packetBarcode,
+              dataUrl: dataUrl,
+              isLoose: false,
+              generatedAt: new Date()
+            });
+          }
+        }
+      } else {
+        // Generate barcode for loose item (no packet structure)
+        const firstColor = Array.isArray(item.primaryColor) && item.primaryColor.length > 0 
+          ? item.primaryColor[0] 
+          : (typeof item.primaryColor === 'string' ? item.primaryColor : 'default');
+        const firstSize = Array.isArray(item.size) && item.size.length > 0 
+          ? item.size[0] 
+          : (typeof item.size === 'string' ? item.size : 'default');
+          
+        const looseBarcode = generateLooseItemBarcode(
+          supplierId,
+          productId,
+          firstSize,
+          firstColor
+        );
+        
+        const barcodeBuffer = await bwipjs.toBuffer({
+          bcid: 'code128',
+          text: looseBarcode,
+          scale: 3,
+          height: 10,
+          includetext: true,
+          textxalign: 'center',
+          textsize: 8
+        });
+        
+        const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+        
+        barcodeResults.push({
+          type: 'loose',
+          productName: item.productName,
+          productCode: item.productCode,
+          size: firstSize,
+          color: firstColor,
+          quantity: item.quantity,
+          data: looseBarcode,
+          dataUrl: dataUrl,
+          generatedAt: new Date()
+        });
+      }
+    }
+
+    // Save newly generated barcodes to database
+    if (barcodeResults.length > 0) {
+      dispatchOrder.barcodeData = barcodeResults;
+      dispatchOrder.barcodeGeneratedAt = new Date();
+      await dispatchOrder.save();
+      console.log(`[Barcode-Data] Generated and saved ${barcodeResults.length} barcodes for order ${dispatchOrder.orderNumber}`);
+    }
+
     return sendResponse.success(res, {
       orderNumber: dispatchOrder.orderNumber,
       supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
-      barcodes: [],
-      source: 'none',
-      message: 'No barcodes found for this order. Try regenerating barcodes from the order confirmation page.'
+      barcodes: barcodeResults,
+      source: 'generated',
+      generatedAt: dispatchOrder.barcodeGeneratedAt
     });
 
   } catch (error) {
