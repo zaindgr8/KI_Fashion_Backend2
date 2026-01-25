@@ -1525,12 +1525,12 @@ router.get('/receivables', auth, async (req, res) => {
 // Payables Report
 router.get('/payables', auth, async (req, res) => {
   try {
-    // Get all dispatch orders grouped by supplier
+    // Get all dispatch orders grouped by supplier (using supplierPaymentTotal - raw supplier amounts)
     const purchasesBySupplier = await DispatchOrder.aggregate([
       {
         $group: {
           _id: '$supplier',
-          totalPurchases: { $sum: '$grandTotal' },
+          totalPurchases: { $sum: '$supplierPaymentTotal' },
           lastPurchaseDate: { $max: '$dispatchDate' },
           orderCount: { $sum: 1 }
         }
