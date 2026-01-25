@@ -4019,6 +4019,133 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
   }
 });
 
+// Get barcode data as JSON for a confirmed dispatch order
+router.get('/:id/barcode-data', auth, async (req, res) => {
+  try {
+    const bwipjs = require('bwip-js');
+
+    const dispatchOrder = await DispatchOrder.findById(req.params.id)
+      .populate('supplier', 'name company')
+      .populate('items.product', 'name sku productCode');
+
+    if (!dispatchOrder) {
+      return sendResponse.error(res, 'Dispatch order not found', 404);
+    }
+
+    // Only allow viewing barcodes for confirmed orders
+    if (dispatchOrder.status !== 'confirmed') {
+      return sendResponse.error(res, 'Barcodes can only be generated for confirmed orders', 400);
+    }
+
+    // Collect all barcodes to generate
+    const barcodeData = [];
+
+    for (const item of dispatchOrder.items) {
+      const productName = item.productName || item.product?.name || 'Unknown Product';
+      const productCode = item.productCode || item.product?.productCode || item.product?.sku || 'N/A';
+
+      // If item has packets, generate barcode for each packet
+      if (item.packets && item.packets.length > 0) {
+        for (const packet of item.packets) {
+          // Find the PacketStock for this packet to get the barcode
+          const packetStock = await PacketStock.findOne({
+            product: item.product?._id || item.product,
+            supplier: dispatchOrder.supplier._id,
+            composition: packet.composition,
+            isLoose: packet.isLoose || false
+          });
+
+          if (packetStock && packetStock.barcode) {
+            barcodeData.push({
+              barcodeNumber: packetStock.barcode,
+              productName: productName,
+              productCode: productCode,
+              packetNumber: packet.packetNumber,
+              composition: packet.composition,
+              isLoose: packet.isLoose || false
+            });
+          }
+        }
+      } else {
+        // No packets - try to find any packet stock for this product
+        const packetStocks = await PacketStock.find({
+          product: item.product?._id || item.product,
+          supplier: dispatchOrder.supplier._id,
+          isActive: true
+        }).limit(item.quantity);
+
+        for (const packetStock of packetStocks) {
+          barcodeData.push({
+            barcodeNumber: packetStock.barcode,
+            productName: productName,
+            productCode: productCode,
+            composition: packetStock.composition,
+            isLoose: packetStock.isLoose
+          });
+        }
+      }
+    }
+
+    if (barcodeData.length === 0) {
+      return sendResponse.error(res, 'No barcodes found for this order. Please ensure the order has been properly confirmed with packet tracking.', 404);
+    }
+
+    // Generate barcode images using bwip-js
+    const barcodeImages = [];
+    for (const data of barcodeData) {
+      try {
+        const barcodeText = data.barcodeNumber;
+        const barcodePart = barcodeText.split('-')[1] || barcodeText;
+        
+        let numericBarcode = '';
+        for (let i = 0; i < barcodePart.length; i++) {
+          const char = barcodePart[i];
+          if (char >= '0' && char <= '9') {
+            numericBarcode += char;
+          } else if (char >= 'A' && char <= 'F') {
+            numericBarcode += (char.charCodeAt(0) - 65 + 10).toString();
+          }
+        }
+        
+        if (numericBarcode.length % 2 !== 0) {
+          numericBarcode = '0' + numericBarcode;
+        }
+
+        const png = await bwipjs.toBuffer({
+          bcid: 'interleaved2of5',
+          text: numericBarcode,
+          scale: 3,
+          height: 10,
+          includetext: false,
+          textxalign: 'center',
+        });
+
+        barcodeImages.push({
+          barcodeNumber: data.barcodeNumber,
+          productName: data.productName,
+          productCode: data.productCode,
+          barcodeImage: `data:image/png;base64,${png.toString('base64')}`,
+          composition: data.composition,
+          isLoose: data.isLoose,
+          packetNumber: data.packetNumber
+        });
+      } catch (barcodeError) {
+        console.error(`Error generating barcode for ${data.barcodeNumber}:`, barcodeError);
+      }
+    }
+
+    return sendResponse.success(res, {
+      orderNumber: dispatchOrder.orderNumber,
+      supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
+      barcodes: barcodeImages
+    });
+
+  } catch (error) {
+    console.error('Get barcode data error:', error);
+    return sendResponse.error(res, error.message || 'Failed to get barcode data', 500);
+  }
+});
+
 // Generate and print barcodes for a confirmed dispatch order
 // Note: No auth required - this is a public print page. Access is limited by requiring valid order ID and confirmed status.
 router.get('/:id/barcodes', async (req, res) => {
