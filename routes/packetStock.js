@@ -4,7 +4,48 @@ const PacketStock = require('../models/PacketStock');
 const Product = require('../models/Product');
 const auth = require('../middleware/auth');
 const QRCode = require('qrcode');
+const bwipjs = require('bwip-js');
 const { generatePacketBarcode, generateLooseItemBarcode, normalizeBarcode, parseBarcodeType } = require('../utils/barcodeGenerator');
+
+// Helper function to generate ITF barcode image from barcode string
+async function generateITFBarcodeImage(barcodeText) {
+  try {
+    // Extract the hex part from barcode (e.g., "PKT-A1B2C3D4" -> "A1B2C3D4")
+    const barcodePart = barcodeText.split('-')[1] || barcodeText;
+    
+    // Convert hex characters to numeric string for ITF
+    // ITF requires even-length numeric strings
+    let numericBarcode = '';
+    for (let i = 0; i < barcodePart.length; i++) {
+      const char = barcodePart[i];
+      if (char >= '0' && char <= '9') {
+        numericBarcode += char;
+      } else if (char >= 'A' && char <= 'F') {
+        numericBarcode += (char.charCodeAt(0) - 65 + 10).toString();
+      }
+    }
+    
+    // Ensure even length for ITF
+    if (numericBarcode.length % 2 !== 0) {
+      numericBarcode = '0' + numericBarcode;
+    }
+
+    // Generate barcode using ITF format
+    const png = await bwipjs.toBuffer({
+      bcid: 'interleaved2of5',
+      text: numericBarcode,
+      scale: 3,
+      height: 10,
+      includetext: false,
+      textxalign: 'center',
+    });
+
+    return `data:image/png;base64,${png.toString('base64')}`;
+  } catch (error) {
+    console.error('Error generating ITF barcode:', error);
+    return null;
+  }
+}
 
 /**
  * @route   GET /api/packet-stock/scan/:barcode
@@ -456,10 +497,14 @@ router.get('/barcode-label/:id', auth, async (req, res) => {
       await packetStock.save();
     }
     
+    // Generate ITF barcode image
+    const itfBarcodeImage = await generateITFBarcodeImage(packetStock.barcode);
+    
     return res.json({
       success: true,
       data: {
         barcode: packetStock.barcode,
+        barcodeImage: itfBarcodeImage,
         qrCode: packetStock.qrCode?.dataUrl,
         productName: packetStock.product?.name,
         productCode: packetStock.product?.productCode,
@@ -476,6 +521,198 @@ router.get('/barcode-label/:id', auth, async (req, res) => {
       success: false,
       message: error.message || 'Server error'
     });
+  }
+});
+
+/**
+ * @route   GET /api/packet-stock/print-label/:id
+ * @desc    Render a printable HTML page with barcode label
+ * @access  Public (for print popup)
+ */
+router.get('/print-label/:id', async (req, res) => {
+  try {
+    const packetStock = await PacketStock.findById(req.params.id)
+      .populate('product', 'name productCode')
+      .populate('supplier', 'name company');
+    
+    if (!packetStock) {
+      return res.status(404).send('Packet not found');
+    }
+    
+    // Generate ITF barcode image
+    const itfBarcodeImage = await generateITFBarcodeImage(packetStock.barcode);
+    
+    const compositionText = packetStock.composition
+      ?.map(c => `${c.color}/${c.size} × ${c.quantity}`)
+      .join(', ') || '—';
+    
+    const productName = packetStock.product?.name || 'Unknown Product';
+    const productCode = packetStock.product?.productCode || 'N/A';
+    const supplierName = packetStock.supplier?.name || packetStock.supplier?.company || 'N/A';
+    const isLoose = packetStock.isLoose;
+    const price = packetStock.suggestedSellingPrice || 0;
+    
+    const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Barcode: ${packetStock.barcode}</title>
+  <style>
+    @page {
+      size: 80mm 50mm;
+      margin: 2mm;
+    }
+    
+    * {
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 10px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      background: #f5f5f5;
+    }
+    
+    .label-container {
+      background: white;
+      border: 2px solid #333;
+      border-radius: 8px;
+      padding: 15px;
+      width: 300px;
+      text-align: center;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+    }
+    
+    .product-name {
+      font-size: 14px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    
+    .product-code {
+      font-size: 11px;
+      color: #666;
+      margin-bottom: 8px;
+      font-family: 'Courier New', monospace;
+    }
+    
+    .barcode-image {
+      margin: 10px 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 60px;
+    }
+    
+    .barcode-image img {
+      max-width: 100%;
+      height: auto;
+    }
+    
+    .barcode-number {
+      font-size: 16px;
+      font-weight: bold;
+      font-family: 'Courier New', monospace;
+      letter-spacing: 2px;
+      color: #000;
+      margin: 8px 0;
+    }
+    
+    .composition {
+      font-size: 10px;
+      color: #666;
+      margin-bottom: 8px;
+    }
+    
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    
+    .badge-packet {
+      background: #e3f2fd;
+      color: #1976d2;
+    }
+    
+    .badge-loose {
+      background: #fff3e0;
+      color: #f57c00;
+    }
+    
+    .price {
+      font-size: 18px;
+      font-weight: bold;
+      color: #2e7d32;
+    }
+    
+    .print-button {
+      margin-top: 15px;
+      padding: 10px 25px;
+      background: #1976d2;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    
+    .print-button:hover {
+      background: #1565c0;
+    }
+    
+    @media print {
+      body {
+        background: white;
+        padding: 0;
+        min-height: auto;
+      }
+      
+      .label-container {
+        box-shadow: none;
+        border: 1px solid #000;
+      }
+      
+      .no-print {
+        display: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="label-container">
+    <div class="product-name">${productName}</div>
+    <div class="product-code">SKU: ${productCode}</div>
+    ${itfBarcodeImage ? `<div class="barcode-image"><img src="${itfBarcodeImage}" alt="Barcode" /></div>` : ''}
+    <div class="barcode-number">${packetStock.barcode}</div>
+    <div class="composition">${compositionText}</div>
+    <span class="badge ${isLoose ? 'badge-loose' : 'badge-packet'}">${isLoose ? 'LOOSE' : 'PACKET'}</span>
+    <div class="price">£${price.toFixed(2)}</div>
+    <button class="print-button no-print" onclick="window.print();">🖨️ Print Label</button>
+  </div>
+</body>
+</html>
+    `;
+    
+    res.setHeader('Content-Type', 'text/html');
+    res.send(html);
+  } catch (error) {
+    console.error('Print label error:', error);
+    return res.status(500).send('Failed to generate label');
   }
 });
 
