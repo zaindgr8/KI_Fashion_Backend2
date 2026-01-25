@@ -1017,139 +1017,6 @@ router.get('/stock-summary', auth, async (req, res) => {
 const Return = require('../models/Return');
 const SaleReturn = require('../models/SaleReturn');
 const Payment = require('../models/Payment');
-
-// Profit & Loss Report
-router.get('/profit-loss', auth, async (req, res) => {
-  try {
-    const { startDate, endDate } = req.query;
-
-    const dateCondition = {};
-    if (startDate) dateCondition.$gte = new Date(startDate);
-    if (endDate) {
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      dateCondition.$lte = end;
-    }
-
-    // Total Sales
-    const salesAgg = await Sale.aggregate([
-      {
-        $match: {
-          ...(Object.keys(dateCondition).length > 0 && { saleDate: dateCondition })
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalSales: { $sum: '$grandTotal' }
-        }
-      }
-    ]);
-
-    // Sales Returns
-    const salesReturnsAgg = await SaleReturn.aggregate([
-      {
-        $match: {
-          status: 'approved',
-          ...(Object.keys(dateCondition).length > 0 && { returnedAt: dateCondition })
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalReturns: { $sum: '$totalReturnValue' }
-        }
-      }
-    ]);
-
-    // Total Purchases
-    const purchasesAgg = await DispatchOrder.aggregate([
-      {
-        $match: {
-          status: 'confirmed',
-          ...(Object.keys(dateCondition).length > 0 && { dispatchDate: dateCondition })
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalPurchases: { $sum: '$grandTotal' }
-        }
-      }
-    ]);
-
-    // Purchase Returns
-    const purchaseReturnsAgg = await Return.aggregate([
-      {
-        $match: {
-          ...(Object.keys(dateCondition).length > 0 && { returnedAt: dateCondition })
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalReturns: { $sum: '$totalReturnValue' }
-        }
-      }
-    ]);
-
-    // Expenses by category
-    const expensesAgg = await Expense.aggregate([
-      {
-        $match: {
-          status: 'approved',
-          ...(Object.keys(dateCondition).length > 0 && { expenseDate: dateCondition })
-        }
-      },
-      {
-        $lookup: {
-          from: 'costtypes',
-          localField: 'costType',
-          foreignField: '_id',
-          as: 'costTypeInfo'
-        }
-      },
-      { $unwind: { path: '$costTypeInfo', preserveNullAndEmptyArrays: true } },
-      {
-        $group: {
-          _id: '$costTypeInfo.name',
-          totalAmount: { $sum: { $add: ['$amount', { $ifNull: ['$taxAmount', 0] }] } }
-        }
-      }
-    ]);
-
-    const totalSales = salesAgg[0]?.totalSales || 0;
-    const salesReturns = salesReturnsAgg[0]?.totalReturns || 0;
-    const totalPurchases = purchasesAgg[0]?.totalPurchases || 0;
-    const purchaseReturns = purchaseReturnsAgg[0]?.totalReturns || 0;
-    const totalExpenses = expensesAgg.reduce((sum, e) => sum + e.totalAmount, 0);
-    
-    const netSales = totalSales - salesReturns;
-    const netPurchases = totalPurchases - purchaseReturns;
-    const grossProfit = netSales - netPurchases;
-    const netProfit = grossProfit - totalExpenses;
-    const profitMargin = netSales > 0 ? ((netProfit / netSales) * 100).toFixed(2) : 0;
-
-    res.json({
-      success: true,
-      data: {
-        totalSales,
-        salesReturns,
-        totalPurchases,
-        purchaseReturns,
-        totalExpenses,
-        expensesByCategory: expensesAgg,
-        grossProfit,
-        netProfit,
-        profitMargin
-      }
-    });
-  } catch (error) {
-    console.error('Profit/Loss report error:', error);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
 // Daily Sales Report
 router.get('/daily-sales', auth, async (req, res) => {
   try {
@@ -1723,7 +1590,7 @@ router.get('/profit-loss', auth, async (req, res) => {
       .populate('buyer', 'name company email phone')
       .populate({
         path: 'items.product',
-        select: 'name productCode averageCostPrice',
+        select: 'name productCode pricing supplier',
         populate: {
           path: 'supplier',
           select: 'name'
@@ -1737,12 +1604,36 @@ router.get('/profit-loss', auth, async (req, res) => {
     let totalProfit = 0;
     let totalLoss = 0;
 
+    // Get all inventory records for cost lookup
+    const inventoryMap = {};
+    const inventory = await Inventory.find({}).lean();
+    inventory.forEach(inv => {
+      if (inv.product && inv.supplier) {
+        const key = `${inv.product}_${inv.supplier}`;
+        inventoryMap[key] = inv.averageCostPrice || 0;
+      }
+    });
+
     sales.forEach(sale => {
       if (sale.items && sale.items.length > 0) {
         sale.items.forEach((item, idx) => {
           const unitSellingPrice = item.unitPrice || 0;
-          const averageCost = item.product?.averageCostPrice || 0;
           const quantity = item.quantity || 0;
+          
+          // Get average cost from Product pricing or Inventory
+          let averageCost = 0;
+          if (item.product?.pricing?.costPrice) {
+            averageCost = item.product.pricing.costPrice;
+          }
+          
+          // Try to get supplier-specific cost from inventory
+          if (item.product?.supplier) {
+            const inventoryKey = `${item.product._id}_${item.product.supplier}`;
+            if (inventoryMap[inventoryKey]) {
+              averageCost = inventoryMap[inventoryKey];
+            }
+          }
+          
           const pnl = (unitSellingPrice - averageCost) * quantity;
 
           plData.push({
