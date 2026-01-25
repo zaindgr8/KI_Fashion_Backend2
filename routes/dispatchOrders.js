@@ -2344,6 +2344,128 @@ router.post('/:id/confirm', auth, async (req, res) => {
       item.landedPrice = itemsWithPrices[index].landedPrice;
     });
 
+    // ==========================================
+    // STEP 2.5: Generate and save barcodes
+    // ==========================================
+    console.log(`[Confirm Order] Generating barcodes for order ${dispatchOrder.orderNumber}...`);
+    
+    try {
+      const bwipjs = require('bwip-js');
+      const barcodeData = [];
+
+      for (const item of dispatchOrder.items) {
+        const productName = item.productName || item.product?.name || 'Unknown Product';
+        const productCode = item.productCode || item.product?.productCode || item.product?.sku || 'N/A';
+
+        // If item has packets, generate barcode for each packet
+        if (item.packets && item.packets.length > 0) {
+          for (const packet of item.packets) {
+            // Find the PacketStock for this packet to get the barcode
+            const packetStock = await PacketStock.findOne({
+              product: item.product?._id || item.product,
+              supplier: dispatchOrder.supplier._id,
+              composition: packet.composition,
+              isLoose: packet.isLoose || false
+            });
+
+            if (packetStock && packetStock.barcode) {
+              barcodeData.push({
+                barcodeNumber: packetStock.barcode,
+                productName: productName,
+                productCode: productCode,
+                packetNumber: packet.packetNumber,
+                composition: packet.composition,
+                isLoose: packet.isLoose || false
+              });
+            }
+          }
+        } else {
+          // No packets - try to find any packet stock for this product
+          const packetStocks = await PacketStock.find({
+            product: item.product?._id || item.product,
+            supplier: dispatchOrder.supplier._id,
+            isActive: true
+          }).limit(item.quantity);
+
+          for (const packetStock of packetStocks) {
+            barcodeData.push({
+              barcodeNumber: packetStock.barcode,
+              productName: productName,
+              productCode: productCode,
+              composition: packetStock.composition,
+              isLoose: packetStock.isLoose
+            });
+          }
+        }
+      }
+
+      // Generate barcode images if we have barcode data
+      if (barcodeData.length > 0) {
+        const barcodeImages = [];
+        
+        for (const data of barcodeData) {
+          try {
+            // Extract numeric part from barcode (e.g., "PKT-A1B2C3D4" -> "A1B2C3D4")
+            const barcodeText = data.barcodeNumber;
+            const barcodePart = barcodeText.split('-')[1] || barcodeText;
+            
+            // Convert hex characters to numeric string for ITF
+            let numericBarcode = '';
+            for (let i = 0; i < barcodePart.length; i++) {
+              const char = barcodePart[i];
+              if (char >= '0' && char <= '9') {
+                numericBarcode += char;
+              } else if (char >= 'A' && char <= 'F') {
+                numericBarcode += (char.charCodeAt(0) - 65 + 10).toString();
+              }
+            }
+            
+            // Ensure even length for ITF
+            if (numericBarcode.length % 2 !== 0) {
+              numericBarcode = '0' + numericBarcode;
+            }
+
+            // Generate barcode using ITF format
+            const png = await bwipjs.toBuffer({
+              bcid: 'interleaved2of5',
+              text: numericBarcode,
+              scale: 3,
+              height: 10,
+              includetext: false,
+              textxalign: 'center',
+            });
+
+            const base64Image = png.toString('base64');
+
+            barcodeImages.push({
+              barcodeNumber: data.barcodeNumber,
+              productName: data.productName,
+              productCode: data.productCode,
+              barcodeImage: `data:image/png;base64,${base64Image}`,
+              composition: data.composition,
+              isLoose: data.isLoose,
+              packetNumber: data.packetNumber
+            });
+          } catch (barcodeError) {
+            console.error(`[Confirm Order] Error generating barcode for ${data.barcodeNumber}:`, barcodeError);
+            // Continue with other barcodes even if one fails
+          }
+        }
+
+        // Save barcodes to dispatch order
+        if (barcodeImages.length > 0) {
+          dispatchOrder.barcodeData = barcodeImages;
+          dispatchOrder.barcodeGeneratedAt = new Date();
+          console.log(`[Confirm Order] Generated ${barcodeImages.length} barcodes for order ${dispatchOrder.orderNumber}`);
+        }
+      } else {
+        console.log(`[Confirm Order] No barcode data found for order ${dispatchOrder.orderNumber}`);
+      }
+    } catch (barcodeError) {
+      console.error(`[Confirm Order] Barcode generation error (non-blocking):`, barcodeError);
+      // Don't fail confirmation if barcode generation fails
+    }
+
     await dispatchOrder.save();
     console.log(`[Confirm Order] Order saved with final remainingBalance: €${dispatchOrder.paymentDetails.remainingBalance.toFixed(2)}`);
 
