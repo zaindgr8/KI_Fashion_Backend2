@@ -3,7 +3,13 @@ const User = require('../models/User');
 
 const auth = async (req, res, next) => {
   try {
-    const token = req.header('Authorization')?.replace('Bearer ', '');
+    // Try to get token from Authorization header first, then from query parameter
+    let token = req.header('Authorization')?.replace('Bearer ', '');
+    
+    // Fallback to query parameter (useful for links that open in new tabs)
+    if (!token && req.query.token) {
+      token = req.query.token;
+    }
 
     if (!token) {
       return res.status(401).json({
