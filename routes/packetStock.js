@@ -500,20 +500,25 @@ router.get('/barcode-label/:id', auth, async (req, res) => {
     // Generate ITF barcode image
     const itfBarcodeImage = await generateITFBarcodeImage(packetStock.barcode);
     
+    const responseData = {
+      barcode: packetStock.barcode,
+      barcodeImage: itfBarcodeImage,
+      qrCode: packetStock.qrCode?.dataUrl,
+      productName: packetStock.product?.name,
+      productCode: packetStock.product?.productCode,
+      supplierName: packetStock.supplier?.name || packetStock.supplier?.company,
+      composition: packetStock.composition,
+      totalItemsPerPacket: packetStock.totalItemsPerPacket,
+      isLoose: packetStock.isLoose,
+      availablePackets: packetStock.availablePackets,
+      suggestedSellingPrice: packetStock.suggestedSellingPrice
+    };
+    
+    console.log('[Barcode Label] Response data:', JSON.stringify(responseData, null, 2));
+    
     return res.json({
       success: true,
-      data: {
-        barcode: packetStock.barcode,
-        barcodeImage: itfBarcodeImage,
-        qrCode: packetStock.qrCode?.dataUrl,
-        productName: packetStock.product?.name,
-        productCode: packetStock.product?.productCode,
-        supplierName: packetStock.supplier?.name || packetStock.supplier?.company,
-        composition: packetStock.composition,
-        totalItemsPerPacket: packetStock.totalItemsPerPacket,
-        isLoose: packetStock.isLoose,
-        availablePackets: packetStock.availablePackets
-      }
+      data: responseData
     });
   } catch (error) {
     console.error('Get barcode label error:', error);

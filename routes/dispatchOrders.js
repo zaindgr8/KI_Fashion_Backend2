@@ -2606,6 +2606,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             quantity: item.quantity,
             data: looseBarcode,
             dataUrl: dataUrl,
+            isLoose: true,
             generatedAt: new Date()
           });
         }
@@ -4343,6 +4344,7 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
           quantity: item.quantity,
           data: looseBarcode,
           dataUrl: dataUrl,
+          isLoose: true,
           generatedAt: new Date()
         });
       }
@@ -4545,6 +4547,7 @@ router.get('/:id/barcodes', async (req, res) => {
           quantity: item.quantity,
           data: looseBarcode,
           dataUrl: dataUrl,
+          isLoose: true,
           generatedAt: new Date()
         });
       }
