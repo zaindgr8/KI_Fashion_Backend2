@@ -1220,29 +1220,31 @@ router.get('/daily-buying', auth, async (req, res) => {
       .sort({ dispatchDate: -1 })
       .lean();
 
-    // Calculate paid amounts from payments
-    const purchasesWithAmounts = await Promise.all(purchases.map(async (purchase) => {
-      const payments = await Payment.find({ 
-        dispatchOrder: purchase._id,
-        type: 'supplier'
-      }).lean();
-      
-      const amountPaid = payments.reduce((sum, p) => sum + (p.amount || 0), 0);
+    // Map purchases to include cash and bank payment data
+    const purchasesWithPayments = purchases.map((purchase) => {
+      const cashPayment = purchase.paymentDetails?.cashPayment || 0;
+      const bankPayment = purchase.paymentDetails?.bankPayment || 0;
       
       return {
         ...purchase,
-        amountPaid,
-        balance: (purchase.grandTotal || 0) - amountPaid
+        discount: purchase.totalDiscount || 0,
+        cashPayment,
+        bankPayment,
+        totalPayment: cashPayment + bankPayment,
+        balance: (purchase.grandTotal || 0) - (cashPayment + bankPayment)
       };
-    }));
+    });
 
     res.json({
       success: true,
       data: {
-        purchases: purchasesWithAmounts,
+        purchases: purchasesWithPayments,
         summary: {
           totalOrders: purchases.length,
-          totalAmount: purchases.reduce((sum, p) => sum + (p.grandTotal || 0), 0)
+          totalAmount: purchases.reduce((sum, p) => sum + (p.grandTotal || 0), 0),
+          totalDiscount: purchases.reduce((sum, p) => sum + (p.totalDiscount || 0), 0),
+          totalCashPayment: purchasesWithPayments.reduce((sum, p) => sum + p.cashPayment, 0),
+          totalBankPayment: purchasesWithPayments.reduce((sum, p) => sum + p.bankPayment, 0)
         }
       }
     });
