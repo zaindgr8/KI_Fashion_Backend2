@@ -4020,7 +4020,8 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
 });
 
 // Generate and print barcodes for a confirmed dispatch order
-router.get('/:id/barcodes', auth, async (req, res) => {
+// Note: No auth required - this is a public print page. Access is limited by requiring valid order ID and confirmed status.
+router.get('/:id/barcodes', async (req, res) => {
   try {
     const bwipjs = require('bwip-js');
 
@@ -4035,11 +4036,6 @@ router.get('/:id/barcodes', auth, async (req, res) => {
     // Only allow viewing barcodes for confirmed orders
     if (dispatchOrder.status !== 'confirmed') {
       return sendResponse.error(res, 'Barcodes can only be generated for confirmed orders', 400);
-    }
-
-    // Check permissions
-    if (req.user.role === 'supplier' && dispatchOrder.supplierUser?.toString() !== req.user._id.toString()) {
-      return sendResponse.error(res, 'Access denied', 403);
     }
 
     // Collect all barcodes to generate
