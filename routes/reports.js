@@ -1702,4 +1702,85 @@ router.get('/buying-returns', auth, async (req, res) => {
   }
 });
 
+// Profit & Loss Report
+router.get('/profit-loss', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.saleDate = {};
+      if (startDate) matchConditions.saleDate.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.saleDate.$lte = end;
+      }
+    }
+
+    // Fetch all sales with populated relationships
+    const sales = await Sale.find(matchConditions)
+      .populate('buyer', 'name company email phone')
+      .populate({
+        path: 'items.product',
+        select: 'name productCode averageCostPrice',
+        populate: {
+          path: 'supplier',
+          select: 'name'
+        }
+      })
+      .sort({ saleDate: -1 })
+      .lean();
+
+    // Flatten sales items into transaction-level rows with P&L calculation
+    const plData = [];
+    let totalProfit = 0;
+    let totalLoss = 0;
+
+    sales.forEach(sale => {
+      if (sale.items && sale.items.length > 0) {
+        sale.items.forEach((item, idx) => {
+          const unitSellingPrice = item.unitPrice || 0;
+          const averageCost = item.product?.averageCostPrice || 0;
+          const quantity = item.quantity || 0;
+          const pnl = (unitSellingPrice - averageCost) * quantity;
+
+          plData.push({
+            sno: plData.length + 1,
+            transactionDate: sale.saleDate,
+            invoiceNumber: sale.saleNumber || sale.invoiceNumber,
+            customerName: sale.buyer?.name || sale.buyer?.company || 'Walk-in',
+            productCode: item.product?.productCode || '—',
+            itemsSold: quantity,
+            sellingPrice: unitSellingPrice,
+            totalSales: item.totalPrice || 0,
+            averagePrice: unitSellingPrice,
+            averageCost: averageCost,
+            pnl: pnl
+          });
+
+          if (pnl > 0) totalProfit += pnl;
+          else if (pnl < 0) totalLoss += Math.abs(pnl);
+        });
+      }
+    });
+
+    res.json({
+      success: true,
+      data: {
+        plData,
+        summary: {
+          totalTransactions: plData.length,
+          totalProfit: totalProfit,
+          totalLoss: totalLoss,
+          netPnL: totalProfit - totalLoss
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Profit & Loss report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;
