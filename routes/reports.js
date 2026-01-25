@@ -1224,14 +1224,16 @@ router.get('/daily-buying', auth, async (req, res) => {
     const purchasesWithPayments = purchases.map((purchase) => {
       const cashPayment = purchase.paymentDetails?.cashPayment || 0;
       const bankPayment = purchase.paymentDetails?.bankPayment || 0;
+      const supplierTotal = purchase.supplierPaymentTotal || 0;
       
       return {
         ...purchase,
+        grandTotal: supplierTotal,
         discount: purchase.totalDiscount || 0,
         cashPayment,
         bankPayment,
         totalPayment: cashPayment + bankPayment,
-        balance: (purchase.grandTotal || 0) - (cashPayment + bankPayment)
+        balance: supplierTotal - (cashPayment + bankPayment)
       };
     });
 
@@ -1241,7 +1243,7 @@ router.get('/daily-buying', auth, async (req, res) => {
         purchases: purchasesWithPayments,
         summary: {
           totalOrders: purchases.length,
-          totalAmount: purchases.reduce((sum, p) => sum + (p.grandTotal || 0), 0),
+          totalAmount: purchases.reduce((sum, p) => sum + (p.supplierPaymentTotal || 0), 0),
           totalDiscount: purchases.reduce((sum, p) => sum + (p.totalDiscount || 0), 0),
           totalCashPayment: purchasesWithPayments.reduce((sum, p) => sum + p.cashPayment, 0),
           totalBankPayment: purchasesWithPayments.reduce((sum, p) => sum + p.bankPayment, 0)
@@ -1323,13 +1325,22 @@ router.get('/buying-product-wise', auth, async (req, res) => {
       .sort({ dispatchDate: -1 })
       .lean();
 
+    // Use supplier payment totals (without exchange rate/percentage markup)
+    const purchasesWithCorrectTotals = purchases.map((p) => ({
+      ...p,
+      grandTotal: p.supplierPaymentTotal || 0,
+      discount: p.totalDiscount || 0
+    }));
+
     res.json({
       success: true,
       data: {
-        purchases,
+        purchases: purchasesWithCorrectTotals,
         summary: {
           totalPurchases: purchases.length,
-          totalItems: purchases.reduce((sum, p) => sum + (p.items?.length || 0), 0)
+          totalItems: purchases.reduce((sum, p) => sum + (p.items?.length || 0), 0),
+          totalAmount: purchases.reduce((sum, p) => sum + (p.supplierPaymentTotal || 0), 0),
+          totalDiscount: purchases.reduce((sum, p) => sum + (p.totalDiscount || 0), 0)
         }
       }
     });
