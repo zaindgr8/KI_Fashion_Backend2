@@ -4019,4 +4019,331 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
   }
 });
 
+// Generate and print barcodes for a confirmed dispatch order
+router.get('/:id/barcodes', auth, async (req, res) => {
+  try {
+    const bwipjs = require('bwip-js');
+
+    const dispatchOrder = await DispatchOrder.findById(req.params.id)
+      .populate('supplier', 'name company')
+      .populate('items.product', 'name sku productCode');
+
+    if (!dispatchOrder) {
+      return sendResponse.error(res, 'Dispatch order not found', 404);
+    }
+
+    // Only allow viewing barcodes for confirmed orders
+    if (dispatchOrder.status !== 'confirmed') {
+      return sendResponse.error(res, 'Barcodes can only be generated for confirmed orders', 400);
+    }
+
+    // Check permissions
+    if (req.user.role === 'supplier' && dispatchOrder.supplierUser?.toString() !== req.user._id.toString()) {
+      return sendResponse.error(res, 'Access denied', 403);
+    }
+
+    // Collect all barcodes to generate
+    const barcodeData = [];
+
+    for (const item of dispatchOrder.items) {
+      const productName = item.productName || item.product?.name || 'Unknown Product';
+      const productCode = item.productCode || item.product?.productCode || item.product?.sku || 'N/A';
+
+      // If item has packets, generate barcode for each packet
+      if (item.packets && item.packets.length > 0) {
+        for (const packet of item.packets) {
+          // Find the PacketStock for this packet to get the barcode
+          const packetStock = await PacketStock.findOne({
+            product: item.product?._id || item.product,
+            supplier: dispatchOrder.supplier._id,
+            composition: packet.composition,
+            isLoose: packet.isLoose || false
+          });
+
+          if (packetStock && packetStock.barcode) {
+            barcodeData.push({
+              barcodeNumber: packetStock.barcode,
+              productName: productName,
+              productCode: productCode,
+              packetNumber: packet.packetNumber,
+              composition: packet.composition,
+              isLoose: packet.isLoose || false
+            });
+          }
+        }
+      } else {
+        // No packets - try to find any packet stock for this product
+        const packetStocks = await PacketStock.find({
+          product: item.product?._id || item.product,
+          supplier: dispatchOrder.supplier._id,
+          isActive: true
+        }).limit(item.quantity);
+
+        for (const packetStock of packetStocks) {
+          barcodeData.push({
+            barcodeNumber: packetStock.barcode,
+            productName: productName,
+            productCode: productCode,
+            composition: packetStock.composition,
+            isLoose: packetStock.isLoose
+          });
+        }
+      }
+    }
+
+    if (barcodeData.length === 0) {
+      return sendResponse.error(res, 'No barcodes found for this order. Please ensure the order has been properly confirmed with packet tracking.', 404);
+    }
+
+    // Generate barcode images using bwip-js
+    const barcodeImages = [];
+    for (const data of barcodeData) {
+      try {
+        // Extract numeric part from barcode (e.g., "PKT-A1B2C3D4" -> "A1B2C3D4")
+        // For ITF format, we need to convert the hex string to digits
+        const barcodeText = data.barcodeNumber;
+        const barcodePart = barcodeText.split('-')[1] || barcodeText;
+        
+        // Convert hex characters to numeric string for ITF
+        // ITF requires even-length numeric strings
+        let numericBarcode = '';
+        for (let i = 0; i < barcodePart.length; i++) {
+          const char = barcodePart[i];
+          if (char >= '0' && char <= '9') {
+            numericBarcode += char;
+          } else if (char >= 'A' && char <= 'F') {
+            numericBarcode += (char.charCodeAt(0) - 65 + 10).toString();
+          }
+        }
+        
+        // Ensure even length for ITF
+        if (numericBarcode.length % 2 !== 0) {
+          numericBarcode = '0' + numericBarcode;
+        }
+
+        // Generate barcode using ITF format
+        const png = await bwipjs.toBuffer({
+          bcid: 'interleaved2of5',
+          text: numericBarcode,
+          scale: 3,
+          height: 10,
+          includetext: false,
+          textxalign: 'center',
+        });
+
+        const base64Image = png.toString('base64');
+
+        barcodeImages.push({
+          barcodeNumber: data.barcodeNumber,
+          productName: data.productName,
+          productCode: data.productCode,
+          barcodeImage: `data:image/png;base64,${base64Image}`,
+          composition: data.composition,
+          isLoose: data.isLoose,
+          packetNumber: data.packetNumber
+        });
+      } catch (barcodeError) {
+        console.error(`Error generating barcode for ${data.barcodeNumber}:`, barcodeError);
+        // Continue with other barcodes even if one fails
+      }
+    }
+
+    // Generate HTML page with printable barcodes in a grid layout
+    const html = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Barcodes - Order ${dispatchOrder.orderNumber}</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 15mm;
+    }
+    
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    
+    .print-header {
+      text-align: center;
+      margin-bottom: 20px;
+      page-break-after: avoid;
+    }
+    
+    .print-header h1 {
+      margin: 0 0 5px 0;
+      font-size: 24px;
+      color: #333;
+    }
+    
+    .print-header p {
+      margin: 0;
+      color: #666;
+      font-size: 14px;
+    }
+    
+    .barcode-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 15px;
+      margin: 0 auto;
+    }
+    
+    .barcode-item {
+      background: white;
+      border: 2px solid #ddd;
+      border-radius: 8px;
+      padding: 15px;
+      text-align: center;
+      page-break-inside: avoid;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .barcode-number {
+      font-size: 16px;
+      font-weight: bold;
+      color: #333;
+      margin-bottom: 10px;
+      font-family: 'Courier New', monospace;
+    }
+    
+    .barcode-image {
+      margin: 10px 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 80px;
+    }
+    
+    .barcode-image img {
+      max-width: 100%;
+      height: auto;
+    }
+    
+    .product-info {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid #eee;
+    }
+    
+    .product-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: #555;
+      margin-bottom: 3px;
+    }
+    
+    .product-code {
+      font-size: 12px;
+      color: #888;
+      font-family: 'Courier New', monospace;
+    }
+    
+    .badge {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 600;
+      margin-top: 5px;
+    }
+    
+    .badge-packet {
+      background: #e3f2fd;
+      color: #1976d2;
+    }
+    
+    .badge-loose {
+      background: #fff3e0;
+      color: #f57c00;
+    }
+    
+    @media print {
+      body {
+        background: white;
+        padding: 10mm;
+      }
+      
+      .no-print {
+        display: none;
+      }
+      
+      .barcode-item {
+        box-shadow: none;
+      }
+    }
+    
+    .print-button {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      padding: 12px 24px;
+      background: #1976d2;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 16px;
+      cursor: pointer;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+      z-index: 1000;
+    }
+    
+    .print-button:hover {
+      background: #1565c0;
+    }
+  </style>
+</head>
+<body>
+  <button class="print-button no-print" onclick="window.print()">🖨️ Print Barcodes</button>
+  
+  <div class="print-header">
+    <h1>Barcode Labels</h1>
+    <p>Order: ${dispatchOrder.orderNumber} | Supplier: ${dispatchOrder.supplier?.name || 'N/A'} | Total Labels: ${barcodeImages.length}</p>
+  </div>
+  
+  <div class="barcode-grid">
+    ${barcodeImages.map(item => `
+      <div class="barcode-item">
+        <div class="barcode-number">${item.barcodeNumber}</div>
+        <div class="barcode-image">
+          <img src="${item.barcodeImage}" alt="${item.barcodeNumber}" />
+        </div>
+        <div class="product-info">
+          <div class="product-name">${item.productName}</div>
+          <div class="product-code">SKU: ${item.productCode}</div>
+          <span class="badge ${item.isLoose ? 'badge-loose' : 'badge-packet'}">
+            ${item.isLoose ? 'LOOSE' : 'PACKET'}
+          </span>
+        </div>
+      </div>
+    `).join('')}
+  </div>
+  
+  <script>
+    // Auto-open print dialog after page loads
+    window.onload = function() {
+      setTimeout(() => {
+        // Uncomment to auto-print on load
+        // window.print();
+      }, 500);
+    };
+  </script>
+</body>
+</html>
+    `;
+
+    res.setHeader('Content-Type', 'text/html');
+    res.send(html);
+
+  } catch (error) {
+    console.error('Generate barcodes error:', error);
+    return sendResponse.error(res, error.message || 'Failed to generate barcodes', 500);
+  }
+});
+
 module.exports = router;
