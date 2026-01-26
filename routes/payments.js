@@ -519,12 +519,19 @@ router.get('/all', auth, async (req, res) => {
       .populate('createdBy', 'name')
       .lean();
 
+    // Filter out payments with null/deleted customers if needed
+    const validPayments = payments.filter(p => p.customerId);
+    
+    if (validPayments.length < payments.length) {
+      console.warn(`Filtered out ${payments.length - validPayments.length} payments with missing customer references`);
+    }
+
     const total = await Payment.countDocuments(query);
 
     res.json({
       success: true,
       data: {
-        payments,
+        payments: validPayments,
         pagination: {
           currentPage: parseInt(page),
           totalPages: Math.ceil(total / parseInt(limit)),

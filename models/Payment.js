@@ -231,6 +231,7 @@ paymentSchema.statics.getCustomerPayments = async function(customerId, options =
     .sort({ paymentDate: -1, createdAt: -1 })
     .skip(offset)
     .limit(limit)
+    .populate('customerId', 'name company email phone')
     .populate('createdBy', 'name')
     .populate('reversalInfo.reversedBy', 'name')
     .lean();
