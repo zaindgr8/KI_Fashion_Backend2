@@ -1981,6 +1981,26 @@ router.post('/:id/confirm', auth, async (req, res) => {
           const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
           const productId = product._id;
           
+          // Helper function to generate barcode image
+          const bwipjs = require('bwip-js');
+          const generateBarcodeImage = async (barcodeText) => {
+            try {
+              const barcodeBuffer = await bwipjs.toBuffer({
+                bcid: 'code128',
+                text: barcodeText,
+                scale: 3,
+                height: 10,
+                includetext: true,
+                textxalign: 'center',
+                textsize: 8
+              });
+              return `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+            } catch (err) {
+              console.error(`[Confirm Order] Failed to generate barcode image for ${barcodeText}:`, err.message);
+              return null;
+            }
+          };
+          
           // Check if this is a loose item configuration (packets with isLoose: true)
           const hasLooseItems = item.packets.some(p => p.isLoose === true);
           
@@ -2042,6 +2062,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
                   console.log(`[Confirm Order] Added ${looseItem.quantity} loose items (${looseItem.color}/${looseItem.size}) to existing PacketStock ${looseBarcode}`);
                 } else {
                   // Create new packet stock for this loose item variant
+                  // Generate barcode image
+                  const looseBarcodeImage = await generateBarcodeImage(looseBarcode);
+                  
                   packetStock = new PacketStock({
                     barcode: looseBarcode,
                     product: productId,
@@ -2053,6 +2076,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     landedPricePerPacket: batchInfo.landedPrice,
                     suggestedSellingPrice: batchInfo.landedPrice * 1.20,
                     isLoose: true,
+                    barcodeImage: looseBarcodeImage ? {
+                      dataUrl: looseBarcodeImage,
+                      format: 'code128',
+                      generatedAt: new Date()
+                    } : undefined,
                     dispatchOrderHistory: [{
                       dispatchOrderId: dispatchOrder._id,
                       quantity: looseItem.quantity,
@@ -2118,6 +2146,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
                   console.log(`[Confirm Order] Added ${packetGroup.count} packets to existing PacketStock ${barcode}`);
                 } else {
                   // Create new packet stock
+                  // Generate barcode image
+                  const packetBarcodeImage = await generateBarcodeImage(barcode);
+                  
                   packetStock = new PacketStock({
                     barcode,
                     product: productId,
@@ -2129,6 +2160,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     landedPricePerPacket: landedPerPacket,
                     suggestedSellingPrice: landedPerPacket * 1.20,
                     isLoose: false,
+                    barcodeImage: packetBarcodeImage ? {
+                      dataUrl: packetBarcodeImage,
+                      format: 'code128',
+                      generatedAt: new Date()
+                    } : undefined,
                     dispatchOrderHistory: [{
                       dispatchOrderId: dispatchOrder._id,
                       quantity: packetGroup.count,
@@ -2199,6 +2235,24 @@ router.post('/:id/confirm', auth, async (req, res) => {
               console.log(`[Confirm Order] Added ${confirmedQuantity} loose items to existing PacketStock ${looseBarcode}`);
             } else {
               // Create new packet stock for loose items
+              // Generate barcode image (need bwipjs for this block too)
+              const bwipjsLoose = require('bwip-js');
+              let looseBarcodeImageDataUrl = null;
+              try {
+                const barcodeBuffer = await bwipjsLoose.toBuffer({
+                  bcid: 'code128',
+                  text: looseBarcode,
+                  scale: 3,
+                  height: 10,
+                  includetext: true,
+                  textxalign: 'center',
+                  textsize: 8
+                });
+                looseBarcodeImageDataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+              } catch (imgErr) {
+                console.error(`[Confirm Order] Failed to generate barcode image for ${looseBarcode}:`, imgErr.message);
+              }
+              
               packetStock = new PacketStock({
                 barcode: looseBarcode,
                 product: productId,
@@ -2210,6 +2264,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 landedPricePerPacket: batchInfo.landedPrice,
                 suggestedSellingPrice: batchInfo.landedPrice * 1.20,
                 isLoose: true,
+                barcodeImage: looseBarcodeImageDataUrl ? {
+                  dataUrl: looseBarcodeImageDataUrl,
+                  format: 'code128',
+                  generatedAt: new Date()
+                } : undefined,
                 dispatchOrderHistory: [{
                   dispatchOrderId: dispatchOrder._id,
                   quantity: confirmedQuantity,

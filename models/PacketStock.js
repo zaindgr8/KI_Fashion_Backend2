@@ -110,6 +110,13 @@ const packetStockSchema = new mongoose.Schema({
     generatedAt: Date
   },
   
+  // Barcode image data for label printing
+  barcodeImage: {
+    dataUrl: String,
+    format: String,  // e.g., 'code128'
+    generatedAt: Date
+  },
+  
   // Break history - tracks when packets are broken and items sold individually
   breakHistory: [{
     brokenAt: {

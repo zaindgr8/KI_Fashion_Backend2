@@ -472,7 +472,7 @@ router.post('/sell', auth, async (req, res) => {
 router.get('/barcode-label/:id', auth, async (req, res) => {
   try {
     const packetStock = await PacketStock.findById(req.params.id)
-      .populate('product', 'name productCode')
+      .populate('product', 'name productCode sku')
       .populate('supplier', 'name company');
     
     if (!packetStock) {
@@ -497,15 +497,45 @@ router.get('/barcode-label/:id', auth, async (req, res) => {
       await packetStock.save();
     }
     
-    // Generate ITF barcode image
-    const itfBarcodeImage = await generateITFBarcodeImage(packetStock.barcode);
+    // Use stored barcode image if available, otherwise generate on-the-fly
+    let barcodeImageDataUrl = packetStock.barcodeImage?.dataUrl;
+    
+    if (!barcodeImageDataUrl) {
+      // Fallback: generate barcode image for older records that don't have it stored
+      const bwipjs = require('bwip-js');
+      try {
+        const barcodeBuffer = await bwipjs.toBuffer({
+          bcid: 'code128',
+          text: packetStock.barcode,
+          scale: 3,
+          height: 10,
+          includetext: true,
+          textxalign: 'center',
+          textsize: 8
+        });
+        barcodeImageDataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+        
+        // Save the generated barcode image for future use
+        packetStock.barcodeImage = {
+          dataUrl: barcodeImageDataUrl,
+          format: 'code128',
+          generatedAt: new Date()
+        };
+        await packetStock.save();
+        console.log(`[Barcode Label] Generated and saved barcode image for ${packetStock.barcode}`);
+      } catch (barcodeErr) {
+        console.error(`[Barcode Label] Failed to generate barcode image:`, barcodeErr.message);
+        // Fall back to ITF barcode generation if code128 fails
+        barcodeImageDataUrl = await generateITFBarcodeImage(packetStock.barcode);
+      }
+    }
     
     const responseData = {
       barcode: packetStock.barcode,
-      barcodeImage: itfBarcodeImage,
+      barcodeImage: barcodeImageDataUrl,
       qrCode: packetStock.qrCode?.dataUrl,
       productName: packetStock.product?.name,
-      productCode: packetStock.product?.productCode,
+      productCode: packetStock.product?.productCode || packetStock.product?.sku,
       supplierName: packetStock.supplier?.name || packetStock.supplier?.company,
       composition: packetStock.composition,
       totalItemsPerPacket: packetStock.totalItemsPerPacket,
