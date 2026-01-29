@@ -1,6 +1,11 @@
 const mongoose = require('mongoose');
 
 const buyerSchema = new mongoose.Schema({
+  buyerId: {
+    type: String,
+    unique: true,
+    sparse: true
+  },
   name: {
     type: String,
     required: true,
@@ -101,6 +106,31 @@ const buyerSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
+  },
+  // Metadata for migration tracking and verification
+  metadata: {
+    isMigrated: {
+      type: Boolean,
+      default: false
+    },
+    migratedAt: {
+      type: Date
+    },
+    requiresVerification: {
+      type: Boolean,
+      default: false
+    },
+    needsContactUpdate: {
+      type: Boolean,
+      default: false
+    },
+    verifiedAt: {
+      type: Date
+    },
+    legacyId: {
+      type: String,
+      trim: true
+    }
   }
 }, {
   timestamps: true
@@ -113,5 +143,11 @@ buyerSchema.index({ customerType: 1, isActive: 1 });
 buyerSchema.index({ 'address.city': 1 });
 buyerSchema.index({ createdAt: -1 });
 buyerSchema.index({ createdBy: 1 });
+
+// Indexes for migration tracking
+buyerSchema.index({ 'metadata.isMigrated': 1 });
+buyerSchema.index({ 'metadata.requiresVerification': 1 });
+buyerSchema.index({ 'metadata.needsContactUpdate': 1 });
+buyerSchema.index({ 'metadata.isMigrated': 1, 'metadata.needsContactUpdate': 1 }); // Compound index for admin queries
 
 module.exports = mongoose.model('Buyer', buyerSchema);

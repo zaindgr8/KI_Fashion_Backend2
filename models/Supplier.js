@@ -83,6 +83,27 @@ const supplierSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     index: true
+  },
+  // Metadata for migration tracking and verification
+  metadata: {
+    isMigrated: {
+      type: Boolean,
+      default: false
+    },
+    migratedAt: {
+      type: Date
+    },
+    requiresVerification: {
+      type: Boolean,
+      default: false
+    },
+    verifiedAt: {
+      type: Date
+    },
+    legacyId: {
+      type: String,
+      trim: true
+    }
   }
 }, {
   timestamps: true,
@@ -91,27 +112,27 @@ const supplierSchema = new mongoose.Schema({
   toObject: { virtuals: true }
 });
 
-// Generate supplier ID before saving
-supplierSchema.pre('save', async function(next) {
+// Generate supplier ID before saving (skip if legacy ID is provided during migration)
+supplierSchema.pre('save', async function (next) {
   if (!this.supplierId) {
     // Find the highest existing supplierId
     const lastSupplier = await this.constructor.findOne({
       supplierId: { $regex: /^SUP\d{6}$/ }
     }).sort({ supplierId: -1 });
-    
+
     let nextNumber = 1;
     if (lastSupplier && lastSupplier.supplierId) {
       const lastNumber = parseInt(lastSupplier.supplierId.slice(3)) || 0;
       nextNumber = lastNumber + 1;
     }
-    
+
     this.supplierId = `SUP${String(nextNumber).padStart(6, '0')}`;
   }
   next();
 });
 
 // Virtual for balance calculation
-supplierSchema.virtual('balance').get(function() {
+supplierSchema.virtual('balance').get(function () {
   return this.currentBalance || 0;
 });
 
@@ -121,5 +142,10 @@ supplierSchema.index({ supplierType: 1 });
 supplierSchema.index({ createdAt: -1 });
 supplierSchema.index({ email: 1 });
 supplierSchema.index({ createdBy: 1 });
+
+// Indexes for migration tracking
+supplierSchema.index({ 'metadata.isMigrated': 1 });
+supplierSchema.index({ 'metadata.requiresVerification': 1 });
+supplierSchema.index({ 'metadata.isMigrated': 1, 'metadata.requiresVerification': 1 }); // Compound index for admin queries
 
 module.exports = mongoose.model('Supplier', supplierSchema);

@@ -12,7 +12,7 @@ const Buyer = require('../models/Buyer');
 
 // Configuration
 const DEFAULT_PASSWORD = '123456789';
-const MIGRATION_BOT_EMAIL = 'migration.bot@kifashion.system';
+const MIGRATION_BOT_EMAIL = 'migrationbot@kifashion.com';
 const MIGRATION_BOT_NAME = 'Migration Bot';
 
 // Stats tracking
@@ -49,7 +49,7 @@ async function connectDB() {
  */
 async function getOrCreateMigrationBot() {
   let bot = await User.findOne({ email: MIGRATION_BOT_EMAIL });
-  
+
   if (!bot) {
     bot = await User.create({
       name: MIGRATION_BOT_NAME,
@@ -65,7 +65,7 @@ async function getOrCreateMigrationBot() {
   } else {
     console.log('Migration Bot user found');
   }
-  
+
   return bot;
 }
 
@@ -84,16 +84,33 @@ function parseCSV(filePath) {
 }
 
 /**
- * Generate unique email for user
+ * Sanitize string for email use (remove spaces, special chars, convert to lowercase)
  */
-async function generateUniqueEmail(prefix, legacyId, attempt = 0) {
-  const suffix = attempt > 0 ? '_' + attempt : '';
-  const email = (prefix + '_' + legacyId + suffix + '@migrated.kifashion.local').toLowerCase();
-  
+function sanitizeForEmail(str) {
+  return str
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '') // Remove all non-alphanumeric characters
+    .trim();
+}
+
+/**
+ * Generate unique email for supplier: supplier_firstname_legacyid@kifashion.com
+ */
+async function generateUniqueSupplierEmail(name, legacyId, attempt = 0) {
+  // Extract first name (first word of the name)
+  const firstName = name.split(/\s+/)[0];
+  const sanitizedFirstName = sanitizeForEmail(firstName);
+  const sanitizedLegacyId = sanitizeForEmail(legacyId);
+
+  const suffix = attempt > 0 ? attempt : '';
+  const email = `supplier_${sanitizedFirstName}_${sanitizedLegacyId}${suffix}@kifashion.com`;
+
   const exists = await User.findOne({ email });
+
   if (exists) {
-    return generateUniqueEmail(prefix, legacyId, attempt + 1);
+    return generateUniqueSupplierEmail(name, legacyId, attempt + 1);
   }
+
   return email;
 }
 
@@ -102,10 +119,9 @@ async function generateUniqueEmail(prefix, legacyId, attempt = 0) {
  */
 async function migrateSuppliers(csvPath, migrationBot) {
   console.log('\nStarting Supplier Migration...');
-  
   const suppliers = await parseCSV(csvPath);
   console.log('Found ' + suppliers.length + ' suppliers in CSV');
-  
+
   for (const row of suppliers) {
     try {
       const legacyId = (row.Sup_Id || row.sup_id || '').trim();
@@ -113,16 +129,16 @@ async function migrateSuppliers(csvPath, migrationBot) {
       const phone = (row.Phone || '').trim() || ('MIGRATED-SUP-' + legacyId);
       const email = (row.Email || '').trim() || null;
       const address = (row.Address || '').trim() || null;
-      
+
       if (!legacyId || !name) {
         stats.suppliers.errors.push({ legacyId, error: 'Missing legacyId or name' });
         stats.suppliers.skipped++;
         continue;
       }
-      
-      // Generate unique email for User account
-      const userEmail = await generateUniqueEmail('supplier', legacyId);
-      
+
+      // Generate unique email: supplier_firstname_legacyid@kifashion.com
+      const userEmail = await generateUniqueSupplierEmail(name, legacyId);
+
       // Create User account for supplier (with login access)
       const user = await User.create({
         name: name,
@@ -133,12 +149,21 @@ async function migrateSuppliers(csvPath, migrationBot) {
         address: address || undefined,
         portalAccess: ['supplier'],
         signupSource: 'import',
-        isActive: true
+        isActive: true,
+        profileComplete: false, // Flag for incomplete profile
+        requiresProfileUpdate: true, // Admin can filter by this
+        metadata: {
+          isMigrated: true,
+          migratedAt: new Date(),
+          needsInfoUpdate: true,
+          legacyId: legacyId
+        }
       });
       stats.users.created++;
-      
+
       // Create Supplier record
       const supplier = await Supplier.create({
+        supplierId: legacyId, // Set legacy ID as supplierId
         name: name,
         phone: phone,
         email: email || undefined,
@@ -148,33 +173,40 @@ async function migrateSuppliers(csvPath, migrationBot) {
         isActive: true,
         createdBy: migrationBot._id,
         userId: user._id,
-        notes: '[MIGRATED] Legacy ID: ' + legacyId + ' | Imported: ' + new Date().toISOString()
+        notes: '[MIGRATED] Legacy ID: ' + legacyId + ' | Imported: ' + new Date().toISOString(),
+        metadata: {
+          isMigrated: true,
+          migratedAt: new Date(),
+          requiresVerification: true,
+          legacyId: legacyId
+        }
       });
-      
+
       // Link User to Supplier
       user.supplier = supplier._id;
       await user.save();
-      
+
       // Store mapping
       idMappings.suppliers[legacyId] = {
         mongoId: supplier._id.toString(),
-        odUserId: user._id.toString(),
-        supplierId: supplier.supplierId
+        userId: user._id.toString(),
+        supplierId: legacyId, // This is now the same as legacy ID
+        loginEmail: userEmail
       };
-      
+
       stats.suppliers.created++;
-      
+
       if (stats.suppliers.created % 50 === 0) {
         console.log('Processed ' + stats.suppliers.created + ' suppliers...');
       }
-      
+
     } catch (error) {
       const legacyId = (row.Sup_Id || row.sup_id || 'unknown').trim();
       stats.suppliers.errors.push({ legacyId, error: error.message });
       stats.suppliers.skipped++;
     }
   }
-  
+
   console.log('Supplier migration complete: ' + stats.suppliers.created + ' created, ' + stats.suppliers.skipped + ' skipped');
 }
 
@@ -183,10 +215,9 @@ async function migrateSuppliers(csvPath, migrationBot) {
  */
 async function migrateBuyers(csvPath, migrationBot) {
   console.log('\nStarting Buyer Migration...');
-  
   const buyers = await parseCSV(csvPath);
   console.log('Found ' + buyers.length + ' buyers in CSV');
-  
+
   for (const row of buyers) {
     try {
       const legacyId = (row.Buyer_Id || row.buyer_id || '').trim();
@@ -194,15 +225,16 @@ async function migrateBuyers(csvPath, migrationBot) {
       const phone = (row.Phone || '').trim() || ('MIGRATED-BUY-' + legacyId);
       const email = (row.Email || '').trim() || null;
       const address = (row.Address || '').trim() || null;
-      
+
       if (!legacyId || !name) {
         stats.buyers.errors.push({ legacyId, error: 'Missing legacyId or name' });
         stats.buyers.skipped++;
         continue;
       }
-      
+
       // Create Buyer record (NO User account for buyers)
       const buyer = await Buyer.create({
+        buyerId: legacyId, // Set legacy ID as buyerId
         name: name,
         phone: phone,
         email: email || undefined,
@@ -211,27 +243,35 @@ async function migrateBuyers(csvPath, migrationBot) {
         paymentTerms: 'cash',
         isActive: true,
         createdBy: migrationBot._id,
-        notes: '[MIGRATED] Legacy ID: ' + legacyId + ' | Imported: ' + new Date().toISOString()
+        notes: '[MIGRATED] Legacy ID: ' + legacyId + ' | Imported: ' + new Date().toISOString(),
+        metadata: {
+          isMigrated: true,
+          migratedAt: new Date(),
+          requiresVerification: true,
+          needsContactUpdate: true,
+          legacyId: legacyId
+        }
       });
-      
+
       // Store mapping
       idMappings.buyers[legacyId] = {
-        mongoId: buyer._id.toString()
+        mongoId: buyer._id.toString(),
+        buyerId: legacyId // This is now the same as legacy ID
       };
-      
+
       stats.buyers.created++;
-      
+
       if (stats.buyers.created % 100 === 0) {
         console.log('Processed ' + stats.buyers.created + ' buyers...');
       }
-      
+
     } catch (error) {
       const legacyId = (row.Buyer_Id || row.buyer_id || 'unknown').trim();
       stats.buyers.errors.push({ legacyId, error: error.message });
       stats.buyers.skipped++;
     }
   }
-  
+
   console.log('Buyer migration complete: ' + stats.buyers.created + ' created, ' + stats.buyers.skipped + ' skipped');
 }
 
@@ -241,10 +281,10 @@ async function migrateBuyers(csvPath, migrationBot) {
 function saveMappings(outputDir) {
   const supplierMappingPath = path.join(outputDir, 'supplier-id-mapping.json');
   const buyerMappingPath = path.join(outputDir, 'buyer-id-mapping.json');
-  
+
   fs.writeFileSync(supplierMappingPath, JSON.stringify(idMappings.suppliers, null, 2));
   fs.writeFileSync(buyerMappingPath, JSON.stringify(idMappings.buyers, null, 2));
-  
+
   console.log('\nID mappings saved to:');
   console.log('  - ' + supplierMappingPath);
   console.log('  - ' + buyerMappingPath);
@@ -255,28 +295,28 @@ function saveMappings(outputDir) {
  */
 async function rollback() {
   console.log('\nRolling back migration...');
-  
+
   // Find all migrated suppliers and their users
   const migratedSuppliers = await Supplier.find({ notes: /\[MIGRATED\]/ });
   const supplierUserIds = migratedSuppliers.map(s => s.userId).filter(Boolean);
-  
+
   // Delete supplier users
-  const userResult = await User.deleteMany({ 
+  const userResult = await User.deleteMany({
     $or: [
       { _id: { $in: supplierUserIds } },
       { email: MIGRATION_BOT_EMAIL }
     ]
   });
   console.log('Deleted ' + userResult.deletedCount + ' users');
-  
+
   // Delete suppliers
   const supplierResult = await Supplier.deleteMany({ notes: /\[MIGRATED\]/ });
   console.log('Deleted ' + supplierResult.deletedCount + ' suppliers');
-  
+
   // Delete buyers
   const buyerResult = await Buyer.deleteMany({ notes: /\[MIGRATED\]/ });
   console.log('Deleted ' + buyerResult.deletedCount + ' buyers');
-  
+
   console.log('Rollback complete');
 }
 
@@ -285,7 +325,7 @@ async function rollback() {
  */
 async function main() {
   const args = process.argv.slice(2);
-  
+
   // Check for rollback flag
   if (args.includes('--rollback')) {
     await connectDB();
@@ -293,21 +333,20 @@ async function main() {
     await mongoose.connection.close();
     process.exit(0);
   }
-  
+
   // Parse arguments
   const suppliersIndex = args.indexOf('--suppliers');
   const buyersIndex = args.indexOf('--buyers');
-  
   const suppliersCsvPath = suppliersIndex !== -1 ? args[suppliersIndex + 1] : null;
   const buyersCsvPath = buyersIndex !== -1 ? args[buyersIndex + 1] : null;
-  
+
   if (!suppliersCsvPath && !buyersCsvPath) {
     console.log('Usage:');
-    console.log('  node migrateUsersFromCSV.js --suppliers <path> --buyers <path>');
+    console.log('  node migrateUsersFromCSV.js --suppliers <suppliers.csv> --buyers <buyers.csv>');
     console.log('  node migrateUsersFromCSV.js --rollback');
     process.exit(1);
   }
-  
+
   // Validate file paths
   if (suppliersCsvPath && !fs.existsSync(suppliersCsvPath)) {
     console.error('Suppliers CSV not found: ' + suppliersCsvPath);
@@ -317,46 +356,46 @@ async function main() {
     console.error('Buyers CSV not found: ' + buyersCsvPath);
     process.exit(1);
   }
-  
+
   console.log('KI Fashion Data Migration - Users (Suppliers & Buyers)');
   console.log('=========================================================');
-  
+
   await connectDB();
-  
+
   // Get or create migration bot
   const migrationBot = await getOrCreateMigrationBot();
-  
+
   // Run migrations
   if (suppliersCsvPath) {
     await migrateSuppliers(suppliersCsvPath, migrationBot);
   }
-  
+
   if (buyersCsvPath) {
     await migrateBuyers(buyersCsvPath, migrationBot);
   }
-  
+
   // Save mappings
   const outputDir = path.dirname(suppliersCsvPath || buyersCsvPath);
   saveMappings(outputDir);
-  
+
   // Print summary
   console.log('\nMigration Summary');
   console.log('====================');
   console.log('Suppliers: ' + stats.suppliers.created + ' created, ' + stats.suppliers.skipped + ' skipped');
   console.log('Buyers: ' + stats.buyers.created + ' created, ' + stats.buyers.skipped + ' skipped');
   console.log('Users: ' + stats.users.created + ' created (for suppliers only)');
-  
+
   if (stats.suppliers.errors.length > 0 || stats.buyers.errors.length > 0) {
     console.log('\nErrors:');
     stats.suppliers.errors.forEach(e => console.log('  Supplier ' + e.legacyId + ': ' + e.error));
     stats.buyers.errors.forEach(e => console.log('  Buyer ' + e.legacyId + ': ' + e.error));
   }
-  
+
   console.log('\nMigration complete!');
   console.log('\nSupplier Login Credentials:');
-  console.log('  Email format: supplier_{legacy_id}@migrated.kifashion.local');
+  console.log('  Email format: supplier_firstname_legacyid@kifashion.com');
   console.log('  Password: 123456789');
-  
+
   await mongoose.connection.close();
 }
 
