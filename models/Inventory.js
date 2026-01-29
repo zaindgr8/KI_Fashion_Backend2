@@ -166,14 +166,14 @@ const inventorySchema = new mongoose.Schema({
   timestamps: true
 });
 
-inventorySchema.pre('save', function(next) {
+inventorySchema.pre('save', function (next) {
   this.availableStock = this.currentStock - this.reservedStock;
   this.needsReorder = this.currentStock <= this.reorderLevel;
   this.totalValue = this.currentStock * this.averageCostPrice;
   next();
 });
 
-inventorySchema.methods.addStock = function(quantity, reference, referenceId, user, notes = '') {
+inventorySchema.methods.addStock = function (quantity, reference, referenceId, user, notes = '') {
   this.stockMovements.push({
     type: 'in',
     quantity: quantity,
@@ -187,7 +187,7 @@ inventorySchema.methods.addStock = function(quantity, reference, referenceId, us
   return this.save();
 };
 
-inventorySchema.methods.reduceStock = function(quantity, reference, referenceId, user, notes = '') {
+inventorySchema.methods.reduceStock = function (quantity, reference, referenceId, user, notes = '') {
   if (this.availableStock < quantity) {
     throw new Error('Insufficient stock available');
   }
@@ -204,7 +204,7 @@ inventorySchema.methods.reduceStock = function(quantity, reference, referenceId,
   return this.save();
 };
 
-inventorySchema.methods.adjustStock = function(newQuantity, reference, user, notes = '') {
+inventorySchema.methods.adjustStock = function (newQuantity, reference, user, notes = '') {
   const difference = newQuantity - this.currentStock;
   this.stockMovements.push({
     type: 'adjustment',
@@ -219,7 +219,7 @@ inventorySchema.methods.adjustStock = function(newQuantity, reference, user, not
 };
 
 // Add stock with variant composition
-inventorySchema.methods.addStockWithVariants = function(quantity, variantComposition, reference, referenceId, user, notes = '') {
+inventorySchema.methods.addStockWithVariants = function (quantity, variantComposition, reference, referenceId, user, notes = '') {
   this.stockMovements.push({
     type: 'in',
     quantity: quantity,
@@ -229,7 +229,7 @@ inventorySchema.methods.addStockWithVariants = function(quantity, variantComposi
     notes: notes
   });
   this.currentStock += quantity;
-  
+
   // Update variant composition
   if (variantComposition && variantComposition.length > 0) {
     variantComposition.forEach(incomingVariant => {
@@ -248,37 +248,37 @@ inventorySchema.methods.addStockWithVariants = function(quantity, variantComposi
       }
     });
   }
-  
+
   this.lastStockUpdate = new Date();
   return this.save();
 };
 
 // Recalculate average cost price from purchase batches (weighted average)
 // Call this after manually adding batches to purchaseBatches array
-inventorySchema.methods.recalculateAverageCost = function() {
+inventorySchema.methods.recalculateAverageCost = function () {
   if (!this.purchaseBatches || this.purchaseBatches.length === 0) {
     return this;
   }
-  
+
   const totalValue = this.purchaseBatches.reduce((sum, batch) => {
     const price = batch.landedPrice || batch.costPrice || 0;
     return sum + (batch.remainingQuantity * price);
   }, 0);
-  
+
   const totalQuantity = this.purchaseBatches.reduce((sum, batch) => {
     return sum + batch.remainingQuantity;
   }, 0);
-  
+
   if (totalQuantity > 0) {
     this.averageCostPrice = totalValue / totalQuantity;
     this.totalValue = this.currentStock * this.averageCostPrice;
   }
-  
+
   return this;
 };
 
 // Reserve variant stock
-inventorySchema.methods.reserveVariantStock = function(size, color, quantity) {
+inventorySchema.methods.reserveVariantStock = function (size, color, quantity) {
   const variant = this.variantComposition.find(
     v => v.size === size && v.color === color
   );
@@ -295,7 +295,7 @@ inventorySchema.methods.reserveVariantStock = function(size, color, quantity) {
 };
 
 // Reduce variant stock
-inventorySchema.methods.reduceVariantStock = function(size, color, quantity, reference, referenceId, user, notes = '') {
+inventorySchema.methods.reduceVariantStock = function (size, color, quantity, reference, referenceId, user, notes = '') {
   const variant = this.variantComposition.find(
     v => v.size === size && v.color === color
   );
@@ -305,7 +305,7 @@ inventorySchema.methods.reduceVariantStock = function(size, color, quantity, ref
   if (variant.quantity < quantity) {
     throw new Error(`Insufficient stock for variant ${color}-${size}. Available: ${variant.quantity}, Required: ${quantity}`);
   }
-  
+
   this.stockMovements.push({
     type: 'out',
     quantity: quantity,
@@ -314,7 +314,7 @@ inventorySchema.methods.reduceVariantStock = function(size, color, quantity, ref
     user: user,
     notes: `${notes} - Variant: ${color}-${size}`
   });
-  
+
   variant.quantity -= quantity;
   if (variant.reservedQuantity > 0) {
     variant.reservedQuantity = Math.max(0, variant.reservedQuantity - quantity);
@@ -322,12 +322,12 @@ inventorySchema.methods.reduceVariantStock = function(size, color, quantity, ref
   this.currentStock -= quantity;
   this.reservedStock = Math.max(0, this.reservedStock - quantity);
   this.lastStockUpdate = new Date();
-  
+
   return this.save();
 };
 
 // Get available stock for a specific variant
-inventorySchema.methods.getVariantAvailableStock = function(size, color) {
+inventorySchema.methods.getVariantAvailableStock = function (size, color) {
   const variant = this.variantComposition.find(
     v => v.size === size && v.color === color
   );
@@ -338,7 +338,7 @@ inventorySchema.methods.getVariantAvailableStock = function(size, color) {
 };
 
 // Add stock with batch tracking (for FIFO cost calculation)
-inventorySchema.methods.addStockWithBatch = function(quantity, batchInfo, reference, referenceId, user, notes = '') {
+inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, reference, referenceId, user, notes = '') {
   // Add to purchase batches for FIFO tracking
   this.purchaseBatches.push({
     dispatchOrderId: batchInfo.dispatchOrderId || referenceId,
@@ -379,8 +379,43 @@ inventorySchema.methods.addStockWithBatch = function(quantity, batchInfo, refere
   return this.save();
 };
 
+// Helper to recalculate average cost from batches
+inventorySchema.methods.recalculateAverageCost = function () {
+  if (!this.purchaseBatches || this.purchaseBatches.length === 0) return;
+
+  const totalValue = this.purchaseBatches.reduce((sum, batch) => {
+    const price = batch.landedPrice || batch.costPrice;
+    return sum + (batch.remainingQuantity * price);
+  }, 0);
+
+  const totalQuantity = this.purchaseBatches.reduce((sum, batch) => {
+    return sum + batch.remainingQuantity;
+  }, 0);
+
+  if (totalQuantity > 0) {
+    this.averageCostPrice = totalValue / totalQuantity;
+  }
+
+  return this.averageCostPrice;
+};
+
+// Reduce variant stock for returns
+inventorySchema.methods.reduceVariantStockForReturn = function (variantReductions) {
+  if (!this.variantComposition) return;
+
+  for (const reduction of variantReductions) {
+    const variant = this.variantComposition.find(
+      v => v.size === reduction.size && v.color === reduction.color
+    );
+    if (variant) {
+      variant.quantity = Math.max(0, variant.quantity - reduction.quantity);
+    }
+  }
+  this.markModified('variantComposition');
+};
+
 // Reduce stock using FIFO method and return the cost details
-inventorySchema.methods.reduceStockFIFO = function(quantity, reference, referenceId, user, notes = '') {
+inventorySchema.methods.reduceStockFIFO = function (quantity, reference, referenceId, user, notes = '') {
   if (this.availableStock < quantity) {
     throw new Error(`Insufficient stock available. Available: ${this.availableStock}, Required: ${quantity}`);
   }
@@ -450,7 +485,7 @@ inventorySchema.methods.reduceStockFIFO = function(quantity, reference, referenc
 };
 
 // Get available batches for return (shows where items came from)
-inventorySchema.methods.getAvailableBatches = function() {
+inventorySchema.methods.getAvailableBatches = function () {
   return this.purchaseBatches
     .filter(b => b.remainingQuantity > 0)
     .sort((a, b) => new Date(a.purchaseDate) - new Date(b.purchaseDate))
@@ -466,7 +501,7 @@ inventorySchema.methods.getAvailableBatches = function() {
 };
 
 // Get total available quantity across all batches
-inventorySchema.methods.getTotalBatchQuantity = function() {
+inventorySchema.methods.getTotalBatchQuantity = function () {
   return this.purchaseBatches.reduce((sum, batch) => sum + batch.remainingQuantity, 0);
 };
 

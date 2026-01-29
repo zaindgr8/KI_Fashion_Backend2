@@ -1,9 +1,11 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Return = require('../models/Return');
 const Inventory = require('../models/Inventory');
 const Product = require('../models/Product');
 const Supplier = require('../models/Supplier');
 const Ledger = require('../models/Ledger');
+const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 const BalanceService = require('../services/BalanceService');
@@ -211,6 +213,323 @@ router.get('/products-for-return', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Get products for return error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
+  }
+});
+
+// Get packet stocks available for return from a specific supplier
+// Returns both full packets and loose items that can be returned
+router.get('/packet-stocks-for-return', auth, async (req, res) => {
+  try {
+    const { supplierId, productId, search = '', includeLoose = 'true' } = req.query;
+
+    if (!supplierId) {
+      return sendResponse.error(res, 'Supplier ID is required', 400);
+    }
+
+    const query = {
+      supplier: supplierId,
+      isActive: true,
+      availablePackets: { $gt: 0 }
+    };
+
+    // Optionally filter by product
+    if (productId) {
+      query.product = productId;
+    }
+
+    // Optionally filter out loose items
+    if (includeLoose === 'false') {
+      query.isLoose = false;
+    }
+
+    const packetStocks = await PacketStock.find(query)
+      .populate('product', 'name sku productCode images')
+      .sort({ isLoose: 1, barcode: 1 }) // Full packets first, then loose
+      .lean();
+
+    // Add search filtering
+    let filteredResults = packetStocks;
+    if (search) {
+      const searchLower = search.toLowerCase();
+      filteredResults = packetStocks.filter(ps =>
+        ps.barcode?.toLowerCase().includes(searchLower) ||
+        ps.product?.name?.toLowerCase().includes(searchLower) ||
+        ps.product?.productCode?.toLowerCase().includes(searchLower) ||
+        ps.product?.sku?.toLowerCase().includes(searchLower)
+      );
+    }
+
+    // Transform for frontend
+    const result = filteredResults.map(ps => ({
+      _id: ps._id,
+      barcode: ps.barcode,
+      product: ps.product,
+      isLoose: ps.isLoose,
+      composition: ps.composition,
+      totalItemsPerPacket: ps.totalItemsPerPacket,
+      availablePackets: ps.availablePackets,
+      costPricePerPacket: ps.costPricePerPacket,
+      landedPricePerPacket: ps.landedPricePerPacket,
+      // Calculate total items available
+      totalItemsAvailable: ps.isLoose
+        ? ps.availablePackets
+        : ps.availablePackets * ps.totalItemsPerPacket
+    }));
+
+    console.log(`[Returns] Found ${result.length} packet stocks for supplier ${supplierId}`);
+    return sendResponse.success(res, result);
+
+  } catch (error) {
+    console.error('Get packet stocks for return error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
+  }
+});
+
+// Create a packet-level supplier return (returns full packets or loose items)
+// Updates both PacketStock AND Inventory
+router.post('/packet-return', auth, async (req, res) => {
+  try {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
+      return sendResponse.error(res, 'Only admins can create packet returns', 403);
+    }
+
+    const {
+      supplierId,
+      packetStockId,
+      quantity,
+      returnType = 'full', // 'full' for full packets, 'partial' for breaking
+      itemsToReturn = [],   // For partial returns: [{size, color, quantity}]
+      reason = '',
+      notes = ''
+    } = req.body;
+
+    if (!supplierId || !packetStockId) {
+      return sendResponse.error(res, 'Supplier ID and Packet Stock ID are required', 400);
+    }
+
+    // Verify supplier exists
+    const supplier = await Supplier.findById(supplierId);
+    if (!supplier) {
+      return sendResponse.error(res, 'Supplier not found', 404);
+    }
+
+    // Get packet stock
+    const packetStock = await PacketStock.findById(packetStockId).populate('product');
+    if (!packetStock) {
+      return sendResponse.error(res, 'Packet stock not found', 404);
+    }
+
+    if (packetStock.supplier.toString() !== supplierId) {
+      return sendResponse.error(res, 'Packet stock does not belong to this supplier', 400);
+    }
+
+    let totalItemsReturned = 0;
+    let returnValue = 0;
+    const processedItems = [];
+    let breakResult = null;
+
+    if (returnType === 'partial' && !packetStock.isLoose) {
+      // Breaking a packet for partial return
+      if (!itemsToReturn || itemsToReturn.length === 0) {
+        return sendResponse.error(res, 'Items to return are required for partial returns', 400);
+      }
+
+      breakResult = await packetStock.breakForSupplierReturn(
+        itemsToReturn,
+        req.user._id
+      );
+
+      totalItemsReturned = breakResult.totalItemsReturned;
+      returnValue = totalItemsReturned * (packetStock.landedPricePerPacket / packetStock.totalItemsPerPacket);
+
+      processedItems.push({
+        packetStockId: packetStock._id,
+        barcode: packetStock.barcode,
+        isLoose: false,
+        returnType: 'partial',
+        items: itemsToReturn,
+        quantity: totalItemsReturned,
+        costPrice: packetStock.landedPricePerPacket / packetStock.totalItemsPerPacket
+      });
+
+    } else if (packetStock.isLoose) {
+      // Returning loose items
+      if (!quantity || quantity <= 0) {
+        return sendResponse.error(res, 'Quantity is required for loose item returns', 400);
+      }
+
+      await packetStock.returnLooseToSupplier(quantity);
+      totalItemsReturned = quantity;
+      returnValue = quantity * (packetStock.landedPricePerPacket || packetStock.costPricePerPacket);
+
+      processedItems.push({
+        packetStockId: packetStock._id,
+        barcode: packetStock.barcode,
+        isLoose: true,
+        returnType: 'loose',
+        quantity: quantity,
+        costPrice: packetStock.landedPricePerPacket || packetStock.costPricePerPacket
+      });
+
+    } else {
+      // Returning full packets
+      if (!quantity || quantity <= 0) {
+        return sendResponse.error(res, 'Quantity is required for full packet returns', 400);
+      }
+
+      await packetStock.returnToSupplier(quantity);
+      totalItemsReturned = quantity * packetStock.totalItemsPerPacket;
+      returnValue = quantity * packetStock.landedPricePerPacket;
+
+      processedItems.push({
+        packetStockId: packetStock._id,
+        barcode: packetStock.barcode,
+        isLoose: false,
+        returnType: 'full',
+        packetsReturned: quantity,
+        quantity: totalItemsReturned,
+        costPrice: packetStock.landedPricePerPacket
+      });
+    }
+
+    // Update Inventory (reduce stock)
+    const productId = packetStock.product._id || packetStock.product;
+    const inventory = await Inventory.findOne({ product: productId });
+
+    if (inventory) {
+      // Reduce current stock
+      inventory.currentStock = Math.max(0, inventory.currentStock - totalItemsReturned);
+
+      // Calculate variant reductions
+      const variantReductions = [];
+
+      if (returnType === 'partial') {
+        itemsToReturn.forEach(item => {
+          variantReductions.push({ size: item.size, color: item.color, quantity: item.quantity });
+        });
+      } else {
+        const multiplier = returnType === 'loose' ? quantity : quantity;
+        if (packetStock.composition && packetStock.composition.length > 0) {
+          packetStock.composition.forEach(comp => {
+            variantReductions.push({
+              size: comp.size,
+              color: comp.color,
+              quantity: comp.quantity * multiplier
+            });
+          });
+        }
+      }
+
+      inventory.reduceVariantStockForReturn(variantReductions);
+
+      // Add stock movement
+      inventory.stockMovements.push({
+        type: 'out',
+        quantity: totalItemsReturned,
+        reference: 'SupplierReturn-Packet',
+        referenceId: null, // Will update after creating Return doc
+        user: req.user._id,
+        notes: `Packet return - ${packetStock.barcode}${reason ? ` - ${reason}` : ''}`,
+        date: new Date()
+      });
+
+      // Reduce from batches (FIFO)
+      let remainingToReduce = totalItemsReturned;
+      for (const batch of inventory.purchaseBatches) {
+        if (remainingToReduce <= 0) break;
+        if (batch.supplierId?.toString() === supplierId && batch.remainingQuantity > 0) {
+          const reduceAmount = Math.min(batch.remainingQuantity, remainingToReduce);
+          batch.remainingQuantity -= reduceAmount;
+          remainingToReduce -= reduceAmount;
+        }
+      }
+
+      inventory.recalculateAverageCost();
+      await inventory.save();
+    }
+
+    // Create Return document
+    const returnDoc = new Return({
+      supplier: supplierId,
+      returnType: 'product-level',
+      items: [{
+        itemIndex: 0,
+        product: productId,
+        productName: packetStock.product.name,
+        productCode: packetStock.product.productCode || packetStock.product.sku,
+        originalQuantity: totalItemsReturned,
+        returnedQuantity: totalItemsReturned,
+        costPrice: returnValue / totalItemsReturned,
+        reason: reason
+      }],
+      totalReturnValue: returnValue,
+      returnedAt: new Date(),
+      returnedBy: req.user._id,
+      notes: `${notes}${breakResult ? ` | Packet broken, remaining items moved to loose stock` : ''}`
+    });
+
+    await returnDoc.save();
+
+    // Update stock movement with Return ID
+    if (inventory) {
+      const lastMovement = inventory.stockMovements[inventory.stockMovements.length - 1];
+      if (lastMovement) {
+        lastMovement.referenceId = returnDoc._id;
+        await inventory.save();
+      }
+    }
+
+    // Create ledger entry
+    const currentSupplierBalance = await BalanceService.getSupplierBalance(supplierId);
+    const newSupplierBalance = currentSupplierBalance - returnValue;
+
+    await Ledger.createEntry({
+      type: 'supplier',
+      entityId: supplierId,
+      entityModel: 'Supplier',
+      transactionType: 'return',
+      referenceId: returnDoc._id,
+      referenceModel: 'Return',
+      debit: 0,
+      credit: returnValue,
+      date: returnDoc.returnedAt,
+      description: `Packet Return - ${packetStock.barcode} (${totalItemsReturned} items) worth £${returnValue.toFixed(2)}`,
+      remarks: `Return ID: ${returnDoc._id}`,
+      createdBy: req.user._id,
+      paymentDetails: {
+        cashPayment: 0,
+        bankPayment: 0,
+        remainingBalance: newSupplierBalance
+      }
+    });
+
+    // Update supplier balance
+    await Supplier.findByIdAndUpdate(
+      supplierId,
+      { $inc: { currentBalance: -returnValue } }
+    );
+
+    // Populate for response
+    await returnDoc.populate([
+      { path: 'supplier', select: 'name company' },
+      { path: 'returnedBy', select: 'name' },
+      { path: 'items.product', select: 'name sku productCode' }
+    ]);
+
+    return sendResponse.success(res, {
+      return: returnDoc,
+      packetDetails: {
+        barcode: packetStock.barcode,
+        returnType,
+        totalItemsReturned,
+        returnValue,
+        breakResult: breakResult || null
+      }
+    }, 'Packet return created successfully', 201);
+
+  } catch (error) {
+    console.error('Create packet return error:', error);
     return sendResponse.error(res, error.message || 'Server error', 500);
   }
 });

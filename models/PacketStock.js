@@ -8,7 +8,7 @@ const packetStockSchema = new mongoose.Schema({
     unique: true,
     index: true
   },
-  
+
   // Product reference
   product: {
     type: mongoose.Schema.Types.ObjectId,
@@ -16,7 +16,7 @@ const packetStockSchema = new mongoose.Schema({
     required: true,
     index: true
   },
-  
+
   // Supplier who provided these packets
   supplier: {
     type: mongoose.Schema.Types.ObjectId,
@@ -24,7 +24,7 @@ const packetStockSchema = new mongoose.Schema({
     required: true,
     index: true
   },
-  
+
   // Packet composition (sizes, colors, quantities per packet)
   composition: [{
     size: {
@@ -41,14 +41,14 @@ const packetStockSchema = new mongoose.Schema({
       min: 1
     }
   }],
-  
+
   // Total items in one packet (sum of composition quantities)
   totalItemsPerPacket: {
     type: Number,
     required: true,
     min: 1
   },
-  
+
   // Stock tracking
   availablePackets: {
     type: Number,
@@ -65,7 +65,7 @@ const packetStockSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
-  
+
   // Pricing
   costPricePerPacket: {
     type: Number,
@@ -82,13 +82,13 @@ const packetStockSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
-  
+
   // Is this a loose item (single item, not a packet)?
   isLoose: {
     type: Boolean,
     default: false
   },
-  
+
   // Track which dispatch orders added stock to this packet type
   dispatchOrderHistory: [{
     dispatchOrderId: {
@@ -103,20 +103,20 @@ const packetStockSchema = new mongoose.Schema({
       default: Date.now
     }
   }],
-  
+
   // QR Code data for label printing
   qrCode: {
     dataUrl: String,
     generatedAt: Date
   },
-  
+
   // Barcode image data for label printing
   barcodeImage: {
     dataUrl: String,
     format: String,  // e.g., 'code128'
     generatedAt: Date
   },
-  
+
   // Break history - tracks when packets are broken and items sold individually
   breakHistory: [{
     brokenAt: {
@@ -186,15 +186,15 @@ packetStockSchema.index({ product: 1, isActive: 1, availablePackets: -1 });
 packetStockSchema.index({ supplier: 1, isActive: 1 });
 
 // Virtual for available stock (packets not reserved)
-packetStockSchema.virtual('actualAvailable').get(function() {
+packetStockSchema.virtual('actualAvailable').get(function () {
   return Math.max(0, this.availablePackets - this.reservedPackets);
 });
 
 // Method to add stock
-packetStockSchema.methods.addStock = function(quantity, dispatchOrderId, costPrice, landedPrice) {
+packetStockSchema.methods.addStock = function (quantity, dispatchOrderId, costPrice, landedPrice) {
   const previousTotal = this.availablePackets;
   this.availablePackets += quantity;
-  
+
   // Update weighted average landed price
   if (previousTotal > 0 && this.landedPricePerPacket > 0) {
     const existingValue = previousTotal * this.landedPricePerPacket;
@@ -203,12 +203,12 @@ packetStockSchema.methods.addStock = function(quantity, dispatchOrderId, costPri
   } else {
     this.landedPricePerPacket = landedPrice;
   }
-  
+
   this.costPricePerPacket = costPrice; // Keep latest cost price
-  
+
   // Calculate suggested selling price (20% margin on landed)
   this.suggestedSellingPrice = this.landedPricePerPacket * 1.20;
-  
+
   // Track history
   this.dispatchOrderHistory.push({
     dispatchOrderId,
@@ -217,12 +217,12 @@ packetStockSchema.methods.addStock = function(quantity, dispatchOrderId, costPri
     landedPricePerPacket: landedPrice,
     addedAt: new Date()
   });
-  
+
   return this.save();
 };
 
 // Method to reserve packets for a pending sale
-packetStockSchema.methods.reservePackets = function(quantity) {
+packetStockSchema.methods.reservePackets = function (quantity) {
   const actualAvailable = this.availablePackets - this.reservedPackets;
   if (actualAvailable < quantity) {
     throw new Error(`Insufficient packets available. Available: ${actualAvailable}, Requested: ${quantity}`);
@@ -232,13 +232,13 @@ packetStockSchema.methods.reservePackets = function(quantity) {
 };
 
 // Method to release reserved packets (sale cancelled)
-packetStockSchema.methods.releaseReservedPackets = function(quantity) {
+packetStockSchema.methods.releaseReservedPackets = function (quantity) {
   this.reservedPackets = Math.max(0, this.reservedPackets - quantity);
   return this.save();
 };
 
 // Method to sell packets (after delivery confirmation)
-packetStockSchema.methods.sellPackets = function(quantity) {
+packetStockSchema.methods.sellPackets = function (quantity) {
   if (this.availablePackets < quantity) {
     throw new Error(`Insufficient packets available. Available: ${this.availablePackets}, Requested: ${quantity}`);
   }
@@ -249,7 +249,7 @@ packetStockSchema.methods.sellPackets = function(quantity) {
 };
 
 // Method to restore packets (for sale returns)
-packetStockSchema.methods.restorePackets = function(quantity, reason = 'SaleReturn') {
+packetStockSchema.methods.restorePackets = function (quantity, reason = 'SaleReturn') {
   this.availablePackets += quantity;
   // Decrement soldPackets if the reason is a return
   if (reason === 'SaleReturn' && this.soldPackets >= quantity) {
@@ -259,7 +259,7 @@ packetStockSchema.methods.restorePackets = function(quantity, reason = 'SaleRetu
 };
 
 // Method to add loose items back (for returns to existing loose stock)
-packetStockSchema.methods.addLooseItems = function(quantity, reason = 'SaleReturn') {
+packetStockSchema.methods.addLooseItems = function (quantity, reason = 'SaleReturn') {
   if (!this.isLoose) {
     throw new Error('Cannot add loose items to a packet stock. Use restorePackets instead.');
   }
@@ -267,27 +267,183 @@ packetStockSchema.methods.addLooseItems = function(quantity, reason = 'SaleRetur
   return this.save();
 };
 
+// Method to return full packets to supplier (reduces available packets)
+packetStockSchema.methods.returnToSupplier = function (quantity, returnId = null) {
+  if (this.availablePackets < quantity) {
+    throw new Error(`Insufficient packets for supplier return. Available: ${this.availablePackets}, Requested: ${quantity}`);
+  }
+  this.availablePackets -= quantity;
+  return this.save();
+};
+
+// Method to return loose items to supplier (for isLoose = true stocks)
+packetStockSchema.methods.returnLooseToSupplier = function (quantity, returnId = null) {
+  if (!this.isLoose) {
+    throw new Error('Use returnToSupplier for full packet stock returns.');
+  }
+  if (this.availablePackets < quantity) {
+    throw new Error(`Insufficient loose items for return. Available: ${this.availablePackets}, Requested: ${quantity}`);
+  }
+  this.availablePackets -= quantity;
+  return this.save();
+};
+
+// Method to break a packet for partial supplier return
+// Returns specified items to supplier, creates loose stock for remaining items
+packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn, userId, returnId = null) {
+  const QRCode = require('qrcode');
+  const { generatePacketBarcode } = require('../utils/barcodeGenerator');
+
+  if (this.isLoose) {
+    throw new Error('Cannot break a loose stock entry. Use returnLooseToSupplier instead.');
+  }
+
+  if (this.availablePackets < 1) {
+    throw new Error('No packets available to break for return.');
+  }
+
+  // Validate items to return exist in composition
+  for (const returnItem of itemsToReturn) {
+    const compItem = this.composition.find(
+      c => c.size === returnItem.size && c.color === returnItem.color
+    );
+    if (!compItem) {
+      throw new Error(`Item ${returnItem.color}/${returnItem.size} not found in packet composition.`);
+    }
+    if (returnItem.quantity > compItem.quantity) {
+      throw new Error(`Cannot return ${returnItem.quantity} of ${returnItem.color}/${returnItem.size}. Packet only contains ${compItem.quantity}.`);
+    }
+  }
+
+  // Reduce available packets by 1 (breaking one packet)
+  this.availablePackets -= 1;
+
+  // Calculate remaining items after return
+  const remainingItems = this.composition.map(c => {
+    const returnedItem = itemsToReturn.find(
+      r => r.size === c.size && r.color === c.color
+    );
+    const returnedQty = returnedItem ? returnedItem.quantity : 0;
+    return {
+      size: c.size,
+      color: c.color,
+      quantity: c.quantity - returnedQty
+    };
+  }).filter(i => i.quantity > 0);
+
+  // Create loose stock for remaining items if any
+  const looseStocksCreated = [];
+
+  if (remainingItems.length > 0) {
+    // Create one loose stock per variant for better tracking
+    for (const item of remainingItems) {
+      const singleVariantComposition = [{
+        size: item.size,
+        color: item.color,
+        quantity: 1
+      }];
+
+      const barcode = generatePacketBarcode(
+        this.supplier.toString(),
+        this.product.toString(),
+        singleVariantComposition,
+        true // isLoose
+      );
+
+      // Find or create loose stock for this variant
+      let looseStock = await this.constructor.findOne({
+        barcode,
+        isActive: true
+      });
+
+      if (looseStock) {
+        looseStock.availablePackets += item.quantity;
+        await looseStock.save();
+      } else {
+        looseStock = new this.constructor({
+          barcode,
+          product: this.product,
+          supplier: this.supplier,
+          composition: singleVariantComposition,
+          totalItemsPerPacket: 1,
+          availablePackets: item.quantity,
+          reservedPackets: 0,
+          soldPackets: 0,
+          isLoose: true,
+          parentPacketStock: this._id,
+          dispatchOrderHistory: []
+        });
+
+        // Generate QR code
+        try {
+          const qrDataUrl = await QRCode.toDataURL(barcode, {
+            errorCorrectionLevel: 'M',
+            type: 'image/png',
+            scale: 6,
+            margin: 1
+          });
+          looseStock.qrCode = {
+            dataUrl: qrDataUrl,
+            generatedAt: new Date()
+          };
+        } catch (qrError) {
+          console.warn('[PacketStock] QR code generation failed:', qrError.message);
+        }
+
+        await looseStock.save();
+      }
+
+      looseStocksCreated.push({
+        looseStockId: looseStock._id,
+        barcode: looseStock.barcode,
+        size: item.size,
+        color: item.color,
+        quantity: item.quantity
+      });
+    }
+  }
+
+  // Record in break history
+  this.breakHistory.push({
+    brokenAt: new Date(),
+    brokenBy: userId,
+    itemsSold: itemsToReturn, // Items returned to supplier
+    remainingItems,
+    loosePacketStocksCreated: looseStocksCreated,
+    saleReference: returnId, // Store return reference
+    notes: 'Broken for supplier return'
+  });
+
+  await this.save();
+
+  return {
+    remainingItems,
+    looseStocksCreated,
+    totalItemsReturned: itemsToReturn.reduce((sum, i) => sum + i.quantity, 0)
+  };
+};
+
 // Static method to find or create loose stock for remaining items after breaking
-packetStockSchema.statics.findOrCreateLooseStock = async function(productId, supplierId, composition, parentPacketStockId) {
+packetStockSchema.statics.findOrCreateLooseStock = async function (productId, supplierId, composition, parentPacketStockId) {
   const { generatePacketBarcode } = require('../utils/barcodeGenerator');
   const QRCode = require('qrcode');
-  
+
   // Generate barcode for this loose composition
   const barcode = generatePacketBarcode(supplierId.toString(), productId.toString(), composition, true);
-  
+
   // Calculate total items
   const totalItems = composition.reduce((sum, item) => sum + item.quantity, 0);
-  
+
   // Find existing loose stock with same barcode
   let looseStock = await this.findOne({ barcode, isActive: true });
-  
+
   if (looseStock) {
     // Add to existing loose stock
     looseStock.availablePackets += 1;
     await looseStock.save();
     return { looseStock, isNew: false };
   }
-  
+
   // Create new loose stock entry
   looseStock = new this({
     barcode,
@@ -302,7 +458,7 @@ packetStockSchema.statics.findOrCreateLooseStock = async function(productId, sup
     parentPacketStock: parentPacketStockId,
     dispatchOrderHistory: []
   });
-  
+
   // Generate QR code
   try {
     const qrDataUrl = await QRCode.toDataURL(barcode, {
@@ -318,13 +474,13 @@ packetStockSchema.statics.findOrCreateLooseStock = async function(productId, sup
   } catch (qrError) {
     console.warn('QR code generation failed for loose stock:', qrError.message);
   }
-  
+
   await looseStock.save();
   return { looseStock, isNew: true };
 };
 
 // Pre-save: validate composition sum equals totalItemsPerPacket
-packetStockSchema.pre('save', function(next) {
+packetStockSchema.pre('save', function (next) {
   if (this.composition && this.composition.length > 0) {
     const sum = this.composition.reduce((acc, item) => acc + item.quantity, 0);
     if (sum !== this.totalItemsPerPacket) {
