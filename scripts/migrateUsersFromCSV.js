@@ -33,7 +33,7 @@ const idMappings = {
  */
 async function connectDB() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI, {
+    await mongoose.connect('mongodb+srv://klfashionuk:admin@cluster0.vndfpcl.mongodb.net/test_db', {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 5000,
     });
@@ -103,7 +103,7 @@ async function generateUniqueSupplierEmail(name, legacyId, attempt = 0) {
   const sanitizedLegacyId = sanitizeForEmail(legacyId);
 
   const suffix = attempt > 0 ? attempt : '';
-  const email = `supplier_${sanitizedFirstName}_${sanitizedLegacyId}${suffix}@kifashion.com`;
+  const email = `${sanitizedFirstName}_${sanitizedLegacyId}@kifashion.com`;
 
   const exists = await User.findOne({ email });
 

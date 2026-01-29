@@ -130,7 +130,7 @@ const productSchema = new mongoose.Schema({
   variantTracking: {
     enabled: {
       type: Boolean,
-      default: false
+      default: true
     },
     availableSizes: [{
       type: String,

@@ -5,6 +5,9 @@ yarn-debug.log*
 yarn-error.log*
 package-lock.json
 
+scripts/
+output.txt
+
 # Environment variables
 .env
 .env.local

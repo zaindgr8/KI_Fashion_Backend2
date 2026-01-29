@@ -306,27 +306,21 @@ dispatchOrderSchema.index({ dispatchDate: -1, createdAt: -1 }); // For sorting
 dispatchOrderSchema.index({ 'paymentDetails.paymentStatus': 1 }); // For payment filtering
 dispatchOrderSchema.index({ supplier: 1, status: 1 }); // For supplier filtering
 
-// Auto-generate order number before saving
+// Auto-generate order number before saving (6-digit sequential format)
 dispatchOrderSchema.pre('save', async function (next) {
   if (!this.orderNumber) {
-    const today = new Date();
-    const year = today.getFullYear();
-    const month = String(today.getMonth() + 1).padStart(2, '0');
-    const day = String(today.getDate()).padStart(2, '0');
+    // Find the highest existing order number
+    const lastOrder = await this.constructor.findOne({
+      orderNumber: { $regex: /^\d{6}$/ }
+    }).sort({ orderNumber: -1 }).select('orderNumber');
 
-    const datePrefix = `DSP${year}${month}${day}`;
+    let nextSequence = 1;
+    if (lastOrder && lastOrder.orderNumber) {
+      nextSequence = parseInt(lastOrder.orderNumber, 10) + 1;
+    }
 
-    // Find the highest existing number for today
-    const existingOrders = await this.constructor.find({
-      orderNumber: { $regex: `^${datePrefix}` }
-    }).select('orderNumber');
-
-    const todayNumbers = existingOrders
-      .map(order => parseInt(order.orderNumber.slice(-4)) || 0)
-      .sort((a, b) => b - a);
-
-    const nextSequence = (todayNumbers[0] || 0) + 1;
-    this.orderNumber = `${datePrefix}${String(nextSequence).padStart(4, '0')}`;
+    // Format as 6-digit number (000001, 000002, etc.)
+    this.orderNumber = String(nextSequence).padStart(6, '0');
   }
   next();
 });
