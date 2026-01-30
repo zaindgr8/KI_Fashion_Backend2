@@ -78,6 +78,7 @@ router.get('/products-for-return', auth, async (req, res) => {
               $multiply: ['$purchaseBatches.remainingQuantity', '$purchaseBatches.costPrice']
             }
           },
+          variantComposition: { $first: '$variantComposition' },
           batches: {
             $push: {
               batchId: '$purchaseBatches._id',
@@ -121,6 +122,7 @@ router.get('/products-for-return', auth, async (req, res) => {
           supplierStock: { $first: '$supplierStock' },
           averageCostPrice: { $first: '$averageCostPrice' },
           supplierCostPriceSum: { $first: '$supplierCostPriceSum' },
+          variantComposition: { $first: '$variantComposition' },
           batches: { $push: '$batches' }
         }
       },
@@ -183,6 +185,7 @@ router.get('/products-for-return', auth, async (req, res) => {
           availableForReturn: '$supplierStock',
           averageCostPrice: '$supplierAvgCostPrice', // Cost for THIS supplier
           // Include batch details for accurate return tracking
+          variantComposition: 1,
           batches: 1
         }
       },
@@ -570,7 +573,7 @@ router.post('/product-return', auth, async (req, res) => {
     let commonDispatchOrderId = null; // Track the dispatch order for all items
 
     for (const item of items) {
-      const { productId, batchId, quantity, reason } = item;
+      const { productId, batchId, quantity, reason, returnComposition } = item;
 
       if (!productId || !quantity || quantity <= 0) {
         return sendResponse.error(res, 'Each item must have productId and positive quantity', 400);
@@ -644,6 +647,21 @@ router.post('/product-return', auth, async (req, res) => {
         date: new Date()
       });
 
+      // Reduce variant stock if composition provided
+      if (returnComposition && Array.isArray(returnComposition) && returnComposition.length > 0) {
+        // Validate total quantity matches
+        const totalVariantQty = returnComposition.reduce((sum, v) => sum + (v.quantity || 0), 0);
+        if (Math.abs(totalVariantQty - quantity) > 0.01) {
+          return sendResponse.error(res, `Variant composition total (${totalVariantQty}) does not match item quantity (${quantity}) for product ${product.name}`, 400);
+        }
+
+        try {
+          inventory.reduceVariantStockForReturn(returnComposition);
+        } catch (err) {
+          return sendResponse.error(res, err.message, 400);
+        }
+      }
+
       // Reduce inventory
       inventory.currentStock -= quantity;
       inventory.lastStockUpdate = new Date();
@@ -658,7 +676,8 @@ router.post('/product-return', auth, async (req, res) => {
         quantity: quantity,
         costPrice: costPrice,
         totalCost: itemTotalCost,
-        reason: reason || ''
+        reason: reason || '',
+        returnComposition
       });
 
       totalReturnValue += itemTotalCost;
@@ -683,7 +702,8 @@ router.post('/product-return', auth, async (req, res) => {
           dispatchOrderId: item.dispatchOrderId,
           quantity: item.quantity,
           costPrice: item.costPrice
-        }] : []
+        }] : [],
+        returnComposition: item.returnComposition
       })),
       totalReturnValue: totalReturnValue,
       returnedAt: returnDate ? new Date(returnDate) : new Date(),

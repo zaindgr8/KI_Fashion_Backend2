@@ -19,8 +19,8 @@ const returnSchema = new mongoose.Schema({
   },
   items: [{
     itemIndex: { type: Number, required: false }, // For order-level returns
-    product: { 
-      type: mongoose.Schema.Types.ObjectId, 
+    product: {
+      type: mongoose.Schema.Types.ObjectId,
       ref: 'Product',
       required: false // For product-level returns
     },
@@ -37,6 +37,12 @@ const returnSchema = new mongoose.Schema({
       dispatchOrderId: mongoose.Schema.Types.ObjectId,
       quantity: Number,
       costPrice: Number
+    }],
+    // Variant breakdown
+    returnComposition: [{
+      size: String,
+      color: String,
+      quantity: Number
     }]
   }],
   totalReturnValue: {

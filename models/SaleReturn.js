@@ -10,7 +10,12 @@ const saleReturnItemSchema = new mongoose.Schema({
   originalQuantity: { type: Number, required: true, min: 0 },
   returnedQuantity: { type: Number, required: true, min: 0 },
   unitPrice: { type: Number, required: true, min: 0 },
-  reason: { type: String }
+  reason: { type: String },
+  returnComposition: [{
+    size: String,
+    color: String,
+    quantity: Number
+  }]
 }, { _id: true });
 
 const saleReturnSchema = new mongoose.Schema({
