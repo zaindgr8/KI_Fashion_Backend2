@@ -197,6 +197,154 @@ async function convertDispatchOrderImages(orders, options = {}) {
   return isArray ? ordersArray : ordersArray[0];
 }
 
+/**
+ * Normalize and apply admin-provided fields (items, pricing, boxes, logistics)
+ * Mutates `dispatchOrder` in place and sets it to `pending-approval`.
+ * Does NOT save the document.
+ */
+async function normalizeDispatchOrderForAdmin(dispatchOrder, input = {}, user, options = { setSubmitted: true }) {
+  const {
+    cashPayment = 0,
+    bankPayment = 0,
+    exchangeRate,
+    percentage,
+    discount = 0,
+    items,
+    totalBoxes,
+    logisticsCompany,
+    dispatchDate,
+    isTotalBoxesConfirmed
+  } = input || {};
+
+  const finalExchangeRate = exchangeRate !== undefined && exchangeRate !== null
+    ? parseFloat(exchangeRate)
+    : dispatchOrder.exchangeRate || 1.0;
+  const finalPercentage = percentage !== undefined && percentage !== null
+    ? parseFloat(percentage)
+    : dispatchOrder.percentage || 0;
+
+  if (isNaN(finalExchangeRate) || finalExchangeRate <= 0) {
+    throw new Error('Invalid exchange rate. Must be a positive number.');
+  }
+  if (isNaN(finalPercentage) || finalPercentage < 0) {
+    throw new Error('Invalid percentage. Must be a non-negative number.');
+  }
+
+  dispatchOrder.exchangeRate = finalExchangeRate;
+  dispatchOrder.percentage = finalPercentage;
+
+  if (totalBoxes !== undefined && totalBoxes !== null) {
+    dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
+  }
+  if (logisticsCompany) {
+    dispatchOrder.logisticsCompany = logisticsCompany;
+    dispatchOrder.markModified('logisticsCompany');
+  }
+  if (dispatchDate) {
+    dispatchOrder.dispatchDate = new Date(dispatchDate);
+    dispatchOrder.markModified('dispatchDate');
+  }
+  if (isTotalBoxesConfirmed !== undefined) {
+    dispatchOrder.isTotalBoxesConfirmed = !!isTotalBoxesConfirmed;
+    dispatchOrder.markModified('isTotalBoxesConfirmed');
+  }
+
+  // Update items if provided
+  if (Array.isArray(items)) {
+    if (Array.isArray(dispatchOrder.items) && items.length === dispatchOrder.items.length) {
+      dispatchOrder.items.forEach((item, index) => {
+        const reqItem = items[index];
+        if (!reqItem) return;
+        if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
+        if (reqItem.productName) item.productName = reqItem.productName;
+        if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
+        if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
+        if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
+        if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
+        if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
+        if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
+        if (reqItem.packets) item.packets = reqItem.packets;
+        if (reqItem.boxes) item.boxes = reqItem.boxes;
+        if (reqItem.useVariantTracking !== undefined) item.useVariantTracking = !!reqItem.useVariantTracking;
+      });
+      dispatchOrder.markModified('items');
+    } else {
+      // Replace entire items array
+      dispatchOrder.items = items;
+      dispatchOrder.markModified('items');
+    }
+  }
+
+  // Calculate confirmed quantities
+  const confirmedQuantities = (dispatchOrder.items || []).map((item, index) => {
+    const returnedItems = dispatchOrder.returnedItems || [];
+    const totalReturned = returnedItems
+      .filter(returned => returned.itemIndex === index)
+      .reduce((sum, returned) => sum + returned.quantity, 0);
+
+    const confirmedQty = Math.max(0, (item.quantity || 0) - totalReturned);
+    return { itemIndex: index, quantity: confirmedQty };
+  });
+
+  // Calculate supplier payment and landed prices
+  let supplierPaymentTotal = 0;
+  let landedPriceTotal = 0;
+  const itemsWithPrices = (dispatchOrder.items || []).map((item, index) => {
+    const costPrice = item.costPrice || 0;
+    const confirmedQty = confirmedQuantities[index]?.quantity || 0;
+
+    const supplierPaymentAmount = costPrice;
+    supplierPaymentTotal += supplierPaymentAmount * confirmedQty;
+
+    const landedPrice = truncateToTwoDecimals((costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
+    const landedPriceItemTotal = truncateToTwoDecimals(landedPrice * confirmedQty);
+    landedPriceTotal += landedPriceItemTotal;
+
+    return { supplierPaymentAmount, landedPrice, confirmedQuantity: confirmedQty };
+  });
+
+  const totalDiscount = parseFloat(discount) !== undefined && discount !== null
+    ? parseFloat(discount)
+    : (dispatchOrder.totalDiscount || 0);
+
+  const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
+  const subtotal = truncateToTwoDecimals(landedPriceTotal);
+  const grandTotal = truncateToTwoDecimals(Math.max(0, subtotal - totalDiscount));
+
+  dispatchOrder.status = 'pending-approval';
+  if (options && options.setSubmitted) {
+    dispatchOrder.submittedForApprovalAt = new Date();
+    dispatchOrder.submittedForApprovalBy = user._id;
+  }
+  dispatchOrder.exchangeRate = finalExchangeRate;
+  dispatchOrder.percentage = finalPercentage;
+  dispatchOrder.totalDiscount = totalDiscount;
+  dispatchOrder.subtotal = subtotal;
+  dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
+  dispatchOrder.grandTotal = grandTotal;
+  dispatchOrder.paymentDetails = {
+    cashPayment: (parseFloat(cashPayment) || 0),
+    bankPayment: (parseFloat(bankPayment) || 0),
+    remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
+    paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
+      ? 'paid'
+      : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
+        ? 'partial'
+        : 'pending'
+  };
+
+  dispatchOrder.confirmedQuantities = confirmedQuantities;
+
+  // Update prices on items
+  dispatchOrder.items.forEach((item, index) => {
+    item.supplierPaymentAmount = itemsWithPrices[index]?.supplierPaymentAmount || 0;
+    item.landedPrice = itemsWithPrices[index]?.landedPrice || 0;
+  });
+
+  dispatchOrder.markModified('items');
+  return dispatchOrder;
+}
+
 const boxSchema = Joi.object({
   boxNumber: Joi.number().required(),
   itemsPerBox: Joi.number().min(0).optional().allow(null),
@@ -1309,154 +1457,13 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
       return sendResponse.error(res, 'Only pending or pending-approval dispatch orders can be submitted for approval', 400);
     }
 
-    // Validate and set exchange rate and percentage from admin input
-    const finalExchangeRate = exchangeRate !== undefined && exchangeRate !== null
-      ? parseFloat(exchangeRate)
-      : dispatchOrder.exchangeRate || 1.0;
-    const finalPercentage = percentage !== undefined && percentage !== null
-      ? parseFloat(percentage)
-      : dispatchOrder.percentage || 0;
-
-    if (isNaN(finalExchangeRate) || finalExchangeRate <= 0) {
-      return sendResponse.error(res, 'Invalid exchange rate. Must be a positive number.', 400);
+    try {
+      await normalizeDispatchOrderForAdmin(dispatchOrder, req.body, req.user, { setSubmitted: true });
+      await dispatchOrder.save();
+    } catch (normErr) {
+      console.error('Submit approval normalization error:', normErr);
+      return sendResponse.error(res, normErr.message || 'Invalid admin input', 400);
     }
-
-    if (isNaN(finalPercentage) || finalPercentage < 0) {
-      return sendResponse.error(res, 'Invalid percentage. Must be a non-negative number.', 400);
-    }
-
-    // Update dispatch order with admin-provided exchange rate and percentage
-    dispatchOrder.exchangeRate = finalExchangeRate;
-    dispatchOrder.percentage = finalPercentage;
-
-    // Update total boxes if provided
-    if (totalBoxes !== undefined && totalBoxes !== null) {
-      dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
-    }
-
-    // Update logistics and date if provided
-    if (logisticsCompany) {
-      dispatchOrder.logisticsCompany = logisticsCompany;
-      dispatchOrder.markModified('logisticsCompany');
-      // Re-populate to ensure we have the full object for response/calculations
-      await dispatchOrder.populate('logisticsCompany', 'name code contactInfo rates');
-    }
-    if (dispatchDate) {
-      dispatchOrder.dispatchDate = new Date(dispatchDate);
-      dispatchOrder.markModified('dispatchDate');
-    }
-    if (isTotalBoxesConfirmed !== undefined) {
-      dispatchOrder.isTotalBoxesConfirmed = !!isTotalBoxesConfirmed;
-      dispatchOrder.markModified('isTotalBoxesConfirmed');
-    }
-
-    // Update items - handle structural changes (add/remove)
-    if (Array.isArray(items)) {
-      if (items.length === dispatchOrder.items.length) {
-        // Standard mapping if length matches (preserves item IDs)
-        dispatchOrder.items.forEach((item, index) => {
-          const reqItem = items[index];
-          if (reqItem) {
-            if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
-            if (reqItem.productName) item.productName = reqItem.productName;
-            if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
-            if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
-            if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
-            if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
-            if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
-            if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
-            if (reqItem.packets) item.packets = reqItem.packets;
-            if (reqItem.boxes) item.boxes = reqItem.boxes;
-          }
-        });
-        dispatchOrder.markModified('items');
-      } else {
-        // If items were added or removed, replace the array
-        dispatchOrder.items = items;
-        dispatchOrder.markModified('items');
-      }
-    }
-
-    // Calculate confirmed quantities (same as confirm endpoint)
-    const confirmedQuantities = dispatchOrder.items.map((item, index) => {
-      const returnedItems = dispatchOrder.returnedItems || [];
-      const totalReturned = returnedItems
-        .filter(returned => returned.itemIndex === index)
-        .reduce((sum, returned) => sum + returned.quantity, 0);
-
-      const confirmedQty = Math.max(0, (item.quantity || 0) - totalReturned);
-
-      return {
-        itemIndex: index,
-        quantity: confirmedQty
-      };
-    });
-
-    // Calculate supplier payment amount and landed price for each item
-    let supplierPaymentTotal = 0;
-    let landedPriceTotal = 0;
-    const itemsWithPrices = dispatchOrder.items.map((item, index) => {
-      const costPrice = item.costPrice || 0;
-      const confirmedQty = confirmedQuantities[index].quantity;
-
-      const supplierPaymentAmount = costPrice;
-      const supplierPaymentItemTotal = supplierPaymentAmount * confirmedQty;
-      supplierPaymentTotal += supplierPaymentItemTotal;
-
-      // Truncate to 2 decimal places (no rounding) for database storage
-      const landedPrice = truncateToTwoDecimals((costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
-      const landedPriceItemTotal = truncateToTwoDecimals(landedPrice * confirmedQty);
-      landedPriceTotal += landedPriceItemTotal;
-
-      return {
-        ...item.toObject(),
-        supplierPaymentAmount,
-        landedPrice,
-        confirmedQuantity: confirmedQty
-      };
-    });
-
-    // Get discount from order or from request
-    const totalDiscount = parseFloat(discount) !== undefined && discount !== null
-      ? parseFloat(discount)
-      : (dispatchOrder.totalDiscount || 0);
-
-    // Apply discount to supplierPaymentTotal
-    const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
-
-    // Truncate subtotal and grandTotal to 2 decimal places
-    const subtotal = truncateToTwoDecimals(landedPriceTotal);
-    const grandTotal = truncateToTwoDecimals(Math.max(0, subtotal - totalDiscount));
-
-    // Update dispatch order status to pending-approval (DO NOT process inventory or ledger)
-    dispatchOrder.status = 'pending-approval';
-    dispatchOrder.submittedForApprovalAt = new Date();
-    dispatchOrder.submittedForApprovalBy = req.user._id;
-    dispatchOrder.exchangeRate = finalExchangeRate;
-    dispatchOrder.percentage = finalPercentage;
-    dispatchOrder.totalDiscount = totalDiscount;
-    dispatchOrder.subtotal = subtotal;
-    dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
-    dispatchOrder.grandTotal = grandTotal;
-    dispatchOrder.paymentDetails = {
-      cashPayment: (parseFloat(cashPayment) || 0),
-      bankPayment: (parseFloat(bankPayment) || 0),
-      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
-      paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
-        ? 'paid'
-        : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
-          ? 'partial'
-          : 'pending'
-    };
-    dispatchOrder.confirmedQuantities = confirmedQuantities;
-
-    // Update prices on items
-    dispatchOrder.items.forEach((item, index) => {
-      item.supplierPaymentAmount = itemsWithPrices[index].supplierPaymentAmount;
-      item.landedPrice = itemsWithPrices[index].landedPrice;
-    });
-
-    await dispatchOrder.save();
 
     // Populate for response
     await dispatchOrder.populate([
@@ -3604,8 +3611,9 @@ router.put('/:id', auth, async (req, res) => {
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    // Only pending orders can be updated
-    if (dispatchOrder.status !== 'pending') {
+    // Only pending orders can be updated — allow admin/super-admin to edit pending-approval
+    const canEditPendingApproval = ['admin', 'super-admin'].includes(req.user.role) && dispatchOrder.status === 'pending-approval';
+    if (dispatchOrder.status !== 'pending' && !canEditPendingApproval) {
       return sendResponse.error(res, 'Only pending dispatch orders can be updated', 400);
     }
 
@@ -3655,6 +3663,8 @@ router.put('/:id', auth, async (req, res) => {
           boxes: item.boxes || [],
           totalBoxes: item.boxes?.length || 0,
           unitWeight: item.unitWeight || 0,
+          useVariantTracking: item.useVariantTracking || false,
+          packets: item.packets || []
         };
 
         if (item.primaryColor) processedItem.primaryColor = item.primaryColor;
@@ -3665,6 +3675,15 @@ router.put('/:id', auth, async (req, res) => {
 
         return processedItem;
       });
+
+      // Preserve existing subdocument _id values when replacing with same-length array
+      if (Array.isArray(dispatchOrder.items) && processedItems.length === dispatchOrder.items.length) {
+        for (let i = 0; i < processedItems.length; i++) {
+          if (dispatchOrder.items[i] && dispatchOrder.items[i]._id) {
+            processedItems[i]._id = dispatchOrder.items[i]._id;
+          }
+        }
+      }
 
       updateData.items = processedItems;
       updateData.totalQuantity = processedItems.reduce((sum, item) => sum + (item.quantity || 0), 0);
@@ -3678,8 +3697,13 @@ router.put('/:id', auth, async (req, res) => {
       updateData.dispatchDate = new Date(updateData.date);
     }
 
-    // Update dispatch order
+    // Update dispatch order (apply updates then normalize using admin logic)
     Object.assign(dispatchOrder, updateData);
+    try {
+      await normalizeDispatchOrderForAdmin(dispatchOrder, { ...updateData, cashPayment: 0, bankPayment: 0, discount: dispatchOrder.totalDiscount }, req.user, { setSubmitted: true });
+    } catch (normErr) {
+      return sendResponse.error(res, normErr.message || 'Invalid admin input', 400);
+    }
     await dispatchOrder.save();
 
     // Populate for response
