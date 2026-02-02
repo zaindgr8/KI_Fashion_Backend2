@@ -255,6 +255,11 @@ async function normalizeDispatchOrderForAdmin(dispatchOrder, input = {}, user, o
       dispatchOrder.items.forEach((item, index) => {
         const reqItem = items[index];
         if (!reqItem) return;
+
+        // Capture original variants for comparison
+        const originalSizes = Array.isArray(item.size) ? item.size.map(String) : (item.size ? [String(item.size)] : []);
+        const originalColors = Array.isArray(item.primaryColor) ? item.primaryColor.map(String) : (item.primaryColor ? [String(item.primaryColor)] : []);
+
         if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
         if (reqItem.productName) item.productName = reqItem.productName;
         if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
@@ -263,9 +268,31 @@ async function normalizeDispatchOrderForAdmin(dispatchOrder, input = {}, user, o
         if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
         if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
         if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
-        if (reqItem.packets) item.packets = reqItem.packets;
+
+        // If new packets provided, accept them and clear reconfiguration flag
+        if (reqItem.packets) {
+          item.packets = reqItem.packets;
+          item.requiresReconfiguration = false;
+        }
+
         if (reqItem.boxes) item.boxes = reqItem.boxes;
         if (reqItem.useVariantTracking !== undefined) item.useVariantTracking = !!reqItem.useVariantTracking;
+
+        // Detect removal of sizes/colors compared to original; if removed, require reconfiguration
+        const newSizes = Array.isArray(item.size) ? item.size.map(String) : (item.size ? [String(item.size)] : []);
+        const newColors = Array.isArray(item.primaryColor) ? item.primaryColor.map(String) : (item.primaryColor ? [String(item.primaryColor)] : []);
+
+        const sizeRemoved = originalSizes.some(s => !newSizes.includes(s));
+        const colorRemoved = originalColors.some(c => !newColors.includes(c));
+
+        if (sizeRemoved || colorRemoved) {
+          // Mark this item as needing a new packet configuration
+          item.requiresReconfiguration = true;
+          // Optionally clear existing packets to force reconfiguration by UX
+          if (!reqItem.packets) {
+            item.packets = [];
+          }
+        }
       });
       dispatchOrder.markModified('items');
     } else {
@@ -3703,6 +3730,11 @@ router.put('/:id', auth, async (req, res) => {
       await normalizeDispatchOrderForAdmin(dispatchOrder, { ...updateData, cashPayment: 0, bankPayment: 0, discount: dispatchOrder.totalDiscount }, req.user, { setSubmitted: true });
     } catch (normErr) {
       return sendResponse.error(res, normErr.message || 'Invalid admin input', 400);
+    }
+    // If any item requires reconfiguration (variants removed) and packets are not provided, block save
+    const needsReconfig = (dispatchOrder.items || []).some(it => it.requiresReconfiguration && (!Array.isArray(it.packets) || it.packets.length === 0));
+    if (needsReconfig) {
+      return sendResponse.error(res, 'One or more items have had variants removed and require packet reconfiguration. Please open the Configure Packets modal and save a new configuration before submitting.', 400);
     }
     await dispatchOrder.save();
 

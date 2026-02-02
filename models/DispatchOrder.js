@@ -54,6 +54,8 @@ const dispatchItemSchema = new mongoose.Schema({
   // Packet Management
   useVariantTracking: { type: Boolean, default: false },
   packets: [packetSchema]
+  ,
+  requiresReconfiguration: { type: Boolean, default: false }
 }, { _id: true });
 
 const dispatchOrderSchema = new mongoose.Schema({

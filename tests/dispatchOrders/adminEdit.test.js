@@ -170,3 +170,107 @@ test('supplier cannot edit pending-approval dispatch order', async () => {
 
   expect(res.body.success).toBe(false);
 });
+
+test('removing variants requires reconfiguration and blocks save', async () => {
+  const admin = await User.create({ name: 'Admin3', email: 'admin3@example.com', password: 'pass123', role: 'admin' });
+  const supplier = await Supplier.create({ name: 'Supplier C', phone: '34567', createdBy: admin._id });
+
+  // Create order with sizes and colors and an initial packet
+  const order = await DispatchOrder.create({
+    supplier: supplier._id,
+    createdBy: admin._id,
+    status: 'pending-approval',
+    items: [
+      {
+        productName: 'Item2',
+        productCode: 'P2',
+        season: ['all_season'],
+        costPrice: 5,
+        quantity: 10,
+        primaryColor: ['Red','Blue'],
+        size: ['S','M'],
+        useVariantTracking: true,
+        packets: [
+          { packetNumber: 1, totalItems: 10, composition: [ { size: 'S', color: 'Red', quantity: 5 }, { size: 'M', color: 'Blue', quantity: 5 } ], isLoose: false }
+        ]
+      }
+    ]
+  });
+
+  const token = generateTokenFor(admin);
+
+  // Admin removes size 'M' without providing new packets
+  const payload = {
+    items: [ {
+      productName: 'Item2', productCode: 'P2', quantity: 10, primaryColor: ['Red','Blue'], size: ['S']
+    } ]
+  };
+
+  const res = await request(app)
+    .put(`/api/dispatch-orders/${order._id}`)
+    .set('Authorization', `Bearer ${token}`)
+    .send(payload)
+    .expect(400);
+
+  expect(res.body.success).toBe(false);
+
+  // Order should remain unchanged in DB (no save)
+  const getRes = await request(app)
+    .get(`/api/dispatch-orders/${order._id}`)
+    .set('Authorization', `Bearer ${token}`)
+    .expect(200);
+
+  const dbOrder = getRes.body.data;
+  expect(dbOrder.items[0].size.includes('M')).toBe(true);
+});
+
+test('providing new packets clears requiresReconfiguration and saves', async () => {
+  const admin = await User.create({ name: 'Admin4', email: 'admin4@example.com', password: 'pass123', role: 'admin' });
+  const supplier = await Supplier.create({ name: 'Supplier D', phone: '45678', createdBy: admin._id });
+
+  const order = await DispatchOrder.create({
+    supplier: supplier._id,
+    createdBy: admin._id,
+    status: 'pending-approval',
+    items: [
+      {
+        productName: 'Item3',
+        productCode: 'P3',
+        season: ['all_season'],
+        costPrice: 8,
+        quantity: 6,
+        primaryColor: ['Black'],
+        size: ['L','XL'],
+        useVariantTracking: true,
+        packets: [ { packetNumber: 1, totalItems: 6, composition: [ { size: 'L', color: 'Black', quantity: 3 }, { size: 'XL', color: 'Black', quantity: 3 } ], isLoose: false } ]
+      }
+    ]
+  });
+
+  const token = generateTokenFor(admin);
+
+  // Admin removes size 'XL' but provides new packets for remaining size
+  const payload = {
+    items: [ {
+      productName: 'Item3', productCode: 'P3', quantity: 6, primaryColor: ['Black'], size: ['L'],
+      packets: [ { packetNumber: 1, totalItems: 6, composition: [ { size: 'L', color: 'Black', quantity: 6 } ], isLoose: false } ]
+    } ]
+  };
+
+  const res = await request(app)
+    .put(`/api/dispatch-orders/${order._id}`)
+    .set('Authorization', `Bearer ${token}`)
+    .send(payload)
+    .expect(200);
+
+  expect(res.body.success).toBe(true);
+
+  const getRes = await request(app)
+    .get(`/api/dispatch-orders/${order._id}`)
+    .set('Authorization', `Bearer ${token}`)
+    .expect(200);
+
+  const dbOrder = getRes.body.data;
+  expect(dbOrder.items[0].requiresReconfiguration).toBe(false);
+  expect(dbOrder.items[0].packets.length).toBeGreaterThan(0);
+});
