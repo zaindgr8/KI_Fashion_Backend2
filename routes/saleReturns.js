@@ -87,20 +87,30 @@ async function convertSaleReturnImages(saleReturns) {
 }
 
 // Create sale return
+// [IMPROVED] Uses MongoDB transaction for atomic over-return prevention
 router.post('/', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     const { error, value } = saleReturnSchema.validate(req.body);
     if (error) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, error.details[0].message, 400);
     }
 
-    // Verify sale exists and is delivered
-    const sale = await Sale.findById(value.sale).populate('items.product');
+    // Verify sale exists and is delivered (with session for consistency)
+    const sale = await Sale.findById(value.sale).populate('items.product').session(session);
     if (!sale) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Sale not found', 404);
     }
 
     if (sale.deliveryStatus !== 'delivered') {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Can only return items from delivered sales', 400);
     }
 
@@ -111,15 +121,17 @@ router.post('/', auth, async (req, res) => {
     if (isBuyer) {
       const buyerId = await getBuyerIdForUser(req.user);
       if (!buyerId || sale.buyer.toString() !== buyerId.toString()) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, 'Access denied', 403);
       }
     }
 
-    // Get existing returns for this sale to track cumulative returns
+    // Get existing returns for this sale to track cumulative returns (within session for atomicity)
     const existingReturns = await SaleReturn.find({
       sale: value.sale,
       status: { $in: ['pending', 'approved'] }
-    });
+    }).session(session);
 
     // Calculate already returned quantities per item
     const returnedQuantities = {};
@@ -135,16 +147,45 @@ router.post('/', auth, async (req, res) => {
       });
     });
 
-    // Validate returned quantities
+    // Validate returned quantities and returnComposition consistency
     let totalReturnValue = 0;
     for (const returnItem of value.items) {
       const saleItem = sale.items[returnItem.itemIndex];
       if (!saleItem) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, `Invalid item index: ${returnItem.itemIndex}`, 400);
       }
 
       if (saleItem.product._id.toString() !== returnItem.product) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, `Product mismatch for item index ${returnItem.itemIndex}`, 400);
+      }
+
+      // [NEW] Validate returnComposition sum matches returnedQuantity for packet sales
+      if (returnItem.returnComposition && returnItem.returnComposition.length > 0) {
+        const compositionTotal = returnItem.returnComposition.reduce((sum, comp) => sum + (comp.quantity || 0), 0);
+        if (compositionTotal !== returnItem.returnedQuantity) {
+          await session.abortTransaction();
+          session.endSession();
+          return sendResponse.error(
+            res, 
+            `Return composition total (${compositionTotal}) does not match returnedQuantity (${returnItem.returnedQuantity}) for item at index ${returnItem.itemIndex}. This is critical for packet inventory tracking.`, 
+            400
+          );
+        }
+      }
+
+      // [NEW] Validate returnComposition is provided for packet sales
+      if (saleItem.isPacketSale && (!returnItem.returnComposition || returnItem.returnComposition.length === 0)) {
+        await session.abortTransaction();
+        session.endSession();
+        return sendResponse.error(
+          res, 
+          `Item at index ${returnItem.itemIndex} is a packet sale. returnComposition must be provided to specify which items are being returned (prevents inventory desync).`, 
+          400
+        );
       }
 
       const key = `${value.sale}_${returnItem.itemIndex}`;
@@ -152,10 +193,14 @@ router.post('/', auth, async (req, res) => {
       const availableToReturn = saleItem.quantity - alreadyReturned;
 
       if (returnItem.returnedQuantity > availableToReturn) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, `Cannot return ${returnItem.returnedQuantity} items. Only ${availableToReturn} available to return for item at index ${returnItem.itemIndex}`, 400);
       }
 
       if (returnItem.originalQuantity !== saleItem.quantity) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, `Original quantity mismatch for item at index ${returnItem.itemIndex}`, 400);
       }
 
@@ -177,11 +222,18 @@ router.post('/', auth, async (req, res) => {
       notes: value.notes
     });
 
-    await saleReturn.save();
+    await saleReturn.save({ session });
 
-    // If approved by admin, process immediately
+    // If approved by admin, process immediately (processSaleReturn already uses its own session)
     if (status === 'approved') {
+      // Commit this transaction first, then process return in its own transaction
+      await session.commitTransaction();
+      session.endSession();
       await processSaleReturn(saleReturn._id, req.user._id);
+    } else {
+      // Commit the transaction for pending returns
+      await session.commitTransaction();
+      session.endSession();
     }
 
     // Populate for response
@@ -198,6 +250,15 @@ router.post('/', auth, async (req, res) => {
     return sendResponse.success(res, saleReturn, 'Sale return created successfully', 201);
 
   } catch (error) {
+    // [IMPROVED] Abort transaction on error if session is still active
+    try {
+      if (session.inTransaction()) {
+        await session.abortTransaction();
+      }
+      session.endSession();
+    } catch (sessionError) {
+      // Session may already be closed
+    }
     console.error('Create sale return error:', error);
     return sendResponse.error(res, error.message || 'Server error', 500);
   }
@@ -245,8 +306,34 @@ async function processSaleReturn(returnId, userId) {
           }];
         }
 
-        // Update Inventory with variants if possible
-        if (compositionToAdd.length > 0) {
+        // [IMPROVED] Try to find original batch info to maintain FIFO integrity
+        // Look for the batch that was used when this item was sold
+        let originalBatchInfo = null;
+        if (originalSaleItem?.packetStock) {
+          const packetStock = await PacketStock.findById(originalSaleItem.packetStock).session(session);
+          if (packetStock) {
+            originalBatchInfo = {
+              supplierId: packetStock.supplier,
+              costPrice: packetStock.costPricePerPacket / (packetStock.totalItemsPerPacket || 1),
+              landedPrice: packetStock.landedPricePerPacket / (packetStock.totalItemsPerPacket || 1),
+              purchaseDate: packetStock.createdAt
+            };
+          }
+        }
+
+        // [IMPROVED] Use restoreWithBatch to maintain FIFO integrity if batch info is available
+        if (originalBatchInfo && compositionToAdd.length > 0) {
+          await inventory.restoreWithBatch(
+            item.returnedQuantity,
+            compositionToAdd,
+            originalBatchInfo,
+            'SaleReturn',
+            saleReturn._id,
+            userId,
+            `Sale Return from Sale ${saleReturn.sale.saleNumber}`
+          );
+        } else if (compositionToAdd.length > 0) {
+          // Fallback: Use addStockWithVariants if no batch info (still updates stock correctly, but no batch)
           await inventory.addStockWithVariants(
             item.returnedQuantity,
             compositionToAdd,
@@ -255,6 +342,7 @@ async function processSaleReturn(returnId, userId) {
             userId,
             `Sale Return from Sale ${saleReturn.sale.saleNumber}`
           );
+          await inventory.save({ session });
         } else {
           // Fallback for non-variant products
           await inventory.addStock(
@@ -265,7 +353,6 @@ async function processSaleReturn(returnId, userId) {
             `Sale Return from Sale ${saleReturn.sale.saleNumber}`
           );
         }
-        await inventory.save({ session });
       }
 
       // Handle PacketStock restoration

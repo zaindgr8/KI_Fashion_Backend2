@@ -290,7 +290,8 @@ packetStockSchema.methods.returnLooseToSupplier = function (quantity, returnId =
 
 // Method to break a packet for partial supplier return
 // Returns specified items to supplier, creates loose stock for remaining items
-packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn, userId, returnId = null) {
+// [IMPROVED] Now supports MongoDB sessions for atomic operations to prevent race conditions
+packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn, userId, returnId = null, session = null) {
   const QRCode = require('qrcode');
   const { generatePacketBarcode } = require('../utils/barcodeGenerator');
 
@@ -315,8 +316,16 @@ packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn
     }
   }
 
-  // Reduce available packets by 1 (breaking one packet)
-  this.availablePackets -= 1;
+  // [IMPROVED] Use atomic findOneAndUpdate to prevent race conditions on availablePackets
+  const updated = await this.constructor.findOneAndUpdate(
+    { _id: this._id, availablePackets: { $gte: 1 } },
+    { $inc: { availablePackets: -1 } },
+    { new: true, session }
+  );
+
+  if (!updated) {
+    throw new Error('Packet no longer available for breaking (concurrent operation detected). Please refresh and try again.');
+  }
 
   // Calculate remaining items after return
   const remainingItems = this.composition.map(c => {
@@ -350,15 +359,15 @@ packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn
         true // isLoose
       );
 
-      // Find or create loose stock for this variant
+      // Find or create loose stock for this variant (session-aware)
       let looseStock = await this.constructor.findOne({
         barcode,
         isActive: true
-      });
+      }).session(session);
 
       if (looseStock) {
         looseStock.availablePackets += item.quantity;
-        await looseStock.save();
+        await looseStock.save({ session });
       } else {
         looseStock = new this.constructor({
           barcode,
@@ -390,7 +399,7 @@ packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn
           console.warn('[PacketStock] QR code generation failed:', qrError.message);
         }
 
-        await looseStock.save();
+        await looseStock.save({ session });
       }
 
       looseStocksCreated.push({
@@ -414,7 +423,12 @@ packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn
     notes: 'Broken for supplier return'
   });
 
-  await this.save();
+  // Save with session if provided
+  if (session) {
+    await this.save({ session });
+  } else {
+    await this.save();
+  }
 
   return {
     remainingItems,

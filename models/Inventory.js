@@ -399,6 +399,66 @@ inventorySchema.methods.recalculateAverageCost = function () {
   return this.averageCostPrice;
 };
 
+// [NEW] Restore stock with batch recreation for sale returns
+// This maintains FIFO integrity by recreating the original batch when items are returned
+// IMPORTANT: Call this instead of addStock/addStockWithVariants for sale returns
+inventorySchema.methods.restoreWithBatch = function (quantity, variantComposition, originalBatchInfo, reference, referenceId, user, notes = '') {
+  // Add stock movement
+  this.stockMovements.push({
+    type: 'in',
+    quantity: quantity,
+    reference: reference,
+    referenceId: referenceId,
+    user: user,
+    notes: notes,
+    date: new Date()
+  });
+
+  // Increase current stock
+  this.currentStock += quantity;
+
+  // Update variant composition if provided
+  if (variantComposition && variantComposition.length > 0) {
+    variantComposition.forEach(incomingVariant => {
+      const existingVariant = this.variantComposition.find(
+        v => v.size === incomingVariant.size && v.color === incomingVariant.color
+      );
+      if (existingVariant) {
+        existingVariant.quantity += incomingVariant.quantity;
+      } else {
+        this.variantComposition.push({
+          size: incomingVariant.size,
+          color: incomingVariant.color,
+          quantity: incomingVariant.quantity,
+          reservedQuantity: 0
+        });
+      }
+    });
+  }
+
+  // Recreate purchase batch to maintain FIFO integrity
+  // Use original batch info if available (supplierId, costPrice, landedPrice, exchangeRate)
+  if (originalBatchInfo && originalBatchInfo.supplierId) {
+    this.purchaseBatches.push({
+      dispatchOrderId: originalBatchInfo.dispatchOrderId || null,
+      supplierId: originalBatchInfo.supplierId,
+      purchaseDate: originalBatchInfo.purchaseDate || new Date(),
+      quantity: quantity,
+      remainingQuantity: quantity,
+      costPrice: originalBatchInfo.costPrice || 0,
+      landedPrice: originalBatchInfo.landedPrice || originalBatchInfo.costPrice || 0,
+      exchangeRate: originalBatchInfo.exchangeRate || 1.0,
+      notes: `Return batch - ${notes}`
+    });
+
+    // Recalculate average cost after adding batch
+    this.recalculateAverageCost();
+  }
+
+  this.lastStockUpdate = new Date();
+  return this.save();
+};
+
 // Reduce variant stock for returns
 inventorySchema.methods.reduceVariantStockForReturn = function (variantReductions) {
   if (!this.variantComposition) return;

@@ -291,9 +291,15 @@ router.get('/packet-stocks-for-return', auth, async (req, res) => {
 
 // Create a packet-level supplier return (returns full packets or loose items)
 // Updates both PacketStock AND Inventory
+// [IMPROVED] Now uses MongoDB transaction for atomic operations
 router.post('/packet-return', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     if (!['super-admin', 'admin'].includes(req.user.role)) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Only admins can create packet returns', 403);
     }
 
@@ -308,22 +314,30 @@ router.post('/packet-return', auth, async (req, res) => {
     } = req.body;
 
     if (!supplierId || !packetStockId) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Supplier ID and Packet Stock ID are required', 400);
     }
 
     // Verify supplier exists
-    const supplier = await Supplier.findById(supplierId);
+    const supplier = await Supplier.findById(supplierId).session(session);
     if (!supplier) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Supplier not found', 404);
     }
 
     // Get packet stock
-    const packetStock = await PacketStock.findById(packetStockId).populate('product');
+    const packetStock = await PacketStock.findById(packetStockId).populate('product').session(session);
     if (!packetStock) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Packet stock not found', 404);
     }
 
     if (packetStock.supplier.toString() !== supplierId) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Packet stock does not belong to this supplier', 400);
     }
 
@@ -335,12 +349,17 @@ router.post('/packet-return', auth, async (req, res) => {
     if (returnType === 'partial' && !packetStock.isLoose) {
       // Breaking a packet for partial return
       if (!itemsToReturn || itemsToReturn.length === 0) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, 'Items to return are required for partial returns', 400);
       }
 
+      // [IMPROVED] Pass session to breakForSupplierReturn for atomic operation
       breakResult = await packetStock.breakForSupplierReturn(
         itemsToReturn,
-        req.user._id
+        req.user._id,
+        null,
+        session
       );
 
       totalItemsReturned = breakResult.totalItemsReturned;
@@ -359,6 +378,8 @@ router.post('/packet-return', auth, async (req, res) => {
     } else if (packetStock.isLoose) {
       // Returning loose items
       if (!quantity || quantity <= 0) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, 'Quantity is required for loose item returns', 400);
       }
 
@@ -378,6 +399,8 @@ router.post('/packet-return', auth, async (req, res) => {
     } else {
       // Returning full packets
       if (!quantity || quantity <= 0) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, 'Quantity is required for full packet returns', 400);
       }
 
@@ -398,7 +421,7 @@ router.post('/packet-return', auth, async (req, res) => {
 
     // Update Inventory (reduce stock)
     const productId = packetStock.product._id || packetStock.product;
-    const inventory = await Inventory.findOne({ product: productId });
+    const inventory = await Inventory.findOne({ product: productId }).session(session);
 
     if (inventory) {
       // Reduce current stock
@@ -449,7 +472,7 @@ router.post('/packet-return', auth, async (req, res) => {
       }
 
       inventory.recalculateAverageCost();
-      await inventory.save();
+      await inventory.save({ session });
     }
 
     // Create Return document
@@ -472,14 +495,14 @@ router.post('/packet-return', auth, async (req, res) => {
       notes: `${notes}${breakResult ? ` | Packet broken, remaining items moved to loose stock` : ''}`
     });
 
-    await returnDoc.save();
+    await returnDoc.save({ session });
 
     // Update stock movement with Return ID
     if (inventory) {
       const lastMovement = inventory.stockMovements[inventory.stockMovements.length - 1];
       if (lastMovement) {
         lastMovement.referenceId = returnDoc._id;
-        await inventory.save();
+        await inventory.save({ session });
       }
     }
 
@@ -520,6 +543,10 @@ router.post('/packet-return', auth, async (req, res) => {
       { path: 'items.product', select: 'name sku productCode' }
     ]);
 
+    // [IMPROVED] Commit transaction after all operations succeed
+    await session.commitTransaction();
+    session.endSession();
+
     return sendResponse.success(res, {
       return: returnDoc,
       packetDetails: {
@@ -532,6 +559,9 @@ router.post('/packet-return', auth, async (req, res) => {
     }, 'Packet return created successfully', 201);
 
   } catch (error) {
+    // [IMPROVED] Abort transaction on error
+    await session.abortTransaction();
+    session.endSession();
     console.error('Create packet return error:', error);
     return sendResponse.error(res, error.message || 'Server error', 500);
   }
