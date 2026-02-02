@@ -162,6 +162,8 @@ app.use("/api/logistics-payables", require("./routes/logisticsPayables"));
 app.use("/api/cash-tracking", require("./routes/cashTracking"));
 app.use("/api/stock-sync", require("./routes/stockSync"));
 app.use("/api/cart", require("./routes/cart"));
+app.use("/api/wishlist", require("./routes/wishlist"));
+app.use("/api/addresses", require("./routes/addresses"));
 
 // Health check endpoint
 app.get("/health", (req, res) => {
