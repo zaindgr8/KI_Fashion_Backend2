@@ -539,20 +539,33 @@ router.get('/:id', auth, async (req, res) => {
     // Get inventory information
     const inventory = await Inventory.findOne({ product: product._id });
 
-    // Get packet pricing information
+    // Get all available packet configurations
     const PacketStock = require('../models/PacketStock');
     const packetStocks = await PacketStock.find({ 
       product: product._id, 
       isActive: true,
       availablePackets: { $gt: 0 } 
     })
+      .populate('supplier', 'name company')
       .sort({ isLoose: 1, totalItemsPerPacket: -1 }) // Prioritize packets over loose, larger packets first
       .lean();
 
-    // Select the primary packet configuration (first non-loose if available, otherwise first loose)
+    // Map all packet configurations for user selection
+    const availablePackets = packetStocks.map(packet => ({
+      barcode: packet.barcode,
+      composition: packet.composition,
+      totalItemsPerPacket: packet.totalItemsPerPacket,
+      isLoose: packet.isLoose,
+      suggestedSellingPrice: packet.suggestedSellingPrice,
+      costPricePerPacket: packet.costPricePerPacket,
+      availableStock: packet.availablePackets,
+      supplierName: packet.supplier?.name || packet.supplier?.company || 'Unknown Supplier'
+    }));
+
+    // Keep backward compatibility: set primary packet as packetPricing
     let packetPricing = null;
-    if (packetStocks.length > 0) {
-      const primaryPacket = packetStocks.find(p => !p.isLoose) || packetStocks[0];
+    if (availablePackets.length > 0) {
+      const primaryPacket = availablePackets[0];
       packetPricing = {
         barcode: primaryPacket.barcode,
         composition: primaryPacket.composition,
@@ -560,7 +573,7 @@ router.get('/:id', auth, async (req, res) => {
         isLoose: primaryPacket.isLoose,
         suggestedSellingPrice: primaryPacket.suggestedSellingPrice,
         costPricePerPacket: primaryPacket.costPricePerPacket,
-        availablePackets: primaryPacket.availablePackets
+        availablePackets: primaryPacket.availableStock
       };
     }
 
@@ -572,7 +585,8 @@ router.get('/:id', auth, async (req, res) => {
       data: {
         ...product.toObject(),
         inventoryInfo: inventory,
-        packetPricing
+        packetPricing,
+        availablePackets  // NEW: All packet configurations
       }
     });
 

@@ -946,4 +946,65 @@ router.post('/adjust-variant', auth, async (req, res) => {
   }
 });
 
+// Get variant stock availability for a specific product variant
+router.get('/variant-stock/:productId', auth, async (req, res) => {
+  try {
+    const { size, color } = req.query;
+
+    if (!size || !color) {
+      return res.status(400).json({
+        success: false,
+        message: 'Size and color query parameters are required'
+      });
+    }
+
+    const inventory = await Inventory.findOne({ product: req.params.productId });
+
+    if (!inventory) {
+      return res.status(404).json({
+        success: false,
+        message: 'Inventory not found for this product'
+      });
+    }
+
+    // Find the specific variant in composition
+    const variant = inventory.variantComposition.find(
+      v => v.size === size && v.color === color
+    );
+
+    if (!variant) {
+      return res.json({
+        success: true,
+        data: {
+          size,
+          color,
+          available: 0,
+          reserved: 0,
+          actualAvailable: 0
+        }
+      });
+    }
+
+    const actualAvailable = Math.max(0, variant.quantity - (variant.reservedQuantity || 0));
+
+    res.json({
+      success: true,
+      data: {
+        size,
+        color,
+        available: variant.quantity,
+        reserved: variant.reservedQuantity || 0,
+        actualAvailable
+      }
+    });
+
+  } catch (error) {
+    console.error('Get variant stock error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+});
+
 module.exports = router;
