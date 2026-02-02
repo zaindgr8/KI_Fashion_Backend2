@@ -161,6 +161,7 @@ app.use("/api/images", require("./routes/images"));
 app.use("/api/logistics-payables", require("./routes/logisticsPayables"));
 app.use("/api/cash-tracking", require("./routes/cashTracking"));
 app.use("/api/stock-sync", require("./routes/stockSync"));
+app.use("/api/cart", require("./routes/cart"));
 
 // Health check endpoint
 app.get("/health", (req, res) => {
