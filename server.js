@@ -110,7 +110,14 @@ app.use(
 app.options("*", cors());
 
 // Body parsing middleware
-app.use(express.json({ limit: "50mb" }));
+// Skip JSON parsing for Stripe webhook (needs raw body for signature verification)
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/checkout/webhook') {
+    next();
+  } else {
+    express.json({ limit: "50mb" })(req, res, next);
+  }
+});
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // Serve invoice PDFs
@@ -164,6 +171,7 @@ app.use("/api/stock-sync", require("./routes/stockSync"));
 app.use("/api/cart", require("./routes/cart"));
 app.use("/api/wishlist", require("./routes/wishlist"));
 app.use("/api/addresses", require("./routes/addresses"));
+app.use("/api/checkout", require("./routes/checkout"));
 
 // Health check endpoint
 app.get("/health", (req, res) => {

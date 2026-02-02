@@ -167,13 +167,31 @@ const saleSchema = new mongoose.Schema({
   },
   paymentStatus: {
     type: String,
-    enum: ['pending', 'partial', 'paid', 'refunded'],
+    enum: ['pending', 'partial', 'paid', 'refunded', 'awaiting_payment', 'failed'],
     default: 'pending',
     index: true
   },
   paymentMethod: {
     type: String,
-    enum: ['cash', 'card', 'bank_transfer', 'cheque', 'online', 'credit']
+    enum: ['cash', 'card', 'bank_transfer', 'cheque', 'online', 'credit', 'stripe']
+  },
+  // Stripe payment fields
+  stripeSessionId: {
+    type: String,
+    index: true
+  },
+  stripePaymentIntentId: {
+    type: String,
+    index: true
+  },
+  // Stock reservation tracking
+  stockReserved: {
+    type: Boolean,
+    default: false
+  },
+  reservationExpiresAt: {
+    type: Date,
+    index: true
   },
   deliveryStatus: {
     type: String,
