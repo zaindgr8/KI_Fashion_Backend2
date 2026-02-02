@@ -539,6 +539,31 @@ router.get('/:id', auth, async (req, res) => {
     // Get inventory information
     const inventory = await Inventory.findOne({ product: product._id });
 
+    // Get packet pricing information
+    const PacketStock = require('../models/PacketStock');
+    const packetStocks = await PacketStock.find({ 
+      product: product._id, 
+      isActive: true,
+      availablePackets: { $gt: 0 } 
+    })
+      .sort({ isLoose: 1, totalItemsPerPacket: -1 }) // Prioritize packets over loose, larger packets first
+      .lean();
+
+    // Select the primary packet configuration (first non-loose if available, otherwise first loose)
+    let packetPricing = null;
+    if (packetStocks.length > 0) {
+      const primaryPacket = packetStocks.find(p => !p.isLoose) || packetStocks[0];
+      packetPricing = {
+        barcode: primaryPacket.barcode,
+        composition: primaryPacket.composition,
+        totalItemsPerPacket: primaryPacket.totalItemsPerPacket,
+        isLoose: primaryPacket.isLoose,
+        suggestedSellingPrice: primaryPacket.suggestedSellingPrice,
+        costPricePerPacket: primaryPacket.costPricePerPacket,
+        availablePackets: primaryPacket.availablePackets
+      };
+    }
+
     // Convert images to signed URLs
     await convertProductImagesToSignedUrls(product);
 
@@ -546,7 +571,8 @@ router.get('/:id', auth, async (req, res) => {
       success: true,
       data: {
         ...product.toObject(),
-        inventoryInfo: inventory
+        inventoryInfo: inventory,
+        packetPricing
       }
     });
 
