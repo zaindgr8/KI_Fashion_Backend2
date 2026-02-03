@@ -8,6 +8,7 @@ const Product = require('../models/Product');
 const Ledger = require('../models/Ledger');
 const User = require('../models/User');
 const PacketStock = require('../models/PacketStock');
+const Settings = require('../models/Settings');
 const auth = require('../middleware/auth');
 const { generateSaleQR } = require('../utils/qrCode');
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
@@ -95,20 +96,30 @@ const generateSaleNumber = async () => {
   return `${prefix}${String(nextNumber).padStart(4, '0')}`;
 };
 
-// Calculate sale totals
-const calculateTotals = (items, totalDiscount = 0, shippingCost = 0) => {
+// Calculate sale totals with VAT
+const calculateTotals = async (items, totalDiscount = 0, shippingCost = 0) => {
   let subtotal = 0;
   let totalTax = 0;
+  let totalVAT = 0;
+
+  // Fetch VAT settings
+  const settings = await Settings.getSettings();
+  const vatRate = settings.vat.enabled ? settings.vat.rate : 0;
 
   const processedItems = items.map(item => {
     const itemTotal = item.quantity * item.price;
     const discount = item.discount || 0;
     const taxRate = item.taxRate || 0;
     const itemTax = (itemTotal - discount) * (taxRate / 100);
-    const totalPrice = itemTotal - discount + itemTax;
+    
+    // Calculate VAT on the item (after discount, before other taxes)
+    const itemVAT = (itemTotal - discount) * (vatRate / 100);
+    
+    const totalPrice = itemTotal - discount + itemTax + itemVAT;
 
     subtotal += itemTotal - discount;
     totalTax += itemTax;
+    totalVAT += itemVAT;
 
     return {
       product: item.productId,
@@ -116,6 +127,7 @@ const calculateTotals = (items, totalDiscount = 0, shippingCost = 0) => {
       unitPrice: item.price,
       discount: discount,
       taxRate: taxRate,
+      vatRate: vatRate,
       totalPrice: totalPrice,
       variant: item.variant || null,
       isPacketSale: item.inventoryType === 'packet',
@@ -126,12 +138,14 @@ const calculateTotals = (items, totalDiscount = 0, shippingCost = 0) => {
     };
   });
 
-  const grandTotal = subtotal + totalTax - totalDiscount + shippingCost;
+  const grandTotal = subtotal + totalTax + totalVAT - totalDiscount + shippingCost;
 
   return {
     items: processedItems,
     subtotal,
     totalTax,
+    totalVAT,
+    vatRate,
     grandTotal: Math.max(0, grandTotal)
   };
 };
@@ -388,8 +402,8 @@ router.post('/create-session', auth, async (req, res) => {
       });
     }
 
-    // Calculate totals
-    const { items: saleItems, subtotal, totalTax, grandTotal } = calculateTotals(items);
+    // Calculate totals (now async because it fetches VAT settings)
+    const { items: saleItems, subtotal, totalTax, totalVAT, vatRate, grandTotal } = await calculateTotals(items);
 
     // Generate sale number
     const saleNumber = await generateSaleNumber();
@@ -409,6 +423,8 @@ router.post('/create-session', auth, async (req, res) => {
       },
       subtotal,
       totalTax,
+      totalVAT,
+      vatRate,
       totalDiscount: 0,
       shippingCost: 0,
       grandTotal,

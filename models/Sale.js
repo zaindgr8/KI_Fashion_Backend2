@@ -145,6 +145,17 @@ const saleSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  totalVAT: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  vatRate: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 100
+  },
   shippingCost: {
     type: Number,
     default: 0,
