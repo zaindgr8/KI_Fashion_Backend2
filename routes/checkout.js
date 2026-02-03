@@ -182,14 +182,16 @@ async function reserveStock(items, saleId, userId) {
           throw new Error(`Insufficient stock for ${item.name} (${item.variant.color}/${item.variant.size}). Available: ${availableStock}`);
         }
 
-        // Reserve in variant stock
-        const variantIdx = inventory.variantStock.findIndex(
-          v => v.size === item.variant.size && v.color === item.variant.color
-        );
-        if (variantIdx >= 0) {
-          inventory.variantStock[variantIdx].reservedStock += item.quantity;
+        // Reserve in variant stock (only if variantStock exists)
+        if (inventory.variantStock && inventory.variantStock.length > 0) {
+          const variantIdx = inventory.variantStock.findIndex(
+            v => v.size === item.variant.size && v.color === item.variant.color
+          );
+          if (variantIdx >= 0) {
+            inventory.variantStock[variantIdx].reservedStock = (inventory.variantStock[variantIdx].reservedStock || 0) + item.quantity;
+          }
         }
-        inventory.reservedStock += item.quantity;
+        inventory.reservedStock = (inventory.reservedStock || 0) + item.quantity;
         await inventory.save({ session });
       }
     }
@@ -228,16 +230,19 @@ async function releaseReservedStock(sale) {
         }).session(session);
 
         if (inventory) {
-          const variantIdx = inventory.variantStock.findIndex(
-            v => v.size === item.variant.size && v.color === item.variant.color
-          );
-          if (variantIdx >= 0) {
-            inventory.variantStock[variantIdx].reservedStock = Math.max(
-              0, 
-              inventory.variantStock[variantIdx].reservedStock - item.quantity
+          // Release variant stock reservation (only if variantStock exists)
+          if (inventory.variantStock && inventory.variantStock.length > 0) {
+            const variantIdx = inventory.variantStock.findIndex(
+              v => v.size === item.variant.size && v.color === item.variant.color
             );
+            if (variantIdx >= 0) {
+              inventory.variantStock[variantIdx].reservedStock = Math.max(
+                0, 
+                (inventory.variantStock[variantIdx].reservedStock || 0) - item.quantity
+              );
+            }
           }
-          inventory.reservedStock = Math.max(0, inventory.reservedStock - item.quantity);
+          inventory.reservedStock = Math.max(0, (inventory.reservedStock || 0) - item.quantity);
           await inventory.save({ session });
         }
       }
@@ -281,24 +286,26 @@ async function confirmStockDeduction(sale, userId) {
         }).session(session);
 
         if (inventory) {
-          // Convert reservation to actual deduction
-          const variantIdx = inventory.variantStock.findIndex(
-            v => v.size === item.variant.size && v.color === item.variant.color
-          );
-          
-          if (variantIdx >= 0) {
-            inventory.variantStock[variantIdx].reservedStock = Math.max(
-              0, 
-              inventory.variantStock[variantIdx].reservedStock - item.quantity
+          // Convert reservation to actual deduction (only if variantStock exists)
+          if (inventory.variantStock && inventory.variantStock.length > 0) {
+            const variantIdx = inventory.variantStock.findIndex(
+              v => v.size === item.variant.size && v.color === item.variant.color
             );
-            inventory.variantStock[variantIdx].currentStock = Math.max(
-              0,
-              inventory.variantStock[variantIdx].currentStock - item.quantity
-            );
+            
+            if (variantIdx >= 0) {
+              inventory.variantStock[variantIdx].reservedStock = Math.max(
+                0, 
+                (inventory.variantStock[variantIdx].reservedStock || 0) - item.quantity
+              );
+              inventory.variantStock[variantIdx].currentStock = Math.max(
+                0,
+                (inventory.variantStock[variantIdx].currentStock || 0) - item.quantity
+              );
+            }
           }
           
-          inventory.reservedStock = Math.max(0, inventory.reservedStock - item.quantity);
-          inventory.currentStock = Math.max(0, inventory.currentStock - item.quantity);
+          inventory.reservedStock = Math.max(0, (inventory.reservedStock || 0) - item.quantity);
+          inventory.currentStock = Math.max(0, (inventory.currentStock || 0) - item.quantity);
           
           inventory.stockMovements.push({
             type: 'out',
