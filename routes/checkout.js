@@ -48,7 +48,8 @@ const checkoutSchema = Joi.object({
 // Helper function to get buyer ID for authenticated user
 async function getBuyerIdForUser(user) {
   if (user.buyer) {
-    return user.buyer;
+    // Handle both populated and unpopulated buyer reference
+    return user.buyer._id || user.buyer;
   }
 
   if ((user.role === 'distributor' || user.role === 'buyer') && user.email) {
