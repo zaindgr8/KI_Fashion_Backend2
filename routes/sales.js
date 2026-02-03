@@ -1373,4 +1373,80 @@ router.delete('/:id', auth, async (req, res) => {
   }
 });
 
+/**
+ * @route   GET /api/sales/:id/invoice
+ * @desc    Generate and download invoice PDF for a sale
+ * @access  Private
+ */
+router.get('/:id/invoice', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // Find the sale and populate necessary fields
+    const sale = await Sale.findById(id)
+      .populate('buyer', 'name email phone address company')
+      .populate('items.product', 'name sku images');
+
+    if (!sale) {
+      return res.status(404).json({
+        success: false,
+        message: 'Sale not found'
+      });
+    }
+
+    // Check if user has access to this sale
+    if (req.user.role !== 'super-admin' && req.user.role !== 'admin') {
+      // For distributors/buyers, verify they own this sale
+      if (sale.buyer && req.user.buyer) {
+        if (sale.buyer._id.toString() !== req.user.buyer.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: 'Access denied'
+          });
+        }
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'Access denied'
+        });
+      }
+    }
+
+    // Generate invoice PDF
+    const invoicesDir = path.join(__dirname, '../invoices');
+    if (!fs.existsSync(invoicesDir)) {
+      fs.mkdirSync(invoicesDir, { recursive: true });
+    }
+
+    const invoiceFileName = `Invoice-${sale.invoiceNumber || sale.saleNumber}-${Date.now()}.pdf`;
+    const invoicePath = path.join(invoicesDir, invoiceFileName);
+
+    await generateInvoicePDF(sale, invoicePath);
+
+    // Update sale with invoice URL if not already set
+    if (!sale.invoicePdf || !sale.invoicePdf.url) {
+      sale.invoicePdf = {
+        url: `/invoices/${invoiceFileName}`,
+        generatedAt: new Date(),
+        generatedBy: req.user._id
+      };
+      await sale.save();
+    }
+
+    // Send the PDF file
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${invoiceFileName}"`);
+    
+    const fileStream = fs.createReadStream(invoicePath);
+    fileStream.pipe(res);
+
+  } catch (error) {
+    console.error('Generate invoice error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate invoice'
+    });
+  }
+});
+
 module.exports = router;
