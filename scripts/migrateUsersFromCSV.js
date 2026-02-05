@@ -33,7 +33,7 @@ const idMappings = {
  */
 async function connectDB() {
   try {
-    await mongoose.connect('mongodb+srv://klfashionuk:admin@cluster0.vndfpcl.mongodb.net/test_db', {
+    await mongoose.connect('mongodb+srv://klfashionuk:admin@cluster0.vndfpcl.mongodb.net/website-db', {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 5000,
     });
