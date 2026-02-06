@@ -203,13 +203,29 @@ app.use("*", (req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 5000;
+const BASE_PORT = parseInt(process.env.PORT, 10) || 5000;
+const MAX_PORT_ATTEMPTS = 5;
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-  console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
-  console.log(`CORS enabled for ${uniqueOrigins.length} origins`);
-  console.log("Allowed origins:", uniqueOrigins);
-});
+// Try the requested port, but fall back to the next one if it's already in use.
+const startServer = (port, attemptsLeft) => {
+  const server = app.listen(port, () => {
+    console.log(`Server is running on port ${port}`);
+    console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
+    console.log(`CORS enabled for ${uniqueOrigins.length} origins`);
+    console.log("Allowed origins:", uniqueOrigins);
+  });
+
+  server.on("error", (error) => {
+    if (error.code === "EADDRINUSE" && attemptsLeft > 0) {
+      console.warn(`Port ${port} already in use, trying ${port + 1}`);
+      startServer(port + 1, attemptsLeft - 1);
+    } else {
+      console.error("Server failed to start:", error);
+      process.exit(1);
+    }
+  });
+};
+
+startServer(BASE_PORT, MAX_PORT_ATTEMPTS);
 
 module.exports = app;
