@@ -15,7 +15,7 @@ function initializeGCS() {
   }
 
   // Get bucket name from environment or use hardcoded default
-  bucketName = process.env.GCS_BUCKET_NAME || "kl-fashion-crm-storage";
+  bucketName = process.env.GCS_BUCKET_NAME || "test-bucket-kifashion";
   
   if (!bucketName) {
     throw new Error(
