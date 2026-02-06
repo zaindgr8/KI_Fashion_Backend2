@@ -239,7 +239,7 @@ function extractFilePath(imageUrl) {
  * Generate signed URL for a single image
  * @param {String} imageUrl - Full GCS URL or file path
  * @param {Number} expiresInMinutes - Expiration time in minutes (default: 60)
- * @returns {Promise<String>} Signed URL
+ * @returns {Promise<String>} Signed URL or public URL as fallback
  */
 async function generateSignedUrl(imageUrl, expiresInMinutes = null) {
   try {
@@ -256,24 +256,23 @@ async function generateSignedUrl(imageUrl, expiresInMinutes = null) {
     try {
       bucket = getBucket();
       if (!bucket) {
-        console.error('GCS bucket is not initialized');
-        return null;
+        console.error('GCS bucket is not initialized - falling back to public URL');
+        return imageUrl; // Return original URL as fallback
       }
     } catch (bucketError) {
       console.error('GCS bucket initialization error in generateSignedUrl:', {
         message: bucketError.message,
         stack: bucketError.stack
       });
-      return null;
+      return imageUrl; // Return original URL as fallback
     }
 
     const fileName = extractFilePath(imageUrl);
 
     if (!fileName) {
-      console.warn('Could not extract file path from URL:', imageUrl);
-      // If we can't extract the path, we can't generate a signed URL
-      // Return null to indicate failure
-      return null;
+      console.warn('Could not extract file path from URL, using original URL:', imageUrl);
+      // Return original URL as fallback
+      return imageUrl;
     }
 
     const file = bucket.file(fileName);
@@ -283,9 +282,9 @@ async function generateSignedUrl(imageUrl, expiresInMinutes = null) {
     try {
       [exists] = await file.exists();
       if (!exists) {
-        console.warn(`Image file not found in GCS: ${fileName}`);
-        // Return null since file doesn't exist - don't return original URL
-        return null;
+        console.warn(`Image file not found in GCS: ${fileName}, using original URL`);
+        // Return original URL as fallback
+        return imageUrl;
       }
     } catch (existsError) {
       console.error('Error checking file existence in GCS:', {
@@ -293,7 +292,7 @@ async function generateSignedUrl(imageUrl, expiresInMinutes = null) {
         stack: existsError.stack,
         fileName
       });
-      return null;
+      return imageUrl; // Return original URL as fallback
     }
 
     // Generate signed URL
@@ -312,13 +311,13 @@ async function generateSignedUrl(imageUrl, expiresInMinutes = null) {
         fileName,
         imageUrl
       });
-      return null;
+      return imageUrl; // Return original URL as fallback
     }
 
     if (!signedUrl) {
-      console.error('getSignedUrl returned null/undefined for:', imageUrl);
-      // Return null instead of original URL since files are now private
-      return null;
+      console.error('getSignedUrl returned null/undefined for:', imageUrl, '- using original URL');
+      // Return original URL as fallback
+      return imageUrl;
     }
 
     return signedUrl;
@@ -329,9 +328,8 @@ async function generateSignedUrl(imageUrl, expiresInMinutes = null) {
       stack: error.stack,
       name: error.name
     });
-    // Don't return original URL since files are now private - return null
-    // This will prevent broken image links
-    return null;
+    // Return original URL as fallback - allow public access
+    return imageUrl;
   }
 }
 
@@ -339,7 +337,7 @@ async function generateSignedUrl(imageUrl, expiresInMinutes = null) {
  * Generate signed URLs for multiple images
  * @param {Array<String>} imageUrls - Array of image URLs
  * @param {Number} expiresInMinutes - Expiration time in minutes (default: 60)
- * @returns {Promise<Array<String>>} Array of signed URLs
+ * @returns {Promise<Array<String>>} Array of signed URLs (or public URLs as fallback)
  */
 async function generateSignedUrls(imageUrls, expiresInMinutes = null) {
   if (!imageUrls || !Array.isArray(imageUrls) || imageUrls.length === 0) {
@@ -351,13 +349,12 @@ async function generateSignedUrls(imageUrls, expiresInMinutes = null) {
     const signedUrls = await Promise.all(
       imageUrls.map(url => generateSignedUrl(url, expiresInMinutes))
     );
-    // Filter out null values (failed generations)
-    return signedUrls.filter(url => url !== null);
+    // Filter out null values (empty/invalid URLs) but keep fallback URLs
+    return signedUrls.filter(url => url !== null && url !== undefined && url !== '');
   } catch (error) {
     console.error('Error generating signed URLs:', error);
-    // Return empty array on error to prevent broken images
-    // Return empty array on error to prevent broken images
-    return [];
+    // Return original URLs as fallback
+    return imageUrls.filter(url => url !== null && url !== undefined && url !== '');
   }
 }
 
@@ -380,14 +377,16 @@ async function generateSignedUrlsBatch(imageKeys, expiresInMinutes = null) {
     const entries = await Promise.all(
       uniqueKeys.map(async key => {
         const url = await generateSignedUrl(key, expiresInMinutes);
-        return [key, url || key]; // Return original key if signing fails (fallback)
+        // url will be either signed URL or original URL (fallback), never null
+        return [key, url || key]; // Extra safety: return original key if somehow null
       })
     );
 
     return Object.fromEntries(entries);
   } catch (error) {
     console.error('Error generating batch signed URLs:', error);
-    return {};
+    // Return map with original keys as fallback
+    return Object.fromEntries(uniqueKeys.map(key => [key, key]));
   }
 }
 
