@@ -9,6 +9,7 @@ const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 const BalanceService = require('../services/BalanceService');
+const PacketReturnService = require('../services/PacketReturnService');
 
 const router = express.Router();
 
@@ -569,9 +570,15 @@ router.post('/packet-return', auth, async (req, res) => {
 
 // Create product-level supplier return (batch-aware)
 // Uses specific batch data for accurate cost tracking and FIFO inventory management
+// [ENHANCED] Now includes packet stock adjustments for proper sync between Inventory and PacketStock
 router.post('/product-return', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
     if (!['super-admin', 'admin'].includes(req.user.role)) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Only admins and managers can create returns', 403);
     }
 
@@ -580,98 +587,220 @@ router.post('/product-return', auth, async (req, res) => {
       items,
       notes,
       returnDate,
-      accountCredit = 0
+      accountCredit = 0,
+      packetBarcode = null, // Optional: for packet-barcode mode returns
+      skipPacketAdjustment = false // For legacy/manual adjustments
     } = req.body;
 
     if (!supplierId) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Supplier ID is required', 400);
     }
 
     if (!items || !Array.isArray(items) || items.length === 0) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Items array is required', 400);
     }
 
     // Verify supplier exists
-    const supplier = await Supplier.findById(supplierId);
+    const supplier = await Supplier.findById(supplierId).session(session);
     if (!supplier) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Supplier not found', 404);
     }
 
-    // Process each item with batch-specific data
+    // -------------------------------------------------------------------
+    // PHASE 1: Validate all items and collect packet adjustment info
+    // -------------------------------------------------------------------
     const processedItems = [];
     let totalReturnValue = 0;
-    let commonDispatchOrderId = null; // Track the dispatch order for all items
+    let commonDispatchOrderId = null;
+    const allPacketAdjustments = [];
+    let overallReturnMode = 'legacy';
+    const packetAdjustmentWarnings = [];
+
+    // Determine return mode
+    if (packetBarcode) {
+      overallReturnMode = 'packet-barcode';
+    } else if (items.some(item => item.returnComposition && item.returnComposition.length > 0)) {
+      overallReturnMode = 'variant-specific';
+    }
 
     for (const item of items) {
       const { productId, batchId, quantity, reason, returnComposition } = item;
 
       if (!productId || !quantity || quantity <= 0) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, 'Each item must have productId and positive quantity', 400);
       }
 
       // Get product
-      const product = await Product.findById(productId);
+      const product = await Product.findById(productId).session(session);
       if (!product) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, `Product not found: ${productId}`, 404);
       }
 
       // Get inventory
-      const inventory = await Inventory.findOne({ product: productId });
+      const inventory = await Inventory.findOne({ product: productId }).session(session);
       if (!inventory) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, `No inventory found for product: ${product.name}`, 404);
       }
 
       // Find the specific batch if batchId is provided
       let batch = null;
-      let costPrice = inventory.averageCostPrice || 0; // Fallback to average
+      let costPrice = inventory.averageCostPrice || 0;
       let dispatchOrderId = null;
 
       if (batchId) {
-        // Find the exact batch by batchId
         batch = inventory.purchaseBatches.find(b => b._id.toString() === batchId);
 
         if (!batch) {
+          await session.abortTransaction();
+          session.endSession();
           return sendResponse.error(res, `Batch not found for product: ${product.name}. BatchId: ${batchId}`, 404);
         }
 
         if (batch.remainingQuantity < quantity) {
+          await session.abortTransaction();
+          session.endSession();
           return sendResponse.error(res,
             `Insufficient batch quantity for ${product.name}. Available in batch: ${batch.remainingQuantity}, Requested: ${quantity}`,
             400
           );
         }
 
-        // Use batch-specific data
         costPrice = batch.costPrice || costPrice;
         dispatchOrderId = batch.dispatchOrderId;
 
-        // Validate all items are from the same dispatch order
         if (commonDispatchOrderId === null) {
           commonDispatchOrderId = dispatchOrderId;
         } else if (dispatchOrderId && commonDispatchOrderId.toString() !== dispatchOrderId.toString()) {
+          await session.abortTransaction();
+          session.endSession();
           return sendResponse.error(res, 'All items must be from the same Dispatch Order', 400);
         }
-
-        // Reduce the specific batch's remainingQuantity (FIFO tracking)
-        batch.remainingQuantity -= quantity;
       }
 
       // Check overall stock
       if (inventory.currentStock < quantity) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res,
           `Insufficient stock for ${product.name}. Available: ${inventory.currentStock}, Requested: ${quantity}`,
           400
         );
       }
 
-      const itemTotalCost = quantity * costPrice;
+      // Validate variant composition if provided
+      if (returnComposition && Array.isArray(returnComposition) && returnComposition.length > 0) {
+        const totalVariantQty = returnComposition.reduce((sum, v) => sum + (v.quantity || 0), 0);
+        if (Math.abs(totalVariantQty - quantity) > 0.01) {
+          await session.abortTransaction();
+          session.endSession();
+          return sendResponse.error(res, `Variant composition total (${totalVariantQty}) does not match item quantity (${quantity}) for product ${product.name}`, 400);
+        }
+      }
+
+      // -------------------------------------------------------------------
+      // PHASE 1b: Pre-validate packet availability (before any mutations)
+      // -------------------------------------------------------------------
+      if (!skipPacketAdjustment && returnComposition && returnComposition.length > 0) {
+        try {
+          const packetValidation = await PacketReturnService.calculateVariantReturnAdjustments(
+            productId,
+            supplierId,
+            returnComposition,
+            session
+          );
+
+          if (!packetValidation.valid) {
+            await session.abortTransaction();
+            session.endSession();
+            return sendResponse.error(res, 
+              `Packet stock validation failed for ${product.name}: ${packetValidation.errors.join(', ')}`, 
+              400
+            );
+          }
+
+          // Store for later execution
+          processedItems.push({
+            product: productId,
+            inventory,
+            dispatchOrderId,
+            batchId: batch ? batch._id : null,
+            batch,
+            productName: product.name,
+            productCode: product.productCode || product.sku,
+            quantity,
+            costPrice,
+            totalCost: quantity * costPrice,
+            reason: reason || '',
+            returnComposition,
+            packetAdjustments: packetValidation.adjustments,
+            packetWarnings: packetValidation.warnings
+          });
+
+          packetAdjustmentWarnings.push(...packetValidation.warnings);
+
+        } catch (err) {
+          await session.abortTransaction();
+          session.endSession();
+          return sendResponse.error(res, `Packet validation error for ${product.name}: ${err.message}`, 400);
+        }
+      } else {
+        // No packet adjustments - legacy mode
+        processedItems.push({
+          product: productId,
+          inventory,
+          dispatchOrderId,
+          batchId: batch ? batch._id : null,
+          batch,
+          productName: product.name,
+          productCode: product.productCode || product.sku,
+          quantity,
+          costPrice,
+          totalCost: quantity * costPrice,
+          reason: reason || '',
+          returnComposition,
+          packetAdjustments: [],
+          packetWarnings: skipPacketAdjustment 
+            ? ['Packet adjustment skipped per request'] 
+            : ['No variant composition provided - packet stock not adjusted']
+        });
+
+        if (!skipPacketAdjustment && !returnComposition) {
+          packetAdjustmentWarnings.push(`Product ${product.name}: No variant composition - packets not adjusted`);
+        }
+      }
+
+      totalReturnValue += quantity * costPrice;
+    }
+
+    // -------------------------------------------------------------------
+    // PHASE 2: Execute inventory reductions (within transaction)
+    // -------------------------------------------------------------------
+    for (const item of processedItems) {
+      const { inventory, batch, quantity, returnComposition, reason, batchId } = item;
+
+      // Reduce batch quantity if applicable
+      if (batch) {
+        batch.remainingQuantity -= quantity;
+      }
 
       // Add stock movement
       inventory.stockMovements.push({
         type: 'out',
         quantity: quantity,
         reference: 'SupplierReturn',
-        referenceId: null, // Will be updated after Return document is created
+        referenceId: null, // Updated after Return doc created
         user: req.user._id,
         notes: `Return - ${reason || 'No reason'}${batch ? ` (Batch: ${batchId})` : ''}`,
         date: new Date()
@@ -679,15 +808,11 @@ router.post('/product-return', auth, async (req, res) => {
 
       // Reduce variant stock if composition provided
       if (returnComposition && Array.isArray(returnComposition) && returnComposition.length > 0) {
-        // Validate total quantity matches
-        const totalVariantQty = returnComposition.reduce((sum, v) => sum + (v.quantity || 0), 0);
-        if (Math.abs(totalVariantQty - quantity) > 0.01) {
-          return sendResponse.error(res, `Variant composition total (${totalVariantQty}) does not match item quantity (${quantity}) for product ${product.name}`, 400);
-        }
-
         try {
           inventory.reduceVariantStockForReturn(returnComposition);
         } catch (err) {
+          await session.abortTransaction();
+          session.endSession();
           return sendResponse.error(res, err.message, 400);
         }
       }
@@ -695,28 +820,51 @@ router.post('/product-return', auth, async (req, res) => {
       // Reduce inventory
       inventory.currentStock -= quantity;
       inventory.lastStockUpdate = new Date();
-      await inventory.save();
-
-      processedItems.push({
-        product: productId,
-        dispatchOrderId: dispatchOrderId,
-        batchId: batch ? batch._id : null,
-        productName: product.name,
-        productCode: product.productCode || product.sku,
-        quantity: quantity,
-        costPrice: costPrice,
-        totalCost: itemTotalCost,
-        reason: reason || '',
-        returnComposition
-      });
-
-      totalReturnValue += itemTotalCost;
+      await inventory.save({ session });
     }
 
-    // Create Return document with proper dispatchOrder reference
+    // -------------------------------------------------------------------
+    // PHASE 3: Execute packet stock adjustments (within transaction)
+    // -------------------------------------------------------------------
+    for (const item of processedItems) {
+      if (item.packetAdjustments && item.packetAdjustments.length > 0) {
+        try {
+          const execResult = await PacketReturnService.executePacketAdjustments(
+            item.packetAdjustments,
+            req.user._id,
+            null, // returnId not yet available
+            session
+          );
+
+          if (!execResult.success) {
+            await session.abortTransaction();
+            session.endSession();
+            return sendResponse.error(res, 
+              `Packet adjustment failed for ${item.productName}: ${execResult.errors.join(', ')}`, 
+              500
+            );
+          }
+
+          allPacketAdjustments.push(...execResult.packetAdjustments);
+          item.executedPacketAdjustments = execResult.packetAdjustments;
+
+        } catch (err) {
+          await session.abortTransaction();
+          session.endSession();
+          return sendResponse.error(res, `Packet adjustment error for ${item.productName}: ${err.message}`, 500);
+        }
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // PHASE 4: Create Return document
+    // -------------------------------------------------------------------
     const returnDoc = new Return({
       supplier: supplierId,
-      dispatchOrder: commonDispatchOrderId || null, // Set from batch data, not hardcoded null
+      dispatchOrder: commonDispatchOrderId || null,
+      returnType: 'product-level',
+      returnMode: overallReturnMode,
+      packetAdjustments: allPacketAdjustments,
       items: processedItems.map((item, index) => ({
         itemIndex: index,
         product: item.product,
@@ -726,7 +874,6 @@ router.post('/product-return', auth, async (req, res) => {
         returnedQuantity: item.quantity,
         costPrice: item.costPrice,
         reason: item.reason,
-        // Track which batch was deducted for audit purposes
         batchDeductions: item.batchId ? [{
           batchId: item.batchId,
           dispatchOrderId: item.dispatchOrderId,
@@ -738,26 +885,28 @@ router.post('/product-return', auth, async (req, res) => {
       totalReturnValue: totalReturnValue,
       returnedAt: returnDate ? new Date(returnDate) : new Date(),
       returnedBy: req.user._id,
-      notes: notes || '',
-      returnType: 'product-level'
+      notes: notes || ''
     });
 
-    await returnDoc.save();
+    await returnDoc.save({ session });
 
-    // Update stock movement references with the Return document ID
+    // -------------------------------------------------------------------
+    // PHASE 5: Update stock movement references
+    // -------------------------------------------------------------------
     for (const item of processedItems) {
-      const inventory = await Inventory.findOne({ product: item.product });
+      const inventory = await Inventory.findOne({ product: item.product }).session(session);
       if (inventory && inventory.stockMovements.length > 0) {
         const lastMovement = inventory.stockMovements[inventory.stockMovements.length - 1];
         if (lastMovement && lastMovement.reference === 'SupplierReturn') {
           lastMovement.referenceId = returnDoc._id;
-          await inventory.save();
+          await inventory.save({ session });
         }
       }
     }
 
-    // Create ledger entry
-    // Get current supplier balance using BalanceService (accurate aggregation-based calculation)
+    // -------------------------------------------------------------------
+    // PHASE 6: Create ledger entry
+    // -------------------------------------------------------------------
     const currentSupplierBalance = await BalanceService.getSupplierBalance(supplierId);
     const newSupplierBalance = currentSupplierBalance - totalReturnValue;
 
@@ -781,11 +930,18 @@ router.post('/product-return', auth, async (req, res) => {
       }
     });
 
-    // Update supplier balance (reduce what we owe them)
+    // Update supplier balance
     await Supplier.findByIdAndUpdate(
       supplierId,
-      { $inc: { currentBalance: -totalReturnValue } }
+      { $inc: { currentBalance: -totalReturnValue } },
+      { session }
     );
+
+    // -------------------------------------------------------------------
+    // PHASE 7: Commit transaction and return response
+    // -------------------------------------------------------------------
+    await session.commitTransaction();
+    session.endSession();
 
     // Populate for response
     await returnDoc.populate([
@@ -802,11 +958,20 @@ router.post('/product-return', auth, async (req, res) => {
         totalQuantity: processedItems.reduce((sum, i) => sum + i.quantity, 0),
         totalReturnValue: totalReturnValue,
         supplierBalanceAdjustment: -totalReturnValue,
-        dispatchOrderId: commonDispatchOrderId
+        dispatchOrderId: commonDispatchOrderId,
+        returnMode: overallReturnMode,
+        packetAdjustments: {
+          count: allPacketAdjustments.length,
+          totalItemsAdjusted: allPacketAdjustments.reduce((sum, pa) => sum + pa.itemsReturned, 0),
+          details: allPacketAdjustments
+        },
+        warnings: packetAdjustmentWarnings
       }
-    }, 'Return created successfully', 201);
+    }, 'Return created successfully with packet adjustments', 201);
 
   } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
     console.error('Create product return error:', error);
     return sendResponse.error(res, error.message || 'Server error', 500);
   }
@@ -929,6 +1094,97 @@ router.get('/:id', auth, async (req, res) => {
   } catch (error) {
     console.error('Get return error:', error);
     return sendResponse.error(res, 'Server error', 500);
+  }
+});
+
+// Get packet stock summary for a product+supplier (for return validation UI)
+router.get('/packet-stock-summary', auth, async (req, res) => {
+  try {
+    const { productId, supplierId } = req.query;
+
+    if (!productId || !supplierId) {
+      return sendResponse.error(res, 'productId and supplierId are required', 400);
+    }
+
+    const summary = await PacketReturnService.getPacketStockSummary(productId, supplierId);
+
+    return sendResponse.success(res, summary);
+
+  } catch (error) {
+    console.error('Get packet stock summary error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
+  }
+});
+
+// Validate return composition against packet stock (pre-submission check)
+router.post('/validate-return-composition', auth, async (req, res) => {
+  try {
+    const { productId, supplierId, returnComposition, quantity } = req.body;
+
+    if (!productId || !supplierId) {
+      return sendResponse.error(res, 'productId and supplierId are required', 400);
+    }
+
+    if (!returnComposition || !Array.isArray(returnComposition) || returnComposition.length === 0) {
+      return sendResponse.error(res, 'returnComposition array is required', 400);
+    }
+
+    // Calculate adjustment plan without executing
+    const adjustmentPlan = await PacketReturnService.calculateVariantReturnAdjustments(
+      productId,
+      supplierId,
+      returnComposition,
+      null // no session - just validation
+    );
+
+    // Get packet stock summary for context
+    const summary = await PacketReturnService.getPacketStockSummary(productId, supplierId);
+
+    return sendResponse.success(res, {
+      valid: adjustmentPlan.valid,
+      errors: adjustmentPlan.errors,
+      warnings: adjustmentPlan.warnings,
+      plannedAdjustments: adjustmentPlan.adjustments.map(adj => ({
+        barcode: adj.barcode,
+        isLoose: adj.isLoose,
+        adjustmentType: adj.adjustmentType,
+        itemsToReturn: adj.itemsToReturn || adj.packetsToReturn,
+        packetsAffected: adj.packetsToBreak || adj.packetsToReturn || 0
+      })),
+      totalItemsToAdjust: adjustmentPlan.totalItemsToReturn,
+      packetStockSummary: summary
+    });
+
+  } catch (error) {
+    console.error('Validate return composition error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
+  }
+});
+
+// Get stock discrepancies between Inventory and PacketStock
+router.get('/stock-discrepancies', auth, async (req, res) => {
+  try {
+    if (!['super-admin', 'admin'].includes(req.user.role)) {
+      return sendResponse.error(res, 'Admin access required', 403);
+    }
+
+    const { productId } = req.query;
+
+    const discrepancies = await PacketReturnService.findStockDiscrepancies(productId || null);
+
+    return sendResponse.success(res, {
+      count: discrepancies.length,
+      discrepancies,
+      summary: {
+        inventoryHigherCount: discrepancies.filter(d => d.status === 'inventory_higher').length,
+        packetsHigherCount: discrepancies.filter(d => d.status === 'packets_higher').length,
+        totalDifference: discrepancies.reduce((sum, d) => sum + Math.abs(d.difference), 0)
+      }
+    });
+
+  } catch (error) {
+    console.error('Get stock discrepancies error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
   }
 });
 

@@ -17,6 +17,37 @@ const returnSchema = new mongoose.Schema({
     enum: ['order-level', 'product-level'],
     default: 'order-level'
   },
+  // Return mode: how items were identified for return
+  // 'packet-barcode' = full packets returned via barcode scan
+  // 'variant-specific' = individual items by color/size
+  // 'mixed' = combination of both methods
+  // 'legacy' = returns created before packet sync feature
+  returnMode: {
+    type: String,
+    enum: ['packet-barcode', 'variant-specific', 'mixed', 'legacy'],
+    default: 'legacy'
+  },
+  // Packet-level adjustments made during this return
+  packetAdjustments: [{
+    packetStockId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'PacketStock'
+    },
+    barcode: String,
+    adjustmentType: {
+      type: String,
+      enum: ['full-packet-return', 'partial-break', 'loose-return']
+    },
+    packetsReturned: { type: Number, default: 0 },
+    itemsReturned: { type: Number, default: 0 },
+    looseStocksCreated: [{
+      looseStockId: mongoose.Schema.Types.ObjectId,
+      barcode: String,
+      size: String,
+      color: String,
+      quantity: Number
+    }]
+  }],
   items: [{
     itemIndex: { type: Number, required: false }, // For order-level returns
     product: {
@@ -78,7 +109,9 @@ const returnSchema = new mongoose.Schema({
 returnSchema.index({ dispatchOrder: 1, returnedAt: -1 });
 returnSchema.index({ supplier: 1, returnedAt: -1 });
 returnSchema.index({ returnType: 1 });
+returnSchema.index({ returnMode: 1 });
 returnSchema.index({ 'items.product': 1 });
+returnSchema.index({ 'packetAdjustments.packetStockId': 1 });
 
 module.exports = mongoose.model('Return', returnSchema);
 
