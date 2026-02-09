@@ -313,7 +313,7 @@ router.get('/public', async (req, res) => {
 
     res.json({
       success: true,
-      data: isArray ? publicProducts : publicProducts[0],
+      data: publicProducts,
       pagination: {
         currentPage: parseInt(page),
         totalPages: Math.ceil(total / limit),
