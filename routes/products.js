@@ -295,31 +295,14 @@ router.get('/public', async (req, res) => {
 
     let products = await productsQuery;
 
-    // Convert images to public URLs (no signed URLs needed for public endpoint)
-    const usePublicUrls = true;
-    const isArray = Array.isArray(products);
-    const productsArray = isArray ? products : [products];
-
-    await Promise.all(productsArray.map(async (product) => {
-      if (!product || !product.images || !Array.isArray(product.images)) {
-        if (product && !product.images) {
-          product.images = [];
-        }
-        return;
-      }
-
-      // For public endpoint, images are already public URLs, no conversion needed
-      // Just ensure they're properly formatted
-      if (product.images.length > 0) {
-        // Images are already in public format from GCS
-        console.log(`[Public Products] Product ${product.name || product._id} has ${product.images.length} images`);
-      }
-    }));
+    // Convert images to signed URLs for public endpoint
+    // Bucket is not public, so we need signed URLs even for public access
+    await convertProductImagesToSignedUrls(products, { primaryOnly: true });
 
     const total = await Product.countDocuments(query);
 
     // Convert to plain objects and remove pricing if somehow included
-    const publicProducts = productsArray.map(product => {
+    const publicProducts = products.map(product => {
       const productObj = product.toObject ? product.toObject() : product;
       // Ensure pricing is not included
       delete productObj.pricing;
