@@ -13,6 +13,202 @@ const PacketReturnService = require('../services/PacketReturnService');
 
 const router = express.Router();
 
+// Universal search for buying returns - searches across ALL suppliers
+// Searches by: product name, code, barcode, supplier name
+// Returns both packet stocks and products with supplier information
+router.get('/universal-search', auth, async (req, res) => {
+  try {
+    const { query = '', limit = 20 } = req.query;
+
+    if (!query || query.trim().length < 2) {
+      return sendResponse.success(res, { packets: [], products: [] });
+    }
+
+    const searchTerm = query.trim();
+    const searchRegex = new RegExp(searchTerm, 'i');
+
+    // Search PacketStocks (for barcode-based returns)
+    const packetStocks = await PacketStock.find({
+      isActive: true,
+      availablePackets: { $gt: 0 },
+      $or: [
+        { barcode: searchRegex }
+      ]
+    })
+      .populate('product', 'name sku productCode images')
+      .populate('supplier', 'name company contactPerson')
+      .limit(parseInt(limit))
+      .lean();
+
+    // Search by product name/code in packets
+    const productsByName = await Product.find({
+      isActive: { $ne: false },
+      $or: [
+        { name: searchRegex },
+        { productCode: searchRegex },
+        { sku: searchRegex }
+      ]
+    }).select('_id').lean();
+
+    const productIds = productsByName.map(p => p._id);
+    let packetsByProduct = [];
+    if (productIds.length > 0) {
+      packetsByProduct = await PacketStock.find({
+        isActive: true,
+        availablePackets: { $gt: 0 },
+        product: { $in: productIds }
+      })
+        .populate('product', 'name sku productCode images')
+        .populate('supplier', 'name company contactPerson')
+        .limit(parseInt(limit))
+        .lean();
+    }
+
+    // Search by supplier name
+    const suppliers = await Supplier.find({
+      $or: [
+        { name: searchRegex },
+        { company: searchRegex }
+      ]
+    }).select('_id').lean();
+
+    const supplierIds = suppliers.map(s => s._id);
+    let packetsBySupplier = [];
+    if (supplierIds.length > 0) {
+      packetsBySupplier = await PacketStock.find({
+        isActive: true,
+        availablePackets: { $gt: 0 },
+        supplier: { $in: supplierIds }
+      })
+        .populate('product', 'name sku productCode images')
+        .populate('supplier', 'name company contactPerson')
+        .limit(parseInt(limit))
+        .lean();
+    }
+
+    // Merge and deduplicate
+    const allPackets = [...packetStocks, ...packetsByProduct, ...packetsBySupplier];
+    const uniquePackets = Array.from(
+      new Map(allPackets.map(p => [p._id.toString(), p])).values()
+    );
+
+    // Transform for frontend
+    const packetResults = uniquePackets.slice(0, parseInt(limit)).map(ps => ({
+      _id: ps._id,
+      type: 'packet',
+      barcode: ps.barcode,
+      productId: ps.product?._id,
+      productName: ps.product?.name || 'Unknown',
+      productCode: ps.product?.productCode || ps.product?.sku || '',
+      supplierId: ps.supplier?._id,
+      supplierName: ps.supplier?.name || ps.supplier?.company || 'Unknown',
+      isLoose: ps.isLoose,
+      composition: ps.composition || [],
+      totalItemsPerPacket: ps.totalItemsPerPacket,
+      availablePackets: ps.availablePackets,
+      costPricePerPacket: ps.costPricePerPacket,
+      landedPricePerPacket: ps.landedPricePerPacket,
+      pricePerItem: ps.isLoose 
+        ? (ps.landedPricePerPacket || ps.costPricePerPacket || 0)
+        : ((ps.landedPricePerPacket || ps.costPricePerPacket || 0) / (ps.totalItemsPerPacket || 1))
+    }));
+
+    // Search Products (for variant-based returns)
+    const inventories = await Inventory.find({
+      product: { $in: productIds },
+      isActive: true,
+      'purchaseBatches.0': { $exists: true },
+      'purchaseBatches.remainingQuantity': { $gt: 0 }
+    })
+      .populate('product', 'name sku productCode images')
+      .lean();
+
+    // Transform products (group by product-supplier combination)
+    const productResults = [];
+    
+    for (const inventory of inventories) {
+      const supplierBatches = new Map();
+      
+      for (const batch of inventory.purchaseBatches) {
+        if (batch.remainingQuantity > 0) {
+          const supplierId = batch.supplierId?.toString() || batch.supplierId;
+          
+          if (!supplierBatches.has(supplierId)) {
+            supplierBatches.set(supplierId, {
+              supplierId,
+              stock: 0,
+              costPriceSum: 0,
+              batches: []
+            });
+          }
+          
+          const supplierData = supplierBatches.get(supplierId);
+          supplierData.stock += batch.remainingQuantity;
+          supplierData.costPriceSum += batch.remainingQuantity * batch.costPrice;
+          supplierData.batches.push(batch);
+        }
+      }
+      
+      // Create entries for each supplier
+      for (const [supplierId, data] of supplierBatches) {
+        let supplier = null;
+        try {
+          supplier = await Supplier.findById(supplierId).select('name company').lean();
+        } catch (err) {
+          console.log('Supplier not found:', supplierId);
+        }
+        
+        productResults.push({
+          _id: `${inventory.product._id}_${supplierId}`,
+          type: 'product',
+          productId: inventory.product._id,
+          productName: inventory.product.name,
+          productCode: inventory.product.productCode || inventory.product.sku || '',
+          supplierId: supplierId,
+          supplierName: supplier?.name || supplier?.company || 'Unknown Supplier',
+          availableStock: data.stock,
+          averageCostPrice: data.stock > 0 ? data.costPriceSum / data.stock : 0,
+          variantComposition: inventory.variantComposition || [],
+          batches: data.batches
+        });
+      }
+    }
+
+    // Sort by relevance (exact matches first)
+    const sortByRelevance = (a, b) => {
+      const aExact = (
+        a.barcode?.toLowerCase() === searchTerm.toLowerCase() ||
+        a.productCode?.toLowerCase() === searchTerm.toLowerCase() ||
+        a.productName?.toLowerCase() === searchTerm.toLowerCase()
+      );
+      const bExact = (
+        b.barcode?.toLowerCase() === searchTerm.toLowerCase() ||
+        b.productCode?.toLowerCase() === searchTerm.toLowerCase() ||
+        b.productName?.toLowerCase() === searchTerm.toLowerCase()
+      );
+      
+      if (aExact && !bExact) return -1;
+      if (!aExact && bExact) return 1;
+      return 0;
+    };
+
+    packetResults.sort(sortByRelevance);
+    productResults.sort(sortByRelevance);
+
+    console.log(`[Universal Search] Query: "${searchTerm}" - Found ${packetResults.length} packets, ${productResults.length} products`);
+
+    return sendResponse.success(res, {
+      packets: packetResults,
+      products: productResults,
+      total: packetResults.length + productResults.length
+    });
+
+  } catch (error) {
+    console.error('Universal search error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
+  }
+});
+
 // Get products available for return from a specific supplier
 // OPTIMIZED: Uses Inventory.purchaseBatches for direct supplier lookup (indexed field)
 // FIXED: Now handles both string and ObjectId formats for supplierId to include manual buying entries
