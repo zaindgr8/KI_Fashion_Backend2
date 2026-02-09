@@ -56,6 +56,170 @@ const saleReturnSchema = Joi.object({
   notes: Joi.string().allow('', null).optional()
 });
 
+// Universal search endpoint for sales and buyers
+router.get('/universal-search', auth, async (req, res) => {
+  try {
+    const { query = '', limit = 20 } = req.query;
+
+    if (!query || query.trim().length < 2) {
+      return sendResponse.success(res, { sales: [], buyers: [] });
+    }
+
+    const searchTerm = query.trim();
+    const searchRegex = new RegExp(searchTerm, 'i');
+
+    // Get all returned quantities for each sale (to calculate returnable quantities)
+    const allReturns = await SaleReturn.find({
+      status: { $in: ['pending', 'approved'] }
+    }).select('sale items').lean();
+
+    const returnsBySale = new Map();
+    for (const saleReturn of allReturns) {
+      const saleId = saleReturn.sale.toString();
+      if (!returnsBySale.has(saleId)) {
+        returnsBySale.set(saleId, []);
+      }
+      returnsBySale.get(saleId).push(saleReturn);
+    }
+
+    // Search sales directly
+    const sales = await Sale.find({
+      deliveryStatus: { $in: ['delivered', 'pending'] },
+      $or: [
+        { saleNumber: searchRegex },
+        { invoiceNumber: searchRegex }
+      ]
+    })
+      .populate('buyer', 'name company email phone')
+      .populate({
+        path: 'items.product',
+        select: 'name productCode sku images pricing'
+      })
+      .populate({
+        path: 'items.packetStock',
+        select: 'barcode composition totalItemsPerPacket'
+      })
+      .sort({ saleDate: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    // Search buyers
+    const buyers = await Buyer.find({
+      $or: [
+        { name: searchRegex },
+        { company: searchRegex },
+        { phone: searchRegex },
+        { email: searchRegex }
+      ]
+    })
+      .select('_id name company email phone')
+      .limit(parseInt(limit))
+      .lean();
+
+    // For each buyer found, get their recent delivered sales
+    const buyerIds = buyers.map(b => b._id);
+    let salesByBuyer = [];
+    if (buyerIds.length > 0) {
+      salesByBuyer = await Sale.find({
+        buyer: { $in: buyerIds },
+        deliveryStatus: { $in: ['delivered', 'pending'] }
+      })
+        .populate('buyer', 'name company email phone')
+        .populate({
+          path: 'items.product',
+          select: 'name productCode sku images pricing'
+        })
+        .populate({
+          path: 'items.packetStock',
+          select: 'barcode composition totalItemsPerPacket'
+        })
+        .sort({ saleDate: -1 })
+        .limit(parseInt(limit))
+        .lean();
+    }
+
+    // Merge and deduplicate sales
+    const allSales = [...sales, ...salesByBuyer];
+    const uniqueSales = Array.from(
+      new Map(allSales.map(s => [s._id.toString(), s])).values()
+    );
+
+    // Calculate returnable quantities for each sale item
+    const saleResults = uniqueSales.slice(0, parseInt(limit)).map(sale => {
+      const saleReturns = returnsBySale.get(sale._id.toString()) || [];
+      const returnedByItemIndex = new Map();
+
+      // Calculate total returned per item
+      for (const saleReturn of saleReturns) {
+        for (const returnItem of saleReturn.items) {
+          const key = returnItem.itemIndex;
+          const existing = returnedByItemIndex.get(key) || 0;
+          returnedByItemIndex.set(key, existing + returnItem.returnedQuantity);
+        }
+      }
+
+      const items = sale.items.map((item, idx) => {
+        const alreadyReturned = returnedByItemIndex.get(idx) || 0;
+        const returnableQty = item.quantity - alreadyReturned;
+
+        return {
+          itemIndex: idx,
+          product: item.product?._id,
+          productName: item.product?.name || 'Unknown',
+          productCode: item.product?.productCode || item.product?.sku || '',
+          quantity: item.quantity,
+          alreadyReturned,
+          returnableQty,
+          unitPrice: item.unitPrice,
+          variant: item.variant || null,
+          isPacketSale: item.isPacketSale || false,
+          packetBarcode: item.packetBarcode || null,
+          packetComposition: item.packetComposition || [],
+          totalItemsPerPacket: item.totalItemsPerPacket || 1
+        };
+      }).filter(item => item.returnableQty > 0); // Only include items that can be returned
+
+      return {
+        _id: sale._id,
+        saleNumber: sale.saleNumber,
+        invoiceNumber: sale.invoiceNumber,
+        saleDate: sale.saleDate,
+        buyer: sale.buyer ? {
+          _id: sale.buyer._id,
+          name: sale.buyer.name,
+          company: sale.buyer.company,
+          email: sale.buyer.email,
+          phone: sale.buyer.phone
+        } : sale.manualCustomer,
+        isManualSale: sale.isManualSale,
+        grandTotal: sale.grandTotal,
+        paymentStatus: sale.paymentStatus,
+        deliveryStatus: sale.deliveryStatus,
+        items,
+        hasReturnableItems: items.length > 0
+      };
+    }).filter(sale => sale.hasReturnableItems); // Only return sales with returnable items
+
+    // Transform buyers for frontend
+    const buyerResults = buyers.map(buyer => ({
+      _id: buyer._id,
+      name: buyer.name,
+      company: buyer.company,
+      email: buyer.email,
+      phone: buyer.phone
+    }));
+
+    return sendResponse.success(res, {
+      sales: saleResults,
+      buyers: buyerResults
+    });
+
+  } catch (error) {
+    console.error('Universal search error:', error);
+    return sendResponse.error(res, error.message || 'Search failed', 500);
+  }
+});
+
 /**
  * Convert sale return product images to signed URLs
  * @param {Object|Array} saleReturns - Sale return document(s)
