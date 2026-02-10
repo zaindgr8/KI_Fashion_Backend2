@@ -248,6 +248,20 @@ async function generateSignedUrl(imageUrl, expiresInMinutes = null) {
       return null;
     }
 
+    // Check if we should use public URLs instead of signed URLs
+    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS === 'true';
+    if (usePublicUrls) {
+      // Return public URL directly - no expiration
+      // Ensure it's in the correct format
+      const fileName = extractFilePath(imageUrl);
+      if (fileName) {
+        const { getBucketName } = require('../config/gcs');
+        const bucketName = getBucketName();
+        return `https://storage.googleapis.com/${bucketName}/${fileName}`;
+      }
+      return imageUrl;
+    }
+
     const defaultExpiry = parseInt(process.env.IMAGE_SIGNED_URL_EXPIRY_MINUTES || '1440', 10); // Default: 24 hours (1440 minutes)
     const expiryMinutes = expiresInMinutes || defaultExpiry;
 

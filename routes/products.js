@@ -295,9 +295,13 @@ router.get('/public', async (req, res) => {
 
     let products = await productsQuery;
 
-    // Convert images to signed URLs for public endpoint
-    // Bucket is not public, so we need signed URLs even for public access
-    await convertProductImagesToSignedUrls(products, { primaryOnly: true });
+    // Convert images based on bucket configuration
+    // If GCS_USE_PUBLIC_URLS=true, images are already public URLs (no conversion needed)
+    // If GCS_USE_PUBLIC_URLS=false, convert to signed URLs
+    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS === 'true';
+    if (!usePublicUrls) {
+      await convertProductImagesToSignedUrls(products, { primaryOnly: true });
+    }
 
     const total = await Product.countDocuments(query);
 
@@ -428,8 +432,11 @@ router.get('/', auth, async (req, res) => {
       );
     }
 
-    // Convert images to signed URLs (only primary image for list views - reduces payload)
-    await convertProductImagesToSignedUrls(products, { primaryOnly: true });
+    // Convert images based on bucket configuration
+    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS === 'true';
+    if (!usePublicUrls) {
+      await convertProductImagesToSignedUrls(products, { primaryOnly: true });
+    }
 
     const total = await Product.countDocuments(query);
 
