@@ -172,6 +172,190 @@ async function convertProductImagesToSignedUrls(products, options = {}) {
   return isArray ? productsArray : productsArray[0];
 }
 
+/**
+ * Aggregate products by SKU (deduplicates products from multiple suppliers)
+ * Combines data from all supplier records for the same SKU
+ * @param {Object} baseQuery - MongoDB query filters to apply
+ * @param {Object} options - Aggregation options
+ * @param {boolean} options.includePackets - Whether to include packet stock information
+ * @param {boolean} options.includePricing - Whether to include pricing information
+ * @param {number} options.page - Page number for pagination
+ * @param {number} options.limit - Items per page
+ * @returns {Promise<Object>} Aggregated products with pagination info
+ */
+async function aggregateProductsBySKU(baseQuery, options = {}) {
+  const {
+    includePackets = false,
+    includePricing = false,
+    page = 1,
+    limit = 50
+  } = options;
+
+  const PacketStock = require('../models/PacketStock');
+
+  // Build aggregation pipeline
+  const pipeline = [
+    // Match active products with base query
+    { $match: { isActive: true, ...baseQuery } },
+    
+    // Sort by creation date (newest first) before grouping
+    { $sort: { createdAt: -1 } },
+    
+    // Group by SKU to deduplicate
+    {
+      $group: {
+        _id: '$sku',
+        // Take first product's basic info (most recently created)
+        productId: { $first: '$_id' },
+        name: { $first: '$name' },
+        description: { $first: '$description' },
+        category: { $first: '$category' },
+        brand: { $first: '$brand' },
+        images: { $first: '$images' },
+        season: { $first: '$season' },
+        unit: { $first: '$unit' },
+        createdAt: { $first: '$createdAt' },
+        
+        // Collect all supplier IDs for this SKU
+        supplierIds: { $push: '$supplier' },
+        allProductIds: { $push: '$_id' },
+        
+        // Average pricing if included
+        ...(includePricing && {
+          avgCostPrice: { $avg: '$pricing.costPrice' },
+          avgWholesalePrice: { $avg: '$pricing.wholesalePrice' }
+        })
+      }
+    },
+    
+    // Rename _id back to sku
+    {
+      $project: {
+        _id: '$productId',
+        sku: '$_id',
+        name: 1,
+        description: 1,
+        category: 1,
+        brand: 1,
+        images: 1,
+        season: 1,
+        unit: 1,
+        createdAt: 1,
+        _supplierIds: '$supplierIds',
+        _allProductIds: '$allProductIds',
+        ...(includePricing && {
+          _avgCostPrice: '$avgCostPrice',
+          _avgWholesalePrice: '$avgWholesalePrice'
+        })
+      }
+    },
+    
+    // Sort by creation date again after grouping
+    { $sort: { createdAt: -1 } }
+  ];
+
+  // Get total count before pagination
+  const countPipeline = [...pipeline, { $count: 'total' }];
+  const countResult = await Product.aggregate(countPipeline);
+  const total = countResult.length > 0 ? countResult[0].total : 0;
+
+  // Add pagination
+  pipeline.push(
+    { $skip: (page - 1) * limit },
+    { $limit: limit }
+  );
+
+  // Execute aggregation
+  let products = await Product.aggregate(pipeline);
+
+  // Fetch PacketStock data for each deduplicated product
+  if (includePackets || includePricing) {
+    const PacketStock = require('../models/PacketStock');
+    
+    await Promise.all(products.map(async (product) => {
+      // Get all packet stocks for all supplier variations of this product
+      const packetStocks = await PacketStock.find({
+        product: { $in: product._allProductIds },
+        isActive: true,
+        availablePackets: { $gt: 0 }
+      })
+        .populate('supplier', 'name company')
+        .sort({ isLoose: 1, suggestedSellingPrice: 1 })
+        .lean();
+
+      if (includePricing) {
+        // Calculate average landed price from all packets
+        let totalLandedPrice = 0;
+        let landedPriceCount = 0;
+        
+        packetStocks.forEach(packet => {
+          if (packet.landedPricePerPacket && packet.totalItemsPerPacket) {
+            const pricePerItem = packet.landedPricePerPacket / packet.totalItemsPerPacket;
+            totalLandedPrice += pricePerItem;
+            landedPriceCount++;
+          }
+        });
+
+        const avgLandedPricePerItem = landedPriceCount > 0 
+          ? totalLandedPrice / landedPriceCount 
+          : (product._avgCostPrice || 0);
+
+        // Calculate selling price: average landed price + 20%
+        const sellingPrice = avgLandedPricePerItem * 1.20;
+
+        product.pricing = {
+          sellingPrice: parseFloat(sellingPrice.toFixed(2)),
+          wholesalePrice: product._avgWholesalePrice ? parseFloat(product._avgWholesalePrice.toFixed(2)) : null,
+          costPrice: product._avgCostPrice ? parseFloat(product._avgCostPrice.toFixed(2)) : null
+        };
+
+        // Clean up temporary fields
+        delete product._avgCostPrice;
+        delete product._avgWholesalePrice;
+      }
+
+      if (includePackets) {
+        // Map packet configurations for frontend
+        product.availablePackets = packetStocks.map(packet => ({
+          barcode: packet.barcode,
+          composition: packet.composition,
+          totalItemsPerPacket: packet.totalItemsPerPacket,
+          isLoose: packet.isLoose,
+          suggestedSellingPrice: packet.suggestedSellingPrice,
+          costPricePerPacket: packet.costPricePerPacket,
+          availableStock: packet.availablePackets,
+          supplierName: packet.supplier?.name || packet.supplier?.company || 'Unknown Supplier'
+        }));
+
+        // Calculate total stock from all suppliers
+        product.totalStock = packetStocks.reduce((sum, packet) => {
+          return sum + (packet.availablePackets * (packet.totalItemsPerPacket || 1));
+        }, 0);
+      }
+
+      // Clean up internal fields
+      delete product._allProductIds;
+      delete product._supplierIds;
+    }));
+  }
+
+  // Convert images to signed URLs if not using public URLs
+  const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS === 'true';
+  if (!usePublicUrls) {
+    await convertProductImagesToSignedUrls(products, { primaryOnly: !includePackets });
+  }
+
+  return {
+    products,
+    pagination: {
+      currentPage: parseInt(page),
+      totalPages: Math.ceil(total / limit),
+      totalItems: total,
+      itemsPerPage: parseInt(limit)
+    }
+  };
+}
+
 // Create product
 router.post('/', auth, async (req, res) => {
   try {
@@ -328,6 +512,139 @@ router.get('/public', async (req, res) => {
 
   } catch (error) {
     console.error('Get public products error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Get deduplicated public products (no authentication required)
+// Returns products aggregated by SKU without pricing information
+router.get('/deduplicated/public', async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      search,
+      category,
+      season,
+      brand,
+      sortBy = 'newest'
+    } = req.query;
+
+    const query = {};
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { sku: { $regex: search, $options: 'i' } },
+        { brand: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    if (category) {
+      query.category = category;
+    }
+
+    if (season) {
+      const seasonArray = Array.isArray(season) ? season : [season];
+      query.season = { $in: seasonArray };
+    }
+
+    if (brand) {
+      query.brand = brand;
+    }
+
+    // Aggregate products by SKU
+    const result = await aggregateProductsBySKU(query, {
+      includePackets: false,
+      includePricing: false,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+
+    // Remove any pricing fields that might have leaked through
+    const publicProducts = result.products.map(product => {
+      const productObj = { ...product };
+      delete productObj.pricing;
+      delete productObj.costPrice;
+      delete productObj.sellingPrice;
+      delete productObj.availablePackets;
+      delete productObj.totalStock;
+      return productObj;
+    });
+
+    res.json({
+      success: true,
+      data: publicProducts,
+      pagination: result.pagination
+    });
+
+  } catch (error) {
+    console.error('Get deduplicated public products error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Get deduplicated authenticated products (with pricing and packet info)
+// Returns products aggregated by SKU with average pricing and all packet options
+router.get('/deduplicated/authenticated', auth, async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      search,
+      category,
+      season,
+      brand,
+      sortBy = 'newest'
+    } = req.query;
+
+    const query = {};
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: 'i' } },
+        { sku: { $regex: search, $options: 'i' } },
+        { brand: { $regex: search, $options: 'i' } },
+        { description: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    if (category) {
+      query.category = category;
+    }
+
+    if (season) {
+      const seasonArray = Array.isArray(season) ? season : [season];
+      query.season = { $in: seasonArray };
+    }
+
+    if (brand) {
+      query.brand = brand;
+    }
+
+    // Aggregate products by SKU with pricing and packet info
+    const result = await aggregateProductsBySKU(query, {
+      includePackets: true,
+      includePricing: true,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+
+    res.json({
+      success: true,
+      data: result.products,
+      pagination: result.pagination
+    });
+
+  } catch (error) {
+    console.error('Get deduplicated authenticated products error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'
