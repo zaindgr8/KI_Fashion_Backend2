@@ -33,7 +33,8 @@ const idMappings = {
  */
 async function connectDB() {
   try {
-    await mongoose.connect('mongodb+srv://klfashionuk:admin@cluster0.vndfpcl.mongodb.net/website-db', {
+    const uri = process.env.MONGODB_URI || 'mongodb+srv://klfashionuk:admin@cluster0.vndfpcl.mongodb.net/migration_db';
+    await mongoose.connect(uri, {
       maxPoolSize: 10,
       serverSelectionTimeoutMS: 5000,
     });
@@ -136,6 +137,19 @@ async function migrateSuppliers(csvPath, migrationBot) {
         continue;
       }
 
+      // Idempotency: skip if already migrated
+      const existingSupplier = await Supplier.findOne({ 'metadata.legacyId': legacyId });
+      if (existingSupplier) {
+        idMappings.suppliers[legacyId] = {
+          mongoId: existingSupplier._id.toString(),
+          userId: existingSupplier.userId?.toString(),
+          supplierId: existingSupplier.supplierId,
+          loginEmail: 'existing'
+        };
+        stats.suppliers.skipped++;
+        continue;
+      }
+
       // Generate unique email: supplier_firstname_legacyid@kifashion.com
       const userEmail = await generateUniqueSupplierEmail(name, legacyId);
 
@@ -228,6 +242,17 @@ async function migrateBuyers(csvPath, migrationBot) {
 
       if (!legacyId || !name) {
         stats.buyers.errors.push({ legacyId, error: 'Missing legacyId or name' });
+        stats.buyers.skipped++;
+        continue;
+      }
+
+      // Idempotency: skip if already migrated
+      const existingBuyer = await Buyer.findOne({ 'metadata.legacyId': legacyId });
+      if (existingBuyer) {
+        idMappings.buyers[legacyId] = {
+          mongoId: existingBuyer._id.toString(),
+          buyerId: existingBuyer.buyerId
+        };
         stats.buyers.skipped++;
         continue;
       }
@@ -334,6 +359,12 @@ async function main() {
     process.exit(0);
   }
 
+  // Check for clean flag (delete existing migrated data, then re-import)
+  const isClean = args.includes('--clean');
+  if (isClean) {
+    console.log('--clean flag detected: will delete existing migrated data before importing');
+  }
+
   // Parse arguments
   const suppliersIndex = args.indexOf('--suppliers');
   const buyersIndex = args.indexOf('--buyers');
@@ -361,6 +392,12 @@ async function main() {
   console.log('=========================================================');
 
   await connectDB();
+
+  // If --clean, rollback first then continue with fresh import
+  if (isClean) {
+    await rollback();
+    console.log('\nClean rollback complete. Starting fresh import...\n');
+  }
 
   // Get or create migration bot
   const migrationBot = await getOrCreateMigrationBot();
