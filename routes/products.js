@@ -340,7 +340,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
   }
 
   // Convert images to signed URLs if not using public URLs
-  const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS === 'true';
+  const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS !== 'false';
   if (!usePublicUrls) {
     await convertProductImagesToSignedUrls(products, { primaryOnly: !includePackets });
   }
@@ -482,7 +482,7 @@ router.get('/public', async (req, res) => {
     // Convert images based on bucket configuration
     // If GCS_USE_PUBLIC_URLS=true, images are already public URLs (no conversion needed)
     // If GCS_USE_PUBLIC_URLS=false, convert to signed URLs
-    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS === 'true';
+    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS !== 'false';
     if (!usePublicUrls) {
       await convertProductImagesToSignedUrls(products, { primaryOnly: true });
     }
@@ -750,7 +750,7 @@ router.get('/', auth, async (req, res) => {
     }
 
     // Convert images based on bucket configuration
-    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS === 'true';
+    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS !== 'false';
     if (!usePublicUrls) {
       await convertProductImagesToSignedUrls(products, { primaryOnly: true });
     }

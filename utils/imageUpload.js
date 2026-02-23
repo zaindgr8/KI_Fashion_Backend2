@@ -249,7 +249,7 @@ async function generateSignedUrl(imageUrl, expiresInMinutes = null) {
     }
 
     // Check if we should use public URLs instead of signed URLs
-    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS === 'true';
+    const usePublicUrls = process.env.GCS_USE_PUBLIC_URLS !== 'false';
     if (usePublicUrls) {
       // Return public URL directly - no expiration
       // Ensure it's in the correct format
