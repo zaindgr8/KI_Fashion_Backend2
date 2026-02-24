@@ -221,17 +221,21 @@ function extractFilePath(imageUrl) {
     return null;
   }
 
-  if (imageUrl.startsWith('https://storage.googleapis.com/')) {
+  // Strip query parameters before parsing (e.g., signed URL params: ?X-Goog-Signature=..., ?X-Goog-Algorithm=...)
+  // Signed URLs stored in the DB must be cleanly parsed back to a raw GCS file path.
+  const cleanUrl = imageUrl.split('?')[0];
+
+  if (cleanUrl.startsWith('https://storage.googleapis.com/')) {
     // Full URL format: https://storage.googleapis.com/bucket-name/path/to/file
-    const urlParts = imageUrl.replace('https://storage.googleapis.com/', '').split('/');
+    const urlParts = cleanUrl.replace('https://storage.googleapis.com/', '').split('/');
     return urlParts.slice(1).join('/'); // Remove bucket name, keep path
-  } else if (imageUrl.startsWith('gs://')) {
+  } else if (cleanUrl.startsWith('gs://')) {
     // gs:// format: gs://bucket-name/path/to/file
-    const urlParts = imageUrl.replace('gs://', '').split('/');
+    const urlParts = cleanUrl.replace('gs://', '').split('/');
     return urlParts.slice(1).join('/');
   } else {
     // Assume it's already a file path
-    return imageUrl;
+    return cleanUrl;
   }
 }
 
