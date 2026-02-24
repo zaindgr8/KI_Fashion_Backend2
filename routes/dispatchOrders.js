@@ -267,7 +267,12 @@ async function normalizeDispatchOrderForAdmin(dispatchOrder, input = {}, user, o
         if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
         if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
         if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
-        if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
+        // Only update productImage if the incoming value is a non-empty array (guard against accidentally clearing images with [])
+        if (reqItem.productImage && Array.isArray(reqItem.productImage) && reqItem.productImage.length > 0) {
+          item.productImage = reqItem.productImage;
+        } else if (reqItem.productImage && typeof reqItem.productImage === 'string') {
+          item.productImage = [reqItem.productImage];
+        }
 
         // If new packets provided, accept them and clear reconfiguration flag
         if (reqItem.packets) {
