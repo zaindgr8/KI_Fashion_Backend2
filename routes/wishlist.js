@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Joi = require('joi');
 const Wishlist = require('../models/Wishlist');
 const Product = require('../models/Product');
@@ -257,7 +258,7 @@ router.get('/check/:productId', auth, async (req, res) => {
       });
     }
 
-    const wishlist = await Wishlist.findOne({ userId: req.user._id });
+    const wishlist = await Wishlist.findOne({ userId: req.user._id }).lean();
 
     if (!wishlist) {
       return res.json({

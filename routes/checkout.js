@@ -77,24 +77,7 @@ async function getBuyerIdForUser(user) {
 }
 
 // Generate sale number
-const generateSaleNumber = async () => {
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = String(today.getMonth() + 1).padStart(2, '0');
-
-  const prefix = `SAL${year}${month}`;
-  const lastSale = await Sale.findOne({
-    saleNumber: { $regex: `^${prefix}` }
-  }).sort({ saleNumber: -1 });
-
-  let nextNumber = 1;
-  if (lastSale) {
-    const lastNumber = parseInt(lastSale.saleNumber.slice(-4));
-    nextNumber = lastNumber + 1;
-  }
-
-  return `${prefix}${String(nextNumber).padStart(4, '0')}`;
-};
+const { generateSaleNumber } = require('../utils/sale-number');
 
 // Calculate sale totals with VAT
 const calculateTotals = async (items, totalDiscount = 0, shippingCost = 0) => {
@@ -197,13 +180,13 @@ async function reserveStock(items, saleId, userId) {
           throw new Error(`Insufficient stock for ${item.name} (${item.variant.color}/${item.variant.size}). Available: ${availableStock}`);
         }
 
-        // Reserve in variant stock (only if variantStock exists)
-        if (inventory.variantStock && inventory.variantStock.length > 0) {
-          const variantIdx = inventory.variantStock.findIndex(
+        // Reserve in variant composition (only if variantComposition exists)
+        if (inventory.variantComposition && inventory.variantComposition.length > 0) {
+          const variantIdx = inventory.variantComposition.findIndex(
             v => v.size === item.variant.size && v.color === item.variant.color
           );
           if (variantIdx >= 0) {
-            inventory.variantStock[variantIdx].reservedStock = (inventory.variantStock[variantIdx].reservedStock || 0) + item.quantity;
+            inventory.variantComposition[variantIdx].reservedQuantity = (inventory.variantComposition[variantIdx].reservedQuantity || 0) + item.quantity;
           }
         }
         inventory.reservedStock = (inventory.reservedStock || 0) + item.quantity;
@@ -245,15 +228,15 @@ async function releaseReservedStock(sale) {
         }).session(session);
 
         if (inventory) {
-          // Release variant stock reservation (only if variantStock exists)
-          if (inventory.variantStock && inventory.variantStock.length > 0) {
-            const variantIdx = inventory.variantStock.findIndex(
+          // Release variant composition reservation (only if variantComposition exists)
+          if (inventory.variantComposition && inventory.variantComposition.length > 0) {
+            const variantIdx = inventory.variantComposition.findIndex(
               v => v.size === item.variant.size && v.color === item.variant.color
             );
             if (variantIdx >= 0) {
-              inventory.variantStock[variantIdx].reservedStock = Math.max(
+              inventory.variantComposition[variantIdx].reservedQuantity = Math.max(
                 0, 
-                (inventory.variantStock[variantIdx].reservedStock || 0) - item.quantity
+                (inventory.variantComposition[variantIdx].reservedQuantity || 0) - item.quantity
               );
             }
           }
@@ -301,20 +284,20 @@ async function confirmStockDeduction(sale, userId) {
         }).session(session);
 
         if (inventory) {
-          // Convert reservation to actual deduction (only if variantStock exists)
-          if (inventory.variantStock && inventory.variantStock.length > 0) {
-            const variantIdx = inventory.variantStock.findIndex(
+          // Convert reservation to actual deduction (only if variantComposition exists)
+          if (inventory.variantComposition && inventory.variantComposition.length > 0) {
+            const variantIdx = inventory.variantComposition.findIndex(
               v => v.size === item.variant.size && v.color === item.variant.color
             );
             
             if (variantIdx >= 0) {
-              inventory.variantStock[variantIdx].reservedStock = Math.max(
+              inventory.variantComposition[variantIdx].reservedQuantity = Math.max(
                 0, 
-                (inventory.variantStock[variantIdx].reservedStock || 0) - item.quantity
+                (inventory.variantComposition[variantIdx].reservedQuantity || 0) - item.quantity
               );
-              inventory.variantStock[variantIdx].currentStock = Math.max(
+              inventory.variantComposition[variantIdx].quantity = Math.max(
                 0,
-                (inventory.variantStock[variantIdx].currentStock || 0) - item.quantity
+                (inventory.variantComposition[variantIdx].quantity || 0) - item.quantity
               );
             }
           }
@@ -524,8 +507,8 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     if (endpointSecret) {
       event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
     } else {
-      // For testing without webhook secret
-      event = JSON.parse(req.body);
+      console.error('STRIPE_WEBHOOK_SECRET is not configured — rejecting webhook');
+      return res.status(500).json({ error: 'Webhook secret not configured' });
     }
   } catch (err) {
     console.error('Webhook signature verification failed:', err.message);
@@ -583,6 +566,12 @@ async function handleSuccessfulPayment(session) {
 
     if (!sale) {
       console.error('Sale not found:', saleId);
+      return;
+    }
+
+    // Idempotency check: skip if already processed
+    if (sale.paymentStatus === 'paid') {
+      console.log(`Sale ${sale.saleNumber} already processed — skipping duplicate webhook`);
       return;
     }
 

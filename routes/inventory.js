@@ -502,7 +502,7 @@ router.get('/movements/:productId', auth, async (req, res) => {
   try {
     const { page = 1, limit = 50, type, startDate, endDate } = req.query;
 
-    const inventory = await Inventory.findOne({ product: req.params.productId });
+    const inventory = await Inventory.findOne({ product: req.params.productId }).lean();
     if (!inventory) {
       return res.status(404).json({
         success: false,
@@ -759,7 +759,7 @@ router.get('/catalog-qr', auth, async (req, res) => {
       buyerId = user.buyerId;
     } else {
       // Try to find buyer by email
-      const buyer = await Buyer.findOne({ email: user.email, customerType: 'distributor' });
+      const buyer = await Buyer.findOne({ email: user.email, customerType: 'distributor' }).lean();
       if (buyer) {
         buyerId = buyer._id;
       }
@@ -784,7 +784,7 @@ router.get('/:productId/variants', auth, async (req, res) => {
   try {
     const Product = require('../models/Product');
 
-    const product = await Product.findById(req.params.productId);
+    const product = await Product.findById(req.params.productId).lean();
     if (!product) {
       return res.status(404).json({
         success: false,
@@ -799,7 +799,7 @@ router.get('/:productId/variants', auth, async (req, res) => {
       });
     }
 
-    const inventory = await Inventory.findOne({ product: product._id });
+    const inventory = await Inventory.findOne({ product: product._id }).lean();
     if (!inventory) {
       return res.status(404).json({
         success: false,
@@ -958,7 +958,7 @@ router.get('/variant-stock/:productId', auth, async (req, res) => {
       });
     }
 
-    const inventory = await Inventory.findOne({ product: req.params.productId });
+    const inventory = await Inventory.findOne({ product: req.params.productId }).lean();
 
     if (!inventory) {
       return res.status(404).json({

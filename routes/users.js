@@ -5,6 +5,14 @@ const auth = require('../middleware/auth');
 
 const router = express.Router();
 
+// Middleware: require admin or super-admin role
+function requireAdmin(req, res, next) {
+  if (!req.user || (req.user.role !== 'admin' && req.user.role !== 'super-admin')) {
+    return res.status(403).json({ success: false, message: 'Admin access required' });
+  }
+  next();
+}
+
 const userSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
   email: Joi.string().email().required(),
@@ -27,8 +35,8 @@ const updateUserSchema = Joi.object({
   isActive: Joi.boolean().optional()
 });
 
-// Get all users
-router.get('/', auth, async (req, res) => {
+// Get all users (admin only)
+router.get('/', auth, requireAdmin, async (req, res) => {
   try {
     const { page = 1, limit = 10, search, role, isActive } = req.query;
 
@@ -53,13 +61,15 @@ router.get('/', auth, async (req, res) => {
         .select('-password')
         .sort({ createdAt: -1 })
         .limit(limit * 1)
-        .skip((page - 1) * limit);
+        .skip((page - 1) * limit)
+        .lean();
     } else {
       users = await User.find(query)
         .select('-password')
         .sort({ createdAt: -1 })
         .limit(limit * 1)
-        .skip((page - 1) * limit);
+        .skip((page - 1) * limit)
+        .lean();
     }
 
     const total = await User.countDocuments(query);
@@ -84,12 +94,13 @@ router.get('/', auth, async (req, res) => {
   }
 });
 
-// Get user by ID
-router.get('/:id', auth, async (req, res) => {
+// Get user by ID (admin only)
+router.get('/:id', auth, requireAdmin, async (req, res) => {
   try {
     const user = await User.findById(req.params.id)
       .populate(['supplier', 'buyer'])
-      .select('-password');
+      .select('-password')
+      .lean();
 
     if (!user) {
       return res.status(404).json({
@@ -112,12 +123,29 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
-// Update user
-router.put('/:id', auth, async (req, res) => {
+// Update user (admin only, whitelisted fields)
+router.put('/:id', auth, requireAdmin, async (req, res) => {
   try {
+    const { error } = updateUserSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ success: false, message: error.details[0].message });
+    }
+
+    // Only super-admin can change roles
+    if (req.body.role && req.user.role !== 'super-admin') {
+      return res.status(403).json({ success: false, message: 'Only super-admin can change user roles' });
+    }
+
+    const allowedFields = ['name', 'email', 'phone', 'phoneAreaCode', 'address', 'permissions', 'isActive'];
+    if (req.user.role === 'super-admin') allowedFields.push('role');
+    const updates = {};
+    for (const key of allowedFields) {
+      if (req.body[key] !== undefined) updates[key] = req.body[key];
+    }
+
     const user = await User.findByIdAndUpdate(
       req.params.id,
-      req.body,
+      updates,
       { new: true, runValidators: true }
     ).select('-password');
 
@@ -143,8 +171,8 @@ router.put('/:id', auth, async (req, res) => {
   }
 });
 
-// Deactivate user
-router.patch('/:id/deactivate', auth, async (req, res) => {
+// Deactivate user (admin only)
+router.patch('/:id/deactivate', auth, requireAdmin, async (req, res) => {
   try {
     const user = await User.findByIdAndUpdate(
       req.params.id,

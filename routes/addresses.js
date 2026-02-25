@@ -50,7 +50,7 @@ router.get('/', auth, async (req, res) => {
       });
     }
 
-    const buyer = await Buyer.findById(buyerId).select('deliveryAddresses');
+    const buyer = await Buyer.findById(buyerId).select('deliveryAddresses').lean();
 
     if (!buyer) {
       return res.status(404).json({

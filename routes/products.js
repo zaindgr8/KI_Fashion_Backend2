@@ -475,7 +475,8 @@ router.get('/public', async (req, res) => {
       .select(selectFields)
       .sort({ createdAt: -1 })
       .limit(limit * 1)
-      .skip((page - 1) * limit);
+      .skip((page - 1) * limit)
+      .lean();
 
     let products = await productsQuery;
 
@@ -797,7 +798,7 @@ router.get('/lookup/:productCode', auth, async (req, res) => {
           { sku: { $regex: new RegExp(`^${productCode.trim()}$`, 'i') } }
         ]
       })
-    );
+    ).lean();
 
     if (!product) {
       return res.status(404).json({
@@ -807,7 +808,7 @@ router.get('/lookup/:productCode', auth, async (req, res) => {
     }
 
     // Get inventory information
-    const inventory = await Inventory.findOne({ product: product._id });
+    const inventory = await Inventory.findOne({ product: product._id }).lean();
 
     // Convert images to signed URLs
     await convertProductImagesToSignedUrls(product);
@@ -815,7 +816,7 @@ router.get('/lookup/:productCode', auth, async (req, res) => {
     res.json({
       success: true,
       data: {
-        ...product.toObject(),
+        ...(product.toObject ? product.toObject() : product),
         inventoryInfo: inventory
       }
     });
@@ -834,7 +835,7 @@ router.get('/:id', auth, async (req, res) => {
   try {
     const product = await populateProductQuery(
       Product.findById(req.params.id)
-    );
+    ).lean();
 
     if (!product) {
       return res.status(404).json({
@@ -844,7 +845,7 @@ router.get('/:id', auth, async (req, res) => {
     }
 
     // Get inventory information
-    const inventory = await Inventory.findOne({ product: product._id });
+    const inventory = await Inventory.findOne({ product: product._id }).lean();
 
     // Get all available packet configurations
     const PacketStock = require('../models/PacketStock');
@@ -890,7 +891,7 @@ router.get('/:id', auth, async (req, res) => {
     res.json({
       success: true,
       data: {
-        ...product.toObject(),
+        ...(product.toObject ? product.toObject() : product),
         inventoryInfo: inventory,
         packetPricing,
         availablePackets  // NEW: All packet configurations
@@ -1378,7 +1379,7 @@ router.patch('/:id/disable-variants', auth, async (req, res) => {
 // Get variant stock levels for a product
 router.get('/:id/variants', auth, async (req, res) => {
   try {
-    const product = await Product.findById(req.params.id);
+    const product = await Product.findById(req.params.id).lean();
     if (!product) {
       return res.status(404).json({
         success: false,
@@ -1393,7 +1394,7 @@ router.get('/:id/variants', auth, async (req, res) => {
       });
     }
 
-    const inventory = await Inventory.findOne({ product: product._id });
+    const inventory = await Inventory.findOne({ product: product._id }).lean();
     if (!inventory) {
       return res.status(404).json({
         success: false,

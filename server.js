@@ -46,7 +46,7 @@ const productionOrigins = [
   "https://www.ki-fashion-admin-panel.vercel.app",
   "https://kifashion-website.vercel.app",
   "https://www.kifashion-website.vercel.app",
-    "http://localhost:3000",
+  "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:3002",
   "http://127.0.0.1:3000",
@@ -70,9 +70,9 @@ const defaultOrigins = [...productionOrigins, ...localhostOrigins];
 // Always include localhost origins for development, even if ALLOWED_ORIGINS is set
 const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? [
-      ...process.env.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()),
-      ...localhostOrigins,
-    ]
+    ...process.env.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()),
+    ...localhostOrigins,
+  ]
   : defaultOrigins;
 
 // Remove duplicates
@@ -207,6 +207,7 @@ app.use("*", (req, res) => {
 
 const BASE_PORT = parseInt(process.env.PORT, 10) || 5000;
 const MAX_PORT_ATTEMPTS = 5;
+const { startReservationCleanup } = require('./utils/reservation-cleanup');
 
 // Try the requested port, but fall back to the next one if it's already in use.
 const startServer = (port, attemptsLeft) => {
@@ -215,6 +216,8 @@ const startServer = (port, attemptsLeft) => {
     console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
     console.log(`CORS enabled for ${uniqueOrigins.length} origins`);
     console.log("Allowed origins:", uniqueOrigins);
+    // Start periodic stock reservation cleanup
+    startReservationCleanup();
   });
 
   server.on("error", (error) => {

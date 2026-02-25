@@ -14,15 +14,18 @@ const ROLE_OPTIONS = ['super-admin', 'admin', 'employee', 'accountant', 'supplie
 const PORTAL_ACCESS_OPTIONS = ['crm', 'supplier', 'distributor'];
 const SIGNUP_SOURCES = ['crm', 'supplier-portal', 'distributor-portal', 'import'];
 
+// Roles allowed for self-registration (public signup)
+const PUBLIC_REGISTRATION_ROLES = ['distributor', 'buyer'];
+
 const registerSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
-  role: Joi.string().valid(...ROLE_OPTIONS).default('employee'),
+  role: Joi.string().valid(...PUBLIC_REGISTRATION_ROLES).default('buyer'),
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
-  permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery')).optional(),
+permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery')).optional(),
   portalAccess: Joi.array().items(Joi.string().valid(...PORTAL_ACCESS_OPTIONS)).optional(),
   supplierId: Joi.string().length(24).hex().optional(),
   buyerId: Joi.string().length(24).hex().optional(),

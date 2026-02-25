@@ -140,24 +140,7 @@ const saleSchema = Joi.object({
 }).or('buyer', 'manualCustomer');
 
 // Generate sale number
-const generateSaleNumber = async () => {
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = String(today.getMonth() + 1).padStart(2, '0');
-
-  const prefix = `SAL${year}${month}`;
-  const lastSale = await Sale.findOne({
-    saleNumber: { $regex: `^${prefix}` }
-  }).sort({ saleNumber: -1 });
-
-  let nextNumber = 1;
-  if (lastSale) {
-    const lastNumber = parseInt(lastSale.saleNumber.slice(-4));
-    nextNumber = lastNumber + 1;
-  }
-
-  return `${prefix}${String(nextNumber).padStart(4, '0')}`;
-};
+const { generateSaleNumber } = require('../utils/sale-number');
 
 // Calculate sale totals
 const calculateTotals = (items, totalDiscount = 0, shippingCost = 0) => {
@@ -571,10 +554,12 @@ router.post('/', auth, async (req, res) => {
 
     // Deduct stock for each item immediately (auto-delivered sales)
     if (!isManualSale) {
-      for (const item of req.body.items) {
-        try {
-          const product = await Product.findById(item.product);
-          const inventory = await Inventory.findOne({ product: item.product });
+      const stockSession = await mongoose.startSession();
+      stockSession.startTransaction();
+      try {
+        for (const item of req.body.items) {
+          const product = await Product.findById(item.product).session(stockSession);
+          const inventory = await Inventory.findOne({ product: item.product }).session(stockSession);
           if (!inventory) {
             console.warn(`Inventory not found for product ${item.product} when creating sale ${saleNumber}`);
             continue;
@@ -607,31 +592,29 @@ router.post('/', auth, async (req, res) => {
             });
             
             inventory.lastStockUpdate = new Date();
-            await inventory.save();
+            await inventory.save({ session: stockSession });
             console.log(`Stock deducted for product ${item.product}: currentStock=${inventory.currentStock}`);
           }
 
           // Handle PacketStock - always use sellPackets (no more reservation)
           if (item.isPacketSale && item.packetStock) {
-            try {
-              const packetStock = await PacketStock.findById(item.packetStock);
-              if (packetStock) {
-                // Calculate packet quantity from item quantity and totalItemsPerPacket
-                const packetQty = item.packetQuantity || Math.ceil(item.quantity / (item.totalItemsPerPacket || 1));
-                await packetStock.sellPackets(packetQty);
-                console.log(`PacketStock sold for ${packetStock.barcode}: ${packetQty} packets`);
-              } else {
-                console.warn(`PacketStock not found for ID ${item.packetStock} when creating sale ${saleNumber}`);
-              }
-            } catch (packetError) {
-              console.error(`Error handling PacketStock for sale ${saleNumber}:`, packetError);
-              // Continue - don't fail sale creation for packet issues
+            const packetStock = await PacketStock.findById(item.packetStock).session(stockSession);
+            if (packetStock) {
+              const packetQty = item.packetQuantity || Math.ceil(item.quantity / (item.totalItemsPerPacket || 1));
+              await packetStock.sellPackets(packetQty);
+              console.log(`PacketStock sold for ${packetStock.barcode}: ${packetQty} packets`);
+            } else {
+              console.warn(`PacketStock not found for ID ${item.packetStock} when creating sale ${saleNumber}`);
             }
           }
-        } catch (inventoryError) {
-          console.error(`Error deducting stock for product ${item.product}:`, inventoryError);
-          // Continue with other items even if one fails
         }
+        await stockSession.commitTransaction();
+        stockSession.endSession();
+      } catch (stockError) {
+        await stockSession.abortTransaction();
+        stockSession.endSession();
+        console.error(`Error deducting stock atomically for sale ${saleNumber}:`, stockError);
+        // Sale is already saved — log error but don't fail the response
       }
     }
 
