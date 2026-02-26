@@ -16,7 +16,7 @@ async function migrate() {
     // Connect to database
     const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/kifashion';
     await mongoose.connect(mongoUri);
-    console.log('Connected to MongoDB');
+     
 
     // Find all packet stocks with break history that has the old schema
     const packetStocks = await PacketStock.find({
@@ -24,7 +24,7 @@ async function migrate() {
       'breakHistory.loosePacketStocksCreated': { $exists: false }
     });
 
-    console.log(`Found ${packetStocks.length} packet stocks to migrate`);
+     
 
     let migratedCount = 0;
     let errorCount = 0;
@@ -55,7 +55,7 @@ async function migrate() {
             }];
 
             modified = true;
-            console.log(`  Migrated break record for packet ${packetStock.barcode} -> ${oldLooseStock.barcode}`);
+             
           } else {
             // Loose stock was deleted, skip migration for this record
             console.warn(`  Skipping break record for packet ${packetStock.barcode}: loose stock not found`);
@@ -72,17 +72,17 @@ async function migrate() {
       }
     }
 
-    console.log('\n--- Migration Complete ---');
-    console.log(`Successfully migrated: ${migratedCount}`);
-    console.log(`Errors: ${errorCount}`);
-    console.log(`Total processed: ${packetStocks.length}`);
+     
+     
+     
+     
 
   } catch (error) {
     console.error('Migration failed:', error);
     process.exit(1);
   } finally {
     await mongoose.disconnect();
-    console.log('Disconnected from MongoDB');
+     
   }
 }
 

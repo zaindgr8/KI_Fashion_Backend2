@@ -248,7 +248,7 @@ const processDeliveryWithTransaction = async (sale, productMap, inventoryMap, us
     await session.commitTransaction();
     session.endSession();
     
-    console.log(`[Sale Delivery] Transaction completed for ${sale.saleNumber}: ${results.inventoryUpdated} inventory, ${results.packetsUpdated} packets updated`);
+     
     return { success: true, ...results };
     
   } catch (error) {
@@ -593,7 +593,7 @@ router.post('/', auth, async (req, res) => {
             
             inventory.lastStockUpdate = new Date();
             await inventory.save({ session: stockSession });
-            console.log(`Stock deducted for product ${item.product}: currentStock=${inventory.currentStock}`);
+             
           }
 
           // Handle PacketStock - always use sellPackets (no more reservation)
@@ -602,7 +602,7 @@ router.post('/', auth, async (req, res) => {
             if (packetStock) {
               const packetQty = item.packetQuantity || Math.ceil(item.quantity / (item.totalItemsPerPacket || 1));
               await packetStock.sellPackets(packetQty);
-              console.log(`PacketStock sold for ${packetStock.barcode}: ${packetQty} packets`);
+               
             } else {
               console.warn(`PacketStock not found for ID ${item.packetStock} when creating sale ${saleNumber}`);
             }
@@ -713,7 +713,7 @@ router.post('/', auth, async (req, res) => {
             sale.buyer,
             { currentBalance: ledgerBalance }
           );
-          console.log(`Buyer balance synced from ledger after sale creation: ${ledgerBalance} for buyer ${sale.buyer}`);
+           
         } catch (balanceError) {
           console.error('Error syncing buyer balance from ledger after sale creation:', balanceError);
           // Don't fail the sale creation if balance sync fails
@@ -803,7 +803,7 @@ router.post('/', auth, async (req, res) => {
             distributorEmail,
             adminEmail
           );
-          console.log('Invoice emails sent:', emailResults);
+           
         } else {
           console.warn('No email addresses found for invoice delivery');
         }
@@ -1240,7 +1240,7 @@ router.patch('/:id/delivered', auth, async (req, res) => {
         sale.buyer,
         { currentBalance: ledgerBalance }
       );
-      console.log(`Buyer balance synced from ledger: ${ledgerBalance} for buyer ${sale.buyer}`);
+       
     } catch (balanceError) {
       console.error('Error syncing buyer balance from ledger:', balanceError);
       // Don't fail the delivery if balance sync fails
@@ -1330,7 +1330,7 @@ router.delete('/:id', auth, async (req, res) => {
           const packetStock = await PacketStock.findById(item.packetStock);
           if (packetStock) {
             await packetStock.releaseReservedPackets(item.quantity);
-            console.log(`PacketStock released for ${packetStock.barcode}: ${item.quantity} packets`);
+             
           }
         } catch (packetError) {
           console.error(`Error releasing PacketStock for sale ${sale.saleNumber}:`, packetError);

@@ -58,21 +58,21 @@ async function convertInventoryProductImages(inventoryItems, usePublicUrls = fal
           // Use public URLs directly (bucket is public)
           // URLs are already in public format: https://storage.googleapis.com/bucket/path
           // No conversion needed - images are already public URLs
-          console.log(`[Inventory] Using public URLs for product ${item.product.name || item.product._id}, ${item.product.images.length} images`);
+           
         } else {
           // Generate signed URLs (more secure, but slower)
           const signedUrls = await generateSignedUrls(item.product.images);
           // If signed URL generation fails, fall back to public URLs
           if (signedUrls.length === item.product.images.length) {
             item.product.images = signedUrls;
-            console.log(`[Inventory] Generated signed URLs for product ${item.product.name || item.product._id}`);
+             
           } else {
             // Some signed URLs failed, use original public URLs
             console.warn(`[Inventory] Some signed URLs failed for product ${item.product.name || item.product._id}, using public URLs as fallback`);
           }
         }
       } else {
-        console.log(`[Inventory] Product ${item.product.name || item.product._id} has no images`);
+         
       }
     } else {
       console.warn(`[Inventory] Item missing product:`, item?._id || 'unknown');

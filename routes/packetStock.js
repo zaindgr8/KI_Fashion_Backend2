@@ -522,7 +522,7 @@ router.get('/barcode-label/:id', auth, async (req, res) => {
           generatedAt: new Date()
         };
         await packetStock.save();
-        console.log(`[Barcode Label] Generated and saved barcode image for ${packetStock.barcode}`);
+         
       } catch (barcodeErr) {
         console.error(`[Barcode Label] Failed to generate barcode image:`, barcodeErr.message);
         // Fall back to ITF barcode generation if code128 fails
@@ -928,7 +928,7 @@ router.post('/:id/break', auth, async (req, res) => {
           quantity: remainingItem.quantity
         });
         
-        console.log(`[Packet Break] Created/updated loose stock ${looseStock.barcode} for ${remainingItem.color}/${remainingItem.size} x${remainingItem.quantity}`);
+         
       }
     }
     
@@ -986,7 +986,7 @@ router.post('/:id/break', auth, async (req, res) => {
       }
     };
     
-    console.log(`[Packet Break] Packet ${packetStock.barcode} broken by user ${req.user._id}. Sold: ${totalItemsToSell} items. Remaining: ${totalRemainingItems} items across ${looseStocksCreated.length} variants.`);
+     
     
     return res.json(response);
     
@@ -1058,7 +1058,7 @@ router.post('/loose/:id/add-items', auth, async (req, res) => {
     
     await looseStock.addLooseItems(quantity, reason);
     
-    console.log(`[Loose Stock] Added ${quantity} units to loose stock ${looseStock.barcode}. Reason: ${reason}. Notes: ${notes}`);
+     
     
     return res.json({
       success: true,

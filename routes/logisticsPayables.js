@@ -223,7 +223,7 @@ router.get('/company/:companyId', auth, async (req, res) => {
   try {
     const { companyId } = req.params;
 
-    console.log('GET /company/:companyId - Fetching details for company:', companyId);
+     
 
     // Validate company ID
     if (!mongoose.Types.ObjectId.isValid(companyId)) {
@@ -242,7 +242,7 @@ router.get('/company/:companyId', auth, async (req, res) => {
       });
     }
 
-    console.log('Company found:', company.name, 'Box rate:', company.rates?.boxRate);
+     
 
     // Get all orders for this company
     const orders = await DispatchOrder.find({
@@ -250,7 +250,7 @@ router.get('/company/:companyId', auth, async (req, res) => {
       status: 'confirmed'
     }).select('totalBoxes orderNumber');
 
-    console.log('Found orders for this company:', orders.length);
+     
     console.log('Orders:', orders.map(o => ({ orderNumber: o.orderNumber, totalBoxes: o.totalBoxes })));
 
     // Calculate totals
@@ -258,14 +258,14 @@ router.get('/company/:companyId', auth, async (req, res) => {
     const boxRate = company.rates?.boxRate || 0;
     const totalAmount = totalBoxes * boxRate;
 
-    console.log('Calculation: totalBoxes =', totalBoxes, '× boxRate =', boxRate, '= totalAmount =', totalAmount);
+     
 
     // Get payments
     const { totalPaid } = await calculateLogisticsPayments(companyId);
-    console.log('Total paid:', totalPaid);
+     
     
     const outstandingBalance = Math.max(0, totalAmount - totalPaid);
-    console.log('Outstanding balance:', outstandingBalance);
+     
 
     res.json({
       success: true,
@@ -304,12 +304,12 @@ router.get('/company/:companyId/orders', auth, async (req, res) => {
     const { companyId } = req.params;
     const { dateFrom, dateTo, paymentStatus, limit = 100 } = req.query;
 
-    console.log('GET /company/:companyId/orders - Received companyId:', companyId);
-    console.log('Query params:', { dateFrom, dateTo, paymentStatus, limit });
+     
+     
 
     // Validate company ID
     if (!mongoose.Types.ObjectId.isValid(companyId)) {
-      console.log('Invalid company ID format:', companyId);
+       
       return res.status(400).json({
         success: false,
         message: 'Invalid company ID'
@@ -318,7 +318,7 @@ router.get('/company/:companyId/orders', auth, async (req, res) => {
 
     // Get company to fetch box rate
     const company = await LogisticsCompany.findById(companyId);
-    console.log('Found company:', company ? company.name : 'NOT FOUND');
+     
     
     if (!company) {
       return res.status(404).json({
@@ -335,7 +335,7 @@ router.get('/company/:companyId/orders', auth, async (req, res) => {
       status: 'confirmed'
     };
     
-    console.log('Querying DispatchOrders with:', query);
+     
 
     // Filter by date range
     if (dateFrom || dateTo) {
@@ -351,7 +351,7 @@ router.get('/company/:companyId/orders', auth, async (req, res) => {
       .sort({ dispatchDate: -1 })
       .limit(parseInt(limit));
 
-    console.log('Found orders count:', orders.length);
+     
     console.log('Order details:', orders.map(o => ({ 
       orderNumber: o.orderNumber, 
       logisticsCompany: o.logisticsCompany?.toString(), 

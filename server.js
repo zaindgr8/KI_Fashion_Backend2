@@ -89,7 +89,7 @@ app.use(
 
       // Check if origin is in allowed list
       if (uniqueOrigins.indexOf(origin) !== -1) {
-        console.log("CORS allowed origin:", origin);
+         
         return callback(null, true);
       } else {
         console.error("CORS blocked origin:", origin);
@@ -212,10 +212,10 @@ const { startReservationCleanup } = require('./utils/reservation-cleanup');
 // Try the requested port, but fall back to the next one if it's already in use.
 const startServer = (port, attemptsLeft) => {
   const server = app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
-    console.log(`Environment: ${process.env.NODE_ENV || "development"}`);
-    console.log(`CORS enabled for ${uniqueOrigins.length} origins`);
-    console.log("Allowed origins:", uniqueOrigins);
+     
+     
+     
+     
     // Start periodic stock reservation cleanup
     startReservationCleanup();
   });

@@ -31,7 +31,7 @@ function initializeGCS() {
     try {
       // Try parsing as JSON string
       credentials = JSON.parse(process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON);
-      console.log('GCS: Using credentials from GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable');
+       
     } catch (error) {
       throw new Error(
         'Failed to parse GOOGLE_APPLICATION_CREDENTIALS_JSON. ' +
@@ -53,7 +53,7 @@ function initializeGCS() {
     try {
       const credentialsContent = fs.readFileSync(credentialsPath, 'utf8');
       credentials = JSON.parse(credentialsContent);
-      console.log(`GCS: Using credentials from file: ${credentialsPath}`);
+       
     } catch (error) {
       throw new Error(
         `Failed to read or parse credentials file at ${credentialsPath}. ` +
@@ -78,7 +78,7 @@ function initializeGCS() {
       try {
         const credentialsContent = fs.readFileSync(defaultCredentialsPath, 'utf8');
         credentials = JSON.parse(credentialsContent);
-        console.log(`GCS: Using credentials from default file: ${defaultCredentialsPath}`);
+         
       } catch (error) {
         throw new Error(
           `Failed to read or parse default credentials file at ${defaultCredentialsPath}. ` +
@@ -110,15 +110,15 @@ function initializeGCS() {
       credentials: credentials
     });
 
-    console.log(`GCS: Initialized successfully for project ${credentials.project_id}, bucket: ${bucketName}`);
-    console.log(`GCS: Service account: ${credentials.client_email}`);
+     
+     
     
     // Verify bucket access and permissions
     const bucket = storage.bucket(bucketName);
     bucket.exists()
       .then(([exists]) => {
         if (exists) {
-          console.log(`GCS: Bucket "${bucketName}" exists and is accessible`);
+           
         } else {
           console.warn(`GCS: WARNING - Bucket "${bucketName}" does not exist or is not accessible`);
         }

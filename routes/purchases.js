@@ -540,9 +540,9 @@ router.get('/', auth, async (req, res) => {
       // Map items and collect image keys
       const items = (purchase.items || []).map(item => {
         // Debug logs
-        console.log('===== ITEM DEBUG =====');
-        console.log('item:', item);
-        console.log('item.landedPrice:', item.landedPrice);
+         
+         
+         
         
         // Collect image keys for batch signing (only from productImage as requested)
         if (Array.isArray(item.productImage)) {
@@ -613,9 +613,9 @@ router.get('/', auth, async (req, res) => {
       }
 
       // Debug logs for purchase
-      console.log('===== PURCHASE DEBUG =====');
-      console.log('purchase.landedPrice:', purchase.landedPrice);
-      console.log('extracted purchaseLandedPrice:', purchaseLandedPrice);
+       
+       
+       
 
       return {
         id: purchase._id.toString(),

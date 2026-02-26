@@ -12,7 +12,7 @@ const connectDB = async () => {
       // Keep connections alive
       maxIdleTimeMS: 30000,
     });
-    console.log(`MongoDB Connected: ${conn.connection.host}`);
+     
   } catch (error) {
     console.error('Database connection failed:', error.message);
     process.exit(1);

@@ -972,7 +972,7 @@ router.post('/manual', auth, async (req, res) => {
           description: `Credit application for Manual Purchase ${dispatchOrder.orderNumber} from existing supplier overpayment`,
           createdBy: req.user._id
         });
-        console.log(`[Manual Entry] Created credit application ledger entry: €${creditApplied}`);
+         
       } catch (creditError) {
         console.error(`Error creating credit application ledger entry:`, creditError);
       }
@@ -1120,7 +1120,7 @@ router.post('/manual', auth, async (req, res) => {
               // Don't fail the entire creation if product image save fails
             }
           } else {
-            console.log(`[Manual Entry] All images already exist in product ${productObj.name || productObj._id}`);
+             
           }
         }
 
@@ -1683,7 +1683,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // This ensures atomicity - if products/inventory fail, nothing else happens
     // ==========================================
 
-    console.log(`[Confirm Order] Starting product/inventory processing for dispatch order ${dispatchOrder.orderNumber}`);
+     
 
     // Track results for each item
     const inventoryResults = [];
@@ -1747,7 +1747,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         const productCodeUpper = productCodeTrimmed.toUpperCase();
         const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
 
-        console.log(`[Confirm Order] Looking for product with code: "${productCodeTrimmed}" from supplier: ${supplierId}`);
+         
 
         // First, try to find a product with matching SKU AND supplier
         let product = await Product.findOne({
@@ -1758,7 +1758,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         if (product) {
           console.log(`[Confirm Order] Found existing product for supplier: ${product.name} (SKU: ${product.sku}, Supplier: ${product.supplier}, isActive: ${product.isActive})`);
         } else {
-          console.log(`[Confirm Order] Product not found for supplier ${supplierId}, will create new product with code: "${productCodeTrimmed}"`);
+           
         }
 
         if (!product) {
@@ -1852,7 +1852,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
           if (product.pricing.costPrice !== landedPrice) {
             product.pricing.costPrice = landedPrice;
             productNeedsSave = true;
-            console.log(`[Confirm Order] Updated product cost price: ${product.name} -> ${landedPrice}`);
+             
           }
 
           // Always ensure product is active before proceeding
@@ -1917,7 +1917,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         // CRITICAL: Update item.product so barcode generation can use the correct product ID
         // This ensures barcodes match what's stored in PacketStock
         item.product = product._id;
-        console.log(`[Confirm Order] Updated item.product to ${product._id} for barcode consistency`);
+         
 
         // Find or create Inventory
         let inventory = await Inventory.findOne({ product: product._id });
@@ -2012,7 +2012,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
           inventory.recalculateAverageCost();
           await inventory.save();
 
-          console.log(`[Confirm Order] Added ${confirmedQuantity} units with variants and batch tracking to inventory for ${product.name}`);
+           
 
           // ==========================================
           // CREATE PACKET STOCK ENTRIES FOR BARCODE-BASED SELLING
@@ -2047,7 +2047,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             // ==========================================
             // LOOSE ITEMS: Create separate barcode for each color/size combination
             // ==========================================
-            console.log(`[Confirm Order] Processing loose items for ${product.name}`);
+             
             
             // Merge all compositions from loose packets and group by color/size
             const looseItemGroups = new Map();
@@ -2182,7 +2182,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     costPerPacket,
                     landedPerPacket
                   );
-                  console.log(`[Confirm Order] Added ${packetGroup.count} packets to existing PacketStock ${barcode}`);
+                   
                 } else {
                   // Create new packet stock
                   // Generate barcode image
@@ -2213,7 +2213,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     }]
                   });
                   await packetStock.save();
-                  console.log(`[Confirm Order] Created new PacketStock ${barcode} with ${packetGroup.count} packets`);
+                   
                 }
               } catch (packetStockError) {
                 console.error(`[Confirm Order] Failed to create/update PacketStock for barcode ${barcode}:`, packetStockError.message);
@@ -2231,7 +2231,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             req.user._id,
             `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed quantity`
           );
-          console.log(`[Confirm Order] Added ${confirmedQuantity} units with batch tracking to inventory for ${product.name}`);
+           
 
           // ==========================================
           // CREATE LOOSE ITEM PACKET STOCK ENTRIES
@@ -2271,7 +2271,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 batchInfo.costPrice,
                 batchInfo.landedPrice
               );
-              console.log(`[Confirm Order] Added ${confirmedQuantity} loose items to existing PacketStock ${looseBarcode}`);
+               
             } else {
               // Create new packet stock for loose items
               // Generate barcode image (need bwipjs for this block too)
@@ -2317,7 +2317,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 }]
               });
               await packetStock.save();
-              console.log(`[Confirm Order] Created new loose item PacketStock ${looseBarcode} with ${confirmedQuantity} items`);
+               
             }
           } catch (looseStockError) {
             console.error(`[Confirm Order] Failed to create/update loose PacketStock ${looseBarcode}:`, looseStockError.message);
@@ -2338,7 +2338,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         if (savedInventory && !savedInventory.isActive) {
           savedInventory.isActive = true;
           await savedInventory.save();
-          console.log(`[Confirm Order] Final fix: Activated inventory for product ${product.name}`);
+           
         }
 
         console.log(`[Confirm Order] Inventory verification for ${product.name}:`, {
@@ -2389,7 +2389,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     const failCount = inventoryResults.filter(r => !r.success && !r.skipped).length;
     const skippedCount = inventoryResults.filter(r => r.skipped).length;
 
-    console.log(`[Confirm Order] Processed ${dispatchOrder.items.length} items: ${successCount} succeeded, ${failCount} failed, ${skippedCount} skipped`);
+     
 
     // If ANY items failed (excluding skipped), abort the entire confirmation
     if (failCount > 0) {
@@ -2410,7 +2410,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // STEP 2: All products/inventory succeeded - now update order status
     // ==========================================
 
-    console.log(`[Confirm Order] All items processed successfully. Updating order status...`);
+     
 
     // Update dispatch order
     dispatchOrder.status = 'confirmed';
@@ -2455,7 +2455,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // STEP 3: Create ledger entries
     // ==========================================
 
-    console.log(`[Confirm Order] Creating ledger entries...`);
+     
 
     // Create ledger entry for purchase (debit) - use supplierPaymentTotal (what admin owes supplier)
     await Ledger.createEntry({
@@ -2502,7 +2502,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         },
         createdBy: req.user._id
       });
-      console.log(`[Confirm Order] Created cash payment ledger entry: £${cashPaymentAmount}`);
+       
     }
 
     if (bankPaymentAmount > 0) {
@@ -2525,7 +2525,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         },
         createdBy: req.user._id
       });
-      console.log(`[Confirm Order] Created bank payment ledger entry: £${bankPaymentAmount}`);
+       
     }
 
     // Credit application entry - DISABLED (automatic credit application disabled)
@@ -2574,7 +2574,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // ==========================================
     // STEP 5: Generate and save barcodes (AFTER inventory processing)
     // ==========================================
-    console.log(`[Confirm Order] Generating barcodes for order ${dispatchOrder.orderNumber}...`);
+     
     
     try {
       const bwipjs = require('bwip-js');
@@ -2714,7 +2714,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
       dispatchOrder.barcodeData = barcodeResults;
       dispatchOrder.barcodeGeneratedAt = new Date();
       
-      console.log(`[Confirm Order] Generated ${barcodeResults.length} barcodes with dataURLs for order ${dispatchOrder.orderNumber}`);
+       
       
     } catch (barcodeError) {
       console.error('Barcode generation error:', barcodeError);
@@ -2950,7 +2950,7 @@ router.post('/:id/return', auth, async (req, res) => {
       };
 
       console.log(`[Return] Updated order remainingBalance: €${currentOrderRemaining.toFixed(2)} -> €${newOrderRemaining.toFixed(2)} (return value: €${totalReturnValue.toFixed(2)})`);
-      console.log(`[Return] Supplier balance updated: ${currentSupplierBalance} -> ${newSupplierBalance}`);
+       
 
 
       // Reduce inventory for returned items
@@ -2972,7 +2972,7 @@ router.post('/:id/return', auth, async (req, res) => {
                 `Return of ${returnItem.returnedQuantity} units - Reason: ${returnItem.reason || 'Not specified'}`
               );
 
-              console.log(`[Return] Reduced inventory for ${item.productCode}: -${returnItem.returnedQuantity} units`);
+               
             } else {
               console.warn(`[Return] No inventory record found for product ${item.product}`);
             }
@@ -3469,7 +3469,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
                 // Don't fail the entire confirmation if product image save fails
               }
             } else {
-              console.log(`[Dispatch Order QR Confirm] All images already exist in product ${product.name || product._id}`);
+               
             }
           }
 
@@ -3582,7 +3582,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       const failCount = inventoryResults.filter(r => !r.success && !r.skipped).length;
       const skippedCount = inventoryResults.filter(r => r.skipped).length;
 
-      console.log(`[Inventory Update - QR] Processed ${dispatchOrder.items.length} items: ${successCount} succeeded, ${failCount} failed, ${skippedCount} skipped`);
+       
 
       // If all items failed (and at least one was attempted), throw error
       if (successCount === 0 && (failCount > 0 || (dispatchOrder.items.length > 0 && skippedCount < dispatchOrder.items.length))) {
@@ -3608,7 +3608,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       };
       await dispatchOrder.save();
 
-      console.log(`[Inventory Update - QR] Rolled back confirmation for dispatch order ${dispatchOrder.orderNumber}`);
+       
 
       return sendResponse.error(res,
         `Confirmation failed: ${inventoryError.message}. The order remains pending. Please check the error logs and fix any issues before confirming again.`,
@@ -3800,10 +3800,10 @@ router.delete('/:id', auth, async (req, res) => {
 
           return imagesToDelete.map(async (imageUrl) => {
             try {
-              console.log('Deleting image from GCS:', imageUrl);
+               
               const deleted = await deleteImage(imageUrl);
               if (deleted) {
-                console.log('Successfully deleted image:', imageUrl);
+                 
               } else {
                 console.warn('Image not found or already deleted:', imageUrl);
               }
@@ -3820,7 +3820,7 @@ router.delete('/:id', auth, async (req, res) => {
 
       // Wait for all image deletions to complete (or fail)
       await Promise.allSettled(imageDeletionPromises);
-      console.log('Completed image deletion process for dispatch order:', req.params.id);
+       
     }
 
     // Delete the dispatch order from database
@@ -3954,7 +3954,7 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
       return sendResponse.error(res, 'File not found in cloud storage. Upload may have failed.', 400);
     }
 
-    console.log('File verified in GCS:', filePath);
+     
 
     // Get the full GCS URL (match format returned by uploadImage function)
     const { getBucketName } = require('../config/gcs');
@@ -3976,7 +3976,7 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
       await dispatchOrder.save();
       console.log('Image URL saved to dispatch order item (appended to array)');
     } else {
-      console.log('Image URL already exists in array, skipping duplicate');
+       
       await dispatchOrder.save();
     }
 
@@ -3995,7 +3995,7 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
           if (!product.images.includes(url)) {
             product.images.push(url);
             await product.save();
-            console.log('Image added to existing product:', product._id);
+             
           }
         }
       } catch (productError) {
@@ -4007,7 +4007,7 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
     // Generate signed read URL for immediate display
     const signedImageUrl = await generateSignedUrl(url);
 
-    console.log('Upload confirmed successfully');
+     
 
     return sendResponse.success(res, {
       imageUrl: signedImageUrl,
@@ -4078,7 +4078,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
 
     // Handle base64 JSON upload (mobile app)
     if (isBase64Upload && req.body.image) {
-      console.log('Processing base64 image upload');
+       
 
       const base64String = req.body.image;
       const providedFileName = req.body.fileName || `dispatch-order-${req.params.id}-item-${itemIndex}.jpg`;
@@ -4116,7 +4116,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
     }
     // Handle FormData upload (web app)
     else if (req.file) {
-      console.log('Processing FormData file upload');
+       
       fileBuffer = req.file.buffer;
       fileName = req.file.originalname;
       mimeType = req.file.mimetype;
@@ -4161,14 +4161,14 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
       return sendResponse.error(res, validation.error, 400);
     }
 
-    console.log('File validation passed, uploading to GCS...');
+     
 
     // Upload to GCS - use dispatch order ID and item index for path
     let url;
     try {
       const uploadResult = await uploadImage(fileForProcessing, `dispatch-${dispatchOrder._id.toString()}-item-${itemIndex}`);
       url = uploadResult.url;
-      console.log('Image uploaded to GCS successfully:', url);
+       
     } catch (uploadError) {
       console.error('GCS upload error:', {
         message: uploadError.message,
@@ -4205,7 +4205,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
         return sendResponse.error(res, `Failed to save image URL: ${saveError.message}`, 500);
       }
     } else {
-      console.log('Image URL already exists in array, skipping duplicate');
+       
       // Still save to ensure any schema changes are applied
       try {
         await dispatchOrder.save();
@@ -4244,7 +4244,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
         product.images.unshift(url);
         try {
           await product.save();
-          console.log(`[Dispatch Order] Added image to product ${product.name || product._id}`);
+           
         } catch (productSaveError) {
           console.error(`[Dispatch Order] Failed to save image to product ${product.name || product._id}:`, {
             message: productSaveError.message,
@@ -4253,7 +4253,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
           // Don't fail the request if product save fails - dispatch order is already saved
         }
       } else {
-        console.log(`[Dispatch Order] Image already exists in product ${product.name || product._id}`);
+         
       }
     } else {
       console.warn(`[Dispatch Order] Could not find product for item ${itemIndex}. ProductCode: ${item.productCode}, Product ID: ${item.product}`);
@@ -4263,7 +4263,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
     let signedImageUrl;
     try {
       signedImageUrl = await generateSignedUrl(url);
-      console.log('Signed URL generated successfully');
+       
     } catch (signedUrlError) {
       console.error('Failed to generate signed URL:', {
         message: signedUrlError.message,
@@ -4326,11 +4326,11 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
         });
       }
       // If validBarcodes.length === 0, fall through to regeneration
-      console.log(`[Barcode-Data] Existing barcodes are invalid for order ${dispatchOrder.orderNumber}, regenerating...`);
+       
     }
 
     // No valid barcodes found - AUTO-REGENERATE instead of returning empty
-    console.log(`[Barcode-Data] Auto-generating barcodes for order ${dispatchOrder.orderNumber}`);
+     
     
     const bwipjs = require('bwip-js');
     const barcodeResults = [];
@@ -4475,7 +4475,7 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
       dispatchOrder.barcodeData = barcodeResults;
       dispatchOrder.barcodeGeneratedAt = new Date();
       await dispatchOrder.save();
-      console.log(`[Barcode-Data] Generated and saved ${barcodeResults.length} barcodes for order ${dispatchOrder.orderNumber}`);
+       
     }
 
     return sendResponse.success(res, {
@@ -4524,7 +4524,7 @@ router.get('/:id/barcodes', async (req, res) => {
       }, 'Barcodes already exist');
     }
     
-    console.log(`[Barcodes] ${forceRegenerate ? 'Force regenerating' : 'Generating'} barcodes for order ${dispatchOrder.orderNumber}`);
+     
 
     // Generate new barcodes using simplified logic like QR codes
     const bwipjs = require('bwip-js');
@@ -4546,9 +4546,9 @@ router.get('/:id/barcodes', async (req, res) => {
         });
         if (product) {
           productId = product._id.toString();
-          console.log(`[Barcodes] Found product ${product._id} for code ${item.productCode}`);
+           
         } else {
-          console.log(`[Barcodes] No product found for code ${item.productCode}, using 'manual'`);
+           
         }
       }
       
@@ -4678,7 +4678,7 @@ router.get('/:id/barcodes', async (req, res) => {
     dispatchOrder.barcodeGeneratedAt = new Date();
     await dispatchOrder.save();
 
-    console.log(`[Barcodes] Generated and saved ${barcodeResults.length} barcodes for order ${dispatchOrder.orderNumber}`);
+     
 
     // Return JSON response
     return sendResponse.success(res, {

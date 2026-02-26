@@ -18,7 +18,6 @@ async function cleanupExpiredReservations() {
 
     if (expiredSales.length === 0) return;
 
-    console.log(`[Reservation Cleanup] Found ${expiredSales.length} expired reservations`);
 
     for (const sale of expiredSales) {
       const session = await mongoose.startSession();
@@ -65,7 +64,6 @@ async function cleanupExpiredReservations() {
 
         await session.commitTransaction();
         session.endSession();
-        console.log(`[Reservation Cleanup] Released stock for sale ${sale.saleNumber}`);
       } catch (error) {
         await session.abortTransaction();
         session.endSession();
@@ -81,7 +79,6 @@ async function cleanupExpiredReservations() {
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
 
 function startReservationCleanup() {
-  console.log('[Reservation Cleanup] Starting periodic cleanup (every 5 minutes)');
   // Run once on startup after a short delay
   setTimeout(cleanupExpiredReservations, 10000);
   // Then run periodically

@@ -99,18 +99,18 @@ router.post('/customer', auth, async (req, res) => {
     // Get pending sales for FIFO distribution
     const pendingSales = await BalanceService.getPendingSalesForBuyer(customerId, session);
 
-    console.log("\n========== CUSTOMER PAYMENT CREATION ==========");
-    console.log(`Payment Number: ${paymentNumber}`);
+     
+     
     console.log(`Customer: ${customer.name} (${customerId})`);
     console.log(`Amount: £${parseFloat(amount).toFixed(2)}`);
-    console.log(`Method: ${paymentMethod}`);
-    console.log(`Direction: ${paymentDirection}`);
+     
+     
     if (paymentDirection === 'debit') {
-      console.log(`Debit Reason: ${debitReason}`);
+       
     }
     console.log(`Balance Before: £${balanceBefore.toFixed(2)}`);
-    console.log(`Pending Sales: ${pendingSales.length}`);
-    console.log("================================================\n");
+     
+     
 
     const distributions = [];
     let remainingAmount = parseFloat(amount);
@@ -184,12 +184,12 @@ router.post('/customer', auth, async (req, res) => {
       await payment.save({ session });
       await session.commitTransaction();
 
-      console.log("\n========== DEBIT PAYMENT CREATED ==========");
-      console.log(`Payment Number: ${paymentNumber}`);
-      console.log(`Debit Reason: ${debitReasonLabels[debitReason]}`);
+       
+       
+       
       console.log(`Amount: £${parseFloat(amount).toFixed(2)}`);
       console.log(`Balance After: £${balanceAfterDebit.toFixed(2)}`);
-      console.log("============================================\n");
+       
 
       const populatedPayment = await Payment.findById(payment._id)
         .populate('customerId', 'name company email phone')
@@ -384,13 +384,13 @@ router.post('/customer', auth, async (req, res) => {
     // Commit transaction
     await session.commitTransaction();
 
-    console.log("\n========== PAYMENT CREATED SUCCESSFULLY ==========");
-    console.log(`Payment Number: ${paymentNumber}`);
+     
+     
     console.log(`Total Amount: £${parseFloat(amount).toFixed(2)}`);
     console.log(`Sales Affected: ${distributions.filter(d => !d.isAdvance).length}`);
     console.log(`Advance Amount: £${advanceAmount.toFixed(2)}`);
     console.log(`Balance After: £${balanceAfter.toFixed(2)}`);
-    console.log("==================================================\n");
+     
 
     // Populate response data
     const populatedPayment = await Payment.findById(payment._id)
@@ -629,11 +629,11 @@ router.post('/:paymentNumber/reverse', auth, async (req, res) => {
       });
     }
 
-    console.log("\n========== PAYMENT REVERSAL ==========");
-    console.log(`Payment Number: ${paymentNumber}`);
+     
+     
     console.log(`Original Amount: £${payment.totalAmount.toFixed(2)}`);
-    console.log(`Reason: ${reason}`);
-    console.log("=======================================\n");
+     
+     
 
     const reversalLedgerEntries = [];
 
@@ -704,10 +704,10 @@ router.post('/:paymentNumber/reverse', auth, async (req, res) => {
     // Commit transaction
     await session.commitTransaction();
 
-    console.log("\n========== REVERSAL COMPLETE ==========");
-    console.log(`Payment ${paymentNumber} has been reversed`);
-    console.log(`${reversalLedgerEntries.length} ledger entries created for reversal`);
-    console.log("========================================\n");
+     
+     
+     
+     
 
     // Get updated payment
     const updatedPayment = await Payment.findById(payment._id)

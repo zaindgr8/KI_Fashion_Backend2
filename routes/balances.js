@@ -111,7 +111,7 @@ router.get('/pending', auth, async (req, res) => {
           }, 0);
 
           // Debug logging for payment tracking (after all calculations)
-          console.log(`[Pending Balances] Order ${order.orderNumber}: totalAmount=${totalAmount}, discount=${discount}, cashPaid=${cashPaid}, bankPaid=${bankPaid}, returnAmount=${returnAmount}, totalPaid=${totalPaid}, remaining=${remainingBalance}, paymentEntries=${paymentEntries.length}`);
+           
 
           // Determine cashPending and bankPending based on payment history
           let cashPending = 0;

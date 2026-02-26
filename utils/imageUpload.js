@@ -73,7 +73,7 @@ async function uploadImage(file, productId) {
       if (!bucket) {
         throw new Error('GCS bucket is not initialized');
       }
-      console.log('GCS bucket retrieved:', bucket.name);
+       
     } catch (bucketError) {
       console.error('GCS bucket initialization error:', {
         message: bucketError.message,
@@ -87,7 +87,7 @@ async function uploadImage(file, productId) {
     const sanitizedOriginalName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
     const fileName = `products/${productId}/${timestamp}-${sanitizedOriginalName}`;
 
-    console.log('Uploading to GCS path:', fileName);
+     
 
     // Create file reference in bucket
     const bucketFile = bucket.file(fileName);
@@ -119,13 +119,13 @@ async function uploadImage(file, productId) {
       // Make file publicly accessible (bucket has allUsers access, but objects need to be made public)
       try {
         await bucketFile.makePublic();
-        console.log('File made public successfully:', fileName);
+         
       } catch (makePublicError) {
         console.warn('Could not make file public (may already be public or bucket-level permissions apply):', makePublicError.message);
         // Continue anyway - bucket-level permissions might be sufficient
       }
 
-      console.log('File saved to GCS successfully:', fileName);
+       
     } catch (saveError) {
       console.error('GCS file save error:', {
         message: saveError.message,
@@ -203,7 +203,7 @@ async function deleteImage(imageUrl) {
 
     // Delete file
     await bucketFile.delete();
-    console.log(`Successfully deleted image from GCS: ${fileName}`);
+     
     return true;
   } catch (error) {
     console.error('Error deleting image from GCS:', error);
@@ -468,7 +468,7 @@ async function generateSignedUploadUrl(filePath, mimeType, expiresInMinutes = 15
       throw new Error('Failed to generate signed upload URL');
     }
 
-    console.log('Signed upload URL generated successfully');
+     
 
     return signedUrl;
   } catch (error) {

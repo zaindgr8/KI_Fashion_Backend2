@@ -15,9 +15,9 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/ki_fas
 
 async function migrate() {
     try {
-        console.log('Connecting to MongoDB...');
+         
         await mongoose.connect(MONGODB_URI);
-        console.log('Connected to MongoDB');
+         
 
         const Product = require('../models/Product');
         const Inventory = require('../models/Inventory');
@@ -30,7 +30,7 @@ async function migrate() {
             ]
         });
 
-        console.log(`Found ${productsWithoutSupplier.length} products without supplier`);
+         
 
         let updated = 0;
         let skipped = 0;
@@ -73,10 +73,10 @@ async function migrate() {
                         { $set: { supplier: supplierId } }
                     );
                     updated++;
-                    console.log(`✓ Updated product ${product.sku} with supplier ${supplierId}`);
+                     
                 } else {
                     skipped++;
-                    console.log(`⚠ Skipped product ${product.sku} - no supplier found`);
+                     
                 }
             } catch (err) {
                 errors++;
@@ -84,14 +84,14 @@ async function migrate() {
             }
         }
 
-        console.log('\n=== Migration Summary ===');
-        console.log(`Total products without supplier: ${productsWithoutSupplier.length}`);
-        console.log(`Updated: ${updated}`);
+         
+         
+         
         console.log(`Skipped (no supplier found): ${skipped}`);
-        console.log(`Errors: ${errors}`);
+         
 
         // Drop the old unique index on sku and create new compound index
-        console.log('\n=== Updating Indexes ===');
+         
         try {
             const collection = mongoose.connection.collection('products');
 
@@ -102,22 +102,22 @@ async function migrate() {
             // Drop old sku_1 unique index if it exists
             const skuIndex = indexes.find(i => i.name === 'sku_1' && i.unique);
             if (skuIndex) {
-                console.log('Dropping old sku_1 unique index...');
+                 
                 await collection.dropIndex('sku_1');
-                console.log('Old index dropped');
+                 
             }
 
             // The new compound index {sku: 1, supplier: 1} should be created by Mongoose
             // when the model is loaded with the updated schema
-            console.log('New compound index will be created on next app start');
+             
 
         } catch (indexError) {
             console.error('Index update error:', indexError.message);
-            console.log('Note: You may need to manually update indexes');
+             
         }
 
         await mongoose.disconnect();
-        console.log('\nMigration complete!');
+         
 
     } catch (error) {
         console.error('Migration failed:', error);

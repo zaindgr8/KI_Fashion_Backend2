@@ -155,7 +155,7 @@ router.get('/universal-search', auth, async (req, res) => {
         try {
           supplier = await Supplier.findById(supplierId).select('name company').lean();
         } catch (err) {
-          console.log('Supplier not found:', supplierId);
+           
         }
         
         productResults.push({
@@ -195,7 +195,7 @@ router.get('/universal-search', auth, async (req, res) => {
     packetResults.sort(sortByRelevance);
     productResults.sort(sortByRelevance);
 
-    console.log(`[Universal Search] Query: "${searchTerm}" - Found ${packetResults.length} packets, ${productResults.length} products`);
+     
 
     return sendResponse.success(res, {
       packets: packetResults,
@@ -406,7 +406,7 @@ router.get('/products-for-return', auth, async (req, res) => {
         isActive: true,
         'purchaseBatches.0': { $exists: true }
       });
-      console.log(`[Returns] Debug: Total active inventories: ${totalInventoryCount}, With batches: ${batchCount}`);
+       
     }
 
     return sendResponse.success(res, result);
@@ -477,7 +477,7 @@ router.get('/packet-stocks-for-return', auth, async (req, res) => {
         : ps.availablePackets * ps.totalItemsPerPacket
     }));
 
-    console.log(`[Returns] Found ${result.length} packet stocks for supplier ${supplierId}`);
+     
     return sendResponse.success(res, result);
 
   } catch (error) {

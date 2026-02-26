@@ -320,7 +320,7 @@ router.get("/suppliers", auth, async (req, res) => {
       totalBalance = await BalanceService.getTotalSupplierBalance();
     }
 
-    console.log("totalBalance:", totalBalance);
+     
 
     res.json({
       success: true,
@@ -619,7 +619,7 @@ router.post("/entry", auth, async (req, res) => {
       entryData.transactionType === "payment" &&
       (!entryData.referenceId || entryData.referenceId === "none")
     ) {
-      console.log(`[LEDGER ENTRY] Taking UNIVERSAL PAYMENT route`);
+       
       // Universal payment - distribute across pending orders
       const { entityId, paymentMethod, credit } = entryData;
 
@@ -659,7 +659,7 @@ router.post("/entry", auth, async (req, res) => {
       entryData.referenceModel === "DispatchOrder" &&
       entryData.transactionType === "payment"
     ) {
-      console.log(`[LEDGER ENTRY] Taking DISPATCH ORDER PAYMENT route`);
+       
 
       const { referenceId, entityId, paymentMethod, paymentDetails } =
         entryData;
@@ -744,7 +744,7 @@ router.post("/entry", auth, async (req, res) => {
       // Calculate remaining balance for this specific order
       const orderRemainingBalance = totalAmount - totalPaid;
 
-      console.log(`[Payment Check] Order: ${dispatchOrder.orderNumber}`);
+       
       console.log(`[Payment Check] Total amount: €${totalAmount.toFixed(2)}`);
       console.log(`[Payment Check] Total paid: €${totalPaid.toFixed(2)}`);
       console.log(`[Payment Check] Order remaining: €${orderRemainingBalance.toFixed(2)}`);
@@ -762,7 +762,7 @@ router.post("/entry", auth, async (req, res) => {
       const newPaymentTotal = cashPayment + bankPayment;
 
       console.log(`[Payment Check] New payment: €${newPaymentTotal.toFixed(2)}`);
-      console.log(`[Payment Check] Will split: ${newPaymentTotal > orderRemainingBalance}`);
+       
 
       // CHECK IF PAYMENT EXCEEDS ORDER REMAINING - SPLIT IT
       if (newPaymentTotal > orderRemainingBalance && orderRemainingBalance > 0) {
@@ -835,7 +835,7 @@ router.post("/entry", auth, async (req, res) => {
           await dispatchOrder.save({ session });
           await session.commitTransaction();
 
-          console.log(`[Payment Split] Successfully split payment and updated order`);
+           
 
           return res.status(201).json({
             success: true,

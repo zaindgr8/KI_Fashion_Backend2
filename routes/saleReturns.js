@@ -529,7 +529,7 @@ async function processSaleReturn(returnId, userId) {
           if (packetStock) {
             // Priority: Usage of explicit return composition
             if (item.returnComposition && item.returnComposition.length > 0) {
-              console.log(`[Sale Return] Using explicit return composition for restoration`);
+               
 
               for (const comp of item.returnComposition) {
                 // Create or find loose stock for this variant
@@ -551,7 +551,7 @@ async function processSaleReturn(returnId, userId) {
                 if (looseStock) {
                   looseStock.availablePackets += comp.quantity;
                   await looseStock.save({ session });
-                  console.log(`[Sale Return] Restored ${comp.quantity} ${comp.size}/${comp.color} to loose stock ${looseStock.barcode}`);
+                   
                 }
               }
             } else {
@@ -653,7 +653,7 @@ async function processSaleReturn(returnId, userId) {
 
     await session.commitTransaction();
     session.endSession();
-    console.log(`[Sale Return] Successfully processed return ${returnId} with transaction`);
+     
 
   } catch (error) {
     await session.abortTransaction();

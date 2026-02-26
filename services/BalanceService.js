@@ -368,7 +368,7 @@ static async getSupplierBalanceSummary(supplierId) {
     });
 
     console.log(`\n========== TOTAL SUPPLIER BALANCE (All Suppliers) ==========`);
-    console.log(`Number of suppliers with ledger entries: ${supplierIds.length}\n`);
+     
 
     const balances = await Promise.all(
       supplierIds.map(id => this.getSupplierBalance(id))
@@ -380,7 +380,7 @@ static async getSupplierBalanceSummary(supplierId) {
 
     console.log(`Balances for each supplier: [ ${balances.map(b => (b || 0).toFixed(2)).join(', ')} ]`);
     console.log(`totalBalance: ${roundedTotal.toFixed(2)}`);
-    console.log(`=========================================\n`);
+     
 
     return roundedTotal;
   }
@@ -610,15 +610,15 @@ static async getSupplierBalanceSummary(supplierId) {
       const pendingOrders = await this.getPendingOrdersForSupplier(supplierId, session);
 
       console.log("\n========== PAYMENT DISTRIBUTION (FIFO) ==========");
-      console.log(`Supplier ID: ${supplierId}`);
+       
       console.log(`Payment Amount: €${amount.toFixed(2)}`);
-      console.log(`Payment Method: ${paymentMethod}`);
+       
       console.log(`Using Transaction: ${!useExternalSession ? 'Yes (internal)' : 'Yes (external)'}`);
       console.log(`Pending Orders (sorted by confirmation date - first confirmed first):`);
       pendingOrders.forEach((order, index) => {
         console.log(`  ${index + 1}. ${order.orderNumber} - Remaining: €${order.remainingBalance.toFixed(2)} (Confirmed: ${order.confirmedAt})`);
       });
-      console.log("=================================================\n");
+       
 
       let result;
 
@@ -645,12 +645,12 @@ static async getSupplierBalanceSummary(supplierId) {
           }
         }, session);
 
-        console.log("\n========== DISTRIBUTION COMPLETE ==========");
+         
         console.log(`Total Distributed: €${amount.toFixed(2)}`);
-        console.log(`Orders Affected: 0`);
-        console.log(`Fully Paid Orders: 0`);
+         
+         
         console.log(`Advance/Credit: €${amount.toFixed(2)}`);
-        console.log("==========================================\n");
+         
 
         result = {
           totalDistributed: amount,
@@ -762,12 +762,12 @@ static async getSupplierBalanceSummary(supplierId) {
           });
         }
 
-        console.log("\n========== DISTRIBUTION COMPLETE ==========");
+         
         console.log(`Total Distributed: €${amount.toFixed(2)}`);
         console.log(`Orders Affected: ${distributions.filter(d => !d.isAdvance).length}`);
         console.log(`Fully Paid Orders: ${distributions.filter(d => d.fullyPaid).length}`);
         console.log(`Advance/Credit: €${(remainingAmount > 0 ? remainingAmount : 0).toFixed(2)}`);
-        console.log("==========================================\n");
+         
 
         result = {
           totalDistributed: amount,
@@ -779,7 +779,7 @@ static async getSupplierBalanceSummary(supplierId) {
       // Commit the transaction if we created our own session
       if (!useExternalSession) {
         await session.commitTransaction();
-        console.log("Transaction committed successfully");
+         
       }
 
       return result;
@@ -872,14 +872,14 @@ static async getSupplierBalanceSummary(supplierId) {
       const pendingSales = await this.getPendingSalesForBuyer(buyerId, session);
 
       console.log("\n========== BUYER PAYMENT DISTRIBUTION (FIFO) ==========");
-      console.log(`Buyer ID: ${buyerId}`);
+       
       console.log(`Payment Amount: £${amount.toFixed(2)}`);
-      console.log(`Payment Method: ${paymentMethod}`);
+       
       console.log(`Pending Sales (sorted by date - oldest first):`);
       pendingSales.forEach((sale, index) => {
         console.log(`  ${index + 1}. ${sale.saleNumber} - Remaining: £${sale.remainingBalance.toFixed(2)} (Date: ${sale.saleDate})`);
       });
-      console.log("=======================================================\n");
+       
 
       let result;
 
@@ -1027,12 +1027,12 @@ static async getSupplierBalanceSummary(supplierId) {
           });
         }
 
-        console.log("\n========== DISTRIBUTION COMPLETE ==========");
+         
         console.log(`Total Distributed: £${amount.toFixed(2)}`);
         console.log(`Sales Affected: ${distributions.filter(d => !d.isAdvance).length}`);
         console.log(`Fully Paid Sales: ${distributions.filter(d => d.fullyPaid).length}`);
         console.log(`Advance/Credit: £${(remainingAmount > 0 ? remainingAmount : 0).toFixed(2)}`);
-        console.log("==========================================\n");
+         
 
         result = {
           totalDistributed: amount,
@@ -1044,7 +1044,7 @@ static async getSupplierBalanceSummary(supplierId) {
       // Commit the transaction if we created our own session
       if (!useExternalSession) {
         await session.commitTransaction();
-        console.log("Buyer payment distribution transaction committed successfully");
+         
       }
 
       return result;

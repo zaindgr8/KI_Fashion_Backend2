@@ -542,7 +542,7 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
     }
 
     default:
-      console.log(`Unhandled event type: ${event.type}`);
+       
   }
 
   res.json({ received: true });
@@ -571,7 +571,7 @@ async function handleSuccessfulPayment(session) {
 
     // Idempotency check: skip if already processed
     if (sale.paymentStatus === 'paid') {
-      console.log(`Sale ${sale.saleNumber} already processed — skipping duplicate webhook`);
+       
       return;
     }
 
@@ -644,7 +644,7 @@ async function handleSuccessfulPayment(session) {
     // Generate invoice and send emails (async)
     generateInvoiceAndSendEmail(sale, userId);
 
-    console.log(`Payment completed for sale ${sale.saleNumber}`);
+     
   } catch (error) {
     console.error('Error handling successful payment:', error);
   }
@@ -671,7 +671,7 @@ async function handleExpiredSession(session) {
       sale.stockReserved = false;
       await sale.save();
 
-      console.log(`Session expired for sale ${sale.saleNumber}, stock released`);
+       
     }
   } catch (error) {
     console.error('Error handling expired session:', error);
@@ -694,7 +694,7 @@ async function handleFailedPayment(paymentIntent) {
       sale.stockReserved = false;
       await sale.save();
 
-      console.log(`Payment failed for sale ${sale.saleNumber}, stock released`);
+       
     }
   } catch (error) {
     console.error('Error handling failed payment:', error);
@@ -712,7 +712,7 @@ async function handleRefund(charge) {
     sale.paymentStatus = 'refunded';
     await sale.save();
 
-    console.log(`Refund processed for sale ${sale.saleNumber}`);
+     
   } catch (error) {
     console.error('Error handling refund:', error);
   }
@@ -755,7 +755,7 @@ async function generateInvoiceAndSendEmail(sale, userId) {
 
     if (distributorEmail || adminEmail) {
       await sendInvoiceEmails(sale, invoicePath, distributorEmail, adminEmail);
-      console.log(`Invoice emails sent for sale ${sale.saleNumber}`);
+       
     }
   } catch (error) {
     console.error('Error generating invoice/sending email:', error);
