@@ -10,12 +10,12 @@ const PasswordResetRequest = require('../models/PasswordResetRequest');
 
 const router = express.Router();
 
-const ROLE_OPTIONS = ['super-admin', 'admin',  'accountant', 'supplier', 'distributor', 'buyer'];
-const PORTAL_ACCESS_OPTIONS = ['crm', 'supplier', 'distributor'];
+const ROLE_OPTIONS = ['super-admin', 'admin',  'accountant', 'supplier', 'buyer'];
+const PORTAL_ACCESS_OPTIONS = ['crm', 'supplier', 'buyer'];
 const SIGNUP_SOURCES = ['crm', 'supplier-portal', 'distributor-portal', 'import'];
 
 // Roles allowed for self-registration (public signup)
-const PUBLIC_REGISTRATION_ROLES = ['distributor', 'buyer'];
+const PUBLIC_REGISTRATION_ROLES = ['supplier', 'buyer'];
 
 const registerSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
@@ -124,7 +124,7 @@ router.post('/register', async (req, res) => {
       portalAccess: Array.isArray(portalAccess) && portalAccess.length ? portalAccess : undefined,
       supplier: supplierId || undefined,
       buyer: buyerId || undefined,
-      signupSource: signupSource || (role === 'supplier' ? 'supplier-portal' : role === 'distributor' || role === 'buyer' ? 'distributor-portal' : 'crm')
+      signupSource: signupSource || (role === 'supplier' ? 'supplier-portal' :  role === 'buyer' ? 'distributor-portal' : 'crm')
     });
 
     await user.save();
@@ -156,7 +156,7 @@ router.post('/register', async (req, res) => {
         await user.save();
       }
 
-      if ((role === 'distributor' || role === 'buyer') && distributorProfile) {
+      if (( role === 'buyer') && distributorProfile) {
         // Seed deliveryAddresses from signup address so checkout works immediately
         const signupAddress = distributorProfile.address;
         const hasAddress = signupAddress && (
@@ -170,7 +170,7 @@ router.post('/register', async (req, res) => {
           address: signupAddress,
           taxNumber: distributorProfile.taxNumber,
           notes: distributorProfile.notes,
-          customerType: 'distributor',
+          customerType: 'buyer',
           createdBy: user._id,
           userId: user._id, // Add explicit userId reference
           ...(hasAddress ? {
@@ -192,7 +192,7 @@ router.post('/register', async (req, res) => {
         await buyerDoc.save();
 
         user.buyer = buyerDoc._id;
-        const portals = new Set([...(user.portalAccess || []), 'distributor']);
+        const portals = new Set([...(user.portalAccess || []), 'buyer']);
         user.portalAccess = Array.from(portals);
         await user.save();
       }
