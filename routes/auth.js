@@ -10,7 +10,7 @@ const PasswordResetRequest = require('../models/PasswordResetRequest');
 
 const router = express.Router();
 
-const ROLE_OPTIONS = ['super-admin', 'admin', 'employee', 'accountant', 'supplier', 'distributor', 'buyer'];
+const ROLE_OPTIONS = ['super-admin', 'admin',  'accountant', 'supplier', 'distributor', 'buyer'];
 const PORTAL_ACCESS_OPTIONS = ['crm', 'supplier', 'distributor'];
 const SIGNUP_SOURCES = ['crm', 'supplier-portal', 'distributor-portal', 'import'];
 
@@ -157,17 +157,35 @@ router.post('/register', async (req, res) => {
       }
 
       if ((role === 'distributor' || role === 'buyer') && distributorProfile) {
+        // Seed deliveryAddresses from signup address so checkout works immediately
+        const signupAddress = distributorProfile.address;
+        const hasAddress = signupAddress && (
+          signupAddress.street || signupAddress.city || signupAddress.zipCode
+        );
         const buyerPayload = {
           name: distributorProfile.name,
           company: distributorProfile.company || distributorProfile.name,
           email: distributorProfile.email || email,
           phone: distributorProfile.phone || phone,
-          address: distributorProfile.address,
+          address: signupAddress,
           taxNumber: distributorProfile.taxNumber,
           notes: distributorProfile.notes,
           customerType: 'distributor',
           createdBy: user._id,
           userId: user._id, // Add explicit userId reference
+          ...(hasAddress ? {
+            deliveryAddresses: [{
+              label: 'Home',
+              street: signupAddress.street || '',
+              city: signupAddress.city || '',
+              state: signupAddress.state || '',
+              zipCode: signupAddress.zipCode || '',
+              country: signupAddress.country || 'United Kingdom',
+              phone: distributorProfile.phone || phone || '',
+              phoneAreaCode: distributorProfile.phoneAreaCode || '',
+              isDefault: true
+            }]
+          } : {})
         };
 
         buyerDoc = new Buyer(buyerPayload);
