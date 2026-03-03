@@ -6,6 +6,7 @@ const Inventory = require('../models/Inventory');
 const Product = require('../models/Product');
 const Supplier = require('../models/Supplier');
 const Buyer = require('../models/Buyer');
+const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
 
 const router = express.Router();
@@ -1670,6 +1671,163 @@ router.get('/profit-loss', auth, async (req, res) => {
     });
   } catch (error) {
     console.error('Profit & Loss report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// =====================================================
+// GET /reports/cash-in-hand
+// Unified daily cash-flow report: Sales (in) + Supplier Ledger Payments (out) + Expenses (out)
+// =====================================================
+router.get('/cash-in-hand', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    // --- Build date conditions ---
+    const saleDateCondition = {};
+    const ledgerDateCondition = {};
+    const expenseDateCondition = {};
+
+    if (startDate) {
+      saleDateCondition.$gte = new Date(startDate);
+      ledgerDateCondition.$gte = new Date(startDate);
+      expenseDateCondition.$gte = new Date(startDate);
+    }
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      saleDateCondition.$lte = end;
+      ledgerDateCondition.$lte = end;
+      expenseDateCondition.$lte = end;
+    }
+
+    // --- 1. Sales ---
+    const salesQuery = {};
+    if (Object.keys(saleDateCondition).length > 0) salesQuery.saleDate = saleDateCondition;
+
+    const sales = await Sale.find(salesQuery)
+      .populate('buyer', 'name company')
+      .sort({ saleDate: 1 })
+      .lean();
+
+    // --- 2. Supplier Ledger Payment entries ---
+    const ledgerQuery = {
+      type: 'supplier',
+      transactionType: 'payment',
+    };
+    if (Object.keys(ledgerDateCondition).length > 0) ledgerQuery.date = ledgerDateCondition;
+
+    const ledgerEntries = await Ledger.find(ledgerQuery)
+      .populate('entityId', 'name company')
+      .sort({ date: 1 })
+      .lean();
+
+    // --- 3. Approved Expenses ---
+    const expenseQuery = { status: 'approved' };
+    if (Object.keys(expenseDateCondition).length > 0) expenseQuery.expenseDate = expenseDateCondition;
+
+    const expenses = await Expense.find(expenseQuery)
+      .populate('costType', 'name')
+      .sort({ expenseDate: 1 })
+      .lean();
+
+    // --- Normalise into unified rows ---
+    const transactions = [];
+
+    sales.forEach(sale => {
+      const grandTotal = sale.grandTotal || 0;
+      const cashPayment = sale.cashPayment || 0;
+      const bankPayment = sale.bankPayment || 0;
+      const remaining = grandTotal - cashPayment - bankPayment;
+      transactions.push({
+        id: sale.saleNumber || sale._id,
+        _sortDate: sale.saleDate,
+        transactionType: 'Sales',
+        date: sale.saleDate,
+        name: sale.buyer?.name || sale.buyer?.company || 'Walk-in',
+        salesCash: cashPayment,
+        salesBank: bankPayment,
+        salesRemainingBalance: remaining < 0 ? 0 : remaining,
+        ledgerCash: 0,
+        ledgerBank: 0,
+        expenseCash: 0,
+        expenseBank: 0,
+      });
+    });
+
+    ledgerEntries.forEach(entry => {
+      const cashPaid = entry.paymentDetails?.cashPayment || 0;
+      const bankPaid = entry.paymentDetails?.bankPayment || 0;
+      transactions.push({
+        id: entry.entryNumber || entry._id,
+        _sortDate: entry.date,
+        transactionType: 'Supplier Payment',
+        date: entry.date,
+        name: entry.entityId?.name || entry.entityId?.company || 'Unknown Supplier',
+        salesCash: 0,
+        salesBank: 0,
+        salesRemainingBalance: 0,
+        ledgerCash: cashPaid,
+        ledgerBank: bankPaid,
+        expenseCash: 0,
+        expenseBank: 0,
+      });
+    });
+
+    expenses.forEach(expense => {
+      transactions.push({
+        id: expense.expenseNumber || expense._id,
+        _sortDate: expense.expenseDate,
+        transactionType: 'Expense',
+        date: expense.expenseDate,
+        name: expense.vendor || expense.description || expense.costType?.name || 'Expense',
+        salesCash: 0,
+        salesBank: 0,
+        salesRemainingBalance: 0,
+        ledgerCash: 0,
+        ledgerBank: 0,
+        expenseCash: expense.cashAmount || 0,
+        expenseBank: expense.bankAmount || 0,
+      });
+    });
+
+    // Sort all transactions by date ascending
+    transactions.sort((a, b) => new Date(a._sortDate) - new Date(b._sortDate));
+    transactions.forEach((t, i) => { t.sno = i + 1; delete t._sortDate; });
+
+    // --- Compute summary ---
+    const totalSalesCash   = transactions.reduce((s, t) => s + t.salesCash, 0);
+    const totalSalesBank   = transactions.reduce((s, t) => s + t.salesBank, 0);
+    const totalLedgerCash  = transactions.reduce((s, t) => s + t.ledgerCash, 0);
+    const totalLedgerBank  = transactions.reduce((s, t) => s + t.ledgerBank, 0);
+    const totalExpenseCash = transactions.reduce((s, t) => s + t.expenseCash, 0);
+    const totalExpenseBank = transactions.reduce((s, t) => s + t.expenseBank, 0);
+
+    const netCashInHand =
+      (totalSalesCash + totalSalesBank) -
+      (totalLedgerCash + totalLedgerBank) -
+      (totalExpenseCash + totalExpenseBank);
+
+    // Attach the same period net total to every row
+    transactions.forEach(t => { t.totalCashInHand = netCashInHand; });
+
+    res.json({
+      success: true,
+      data: {
+        transactions,
+        summary: {
+          totalSalesCash,
+          totalSalesBank,
+          totalLedgerCash,
+          totalLedgerBank,
+          totalExpenseCash,
+          totalExpenseBank,
+          netCashInHand,
+        },
+      },
+    });
+  } catch (error) {
+    console.error('Cash in Hand report error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
