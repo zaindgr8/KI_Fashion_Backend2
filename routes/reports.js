@@ -1756,8 +1756,18 @@ router.get('/cash-in-hand', auth, async (req, res) => {
     });
 
     ledgerEntries.forEach(entry => {
-      const cashPaid = entry.paymentDetails?.cashPayment || 0;
-      const bankPaid = entry.paymentDetails?.bankPayment || 0;
+      // paymentDetails may be unset (defaults to 0) on older entries that only
+      // store the amount on `credit` with the method tracked via `paymentMethod`.
+      // Use paymentDetails when populated, otherwise fall back to credit + paymentMethod.
+      const creditAmount = entry.credit || 0;
+      const cashPaid =
+        (entry.paymentDetails?.cashPayment > 0)
+          ? entry.paymentDetails.cashPayment
+          : (entry.paymentMethod === 'cash' ? creditAmount : 0);
+      const bankPaid =
+        (entry.paymentDetails?.bankPayment > 0)
+          ? entry.paymentDetails.bankPayment
+          : (entry.paymentMethod === 'bank' ? creditAmount : 0);
       transactions.push({
         id: entry.entryNumber || entry._id,
         _sortDate: entry.date,
