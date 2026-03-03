@@ -1781,6 +1781,7 @@ router.get('/cash-in-hand', auth, async (req, res) => {
         ledgerBank: bankPaid,
         expenseCash: 0,
         expenseBank: 0,
+        ledgerPaymentDetails: entry.paymentDetails
       });
     });
 
