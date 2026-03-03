@@ -1712,7 +1712,7 @@ router.get('/cash-in-hand', auth, async (req, res) => {
 
     // --- 2. Supplier Ledger Payment entries ---
     const ledgerQuery = {
-      type: 'supplier',
+      entityModel: 'Supplier',
       transactionType: 'payment',
     };
     if (Object.keys(ledgerDateCondition).length > 0) ledgerQuery.date = ledgerDateCondition;
@@ -1721,6 +1721,7 @@ router.get('/cash-in-hand', auth, async (req, res) => {
       .populate('entityId', 'name company')
       .sort({ date: 1 })
       .lean();
+
 
     // --- 3. Approved Expenses ---
     const expenseQuery = { status: 'approved' };
@@ -1771,7 +1772,7 @@ router.get('/cash-in-hand', auth, async (req, res) => {
       transactions.push({
         id: entry.entryNumber || entry._id,
         _sortDate: entry.date,
-        transactionType: 'Supplier Payment',
+        transactionType: 'Ledger',
         date: entry.date,
         name: entry.entityId?.name || entry.entityId?.company || 'Unknown Supplier',
         salesCash: 0,
