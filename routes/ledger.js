@@ -1381,13 +1381,16 @@ router.get("/logistics", auth, async (req, res) => {
             let refDoc;
             if (entry.referenceModel === "DispatchOrder") {
               refDoc = await DispatchOrder.findById(entry.referenceId)
-                .select("orderNumber totalBoxes")
+                .select("orderNumber totalBoxes supplier")
+                .populate("supplier", "name company")
                 .lean();
               if (refDoc)
                 entry.referenceId = {
                   _id: refDoc._id,
                   orderNumber: refDoc.orderNumber,
                   totalBoxes: refDoc.totalBoxes,
+                  supplierName: refDoc.supplier?.name || null,
+                  supplierCompany: refDoc.supplier?.company || null,
                 };
             }
           } catch (err) {
