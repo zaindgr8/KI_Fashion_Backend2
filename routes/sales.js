@@ -1020,8 +1020,8 @@ router.get('/', auth, async (req, res) => {
 router.get('/:id', auth, async (req, res) => {
   try {
     const sale = await Sale.findById(req.params.id)
-      .populate('buyer', 'name company phone email address')
-      .populate('items.product', 'name sku unit pricing images')
+      .populate('buyer', 'name company phone phoneAreaCode email address')
+      .populate({ path: 'items.product', select: 'name sku unit pricing images supplier', populate: { path: 'supplier', select: 'name' } })
       .populate('deliveryPersonnel', 'name phone vehicleInfo')
       .populate('createdBy', 'name email')
       .lean();
