@@ -1338,13 +1338,32 @@ router.get('/stock-in-hand', auth, async (req, res) => {
 // Receivables Report
 router.get('/receivables', auth, async (req, res) => {
   try {
-    const receivables = await Sale.aggregate([
+    const { asOfDate, startDate } = req.query;
+
+    // Step 1: Match conditions for sale Ledger entries (debit = what customers owe us).
+    // Filter by date range when provided — mirrors how payables filters DispatchOrders.
+    const saleMatch = {
+      type: 'buyer',
+      transactionType: 'sale'
+    };
+    if (startDate || asOfDate) {
+      saleMatch.date = {};
+      if (startDate) saleMatch.date.$gte = new Date(startDate);
+      if (asOfDate) {
+        const end = new Date(asOfDate);
+        end.setHours(23, 59, 59, 999);
+        saleMatch.date.$lte = end;
+      }
+    }
+
+    // Step 2: Get total sales per buyer from the Ledger (debit side).
+    const salesByBuyer = await Ledger.aggregate([
+      { $match: saleMatch },
       {
         $group: {
-          _id: '$buyer',
-          totalSales: { $sum: '$grandTotal' },
-          amountReceived: { $sum: { $add: [{ $ifNull: ['$cashPayment', 0] }, { $ifNull: ['$bankPayment', 0] }] } },
-          lastSaleDate: { $max: '$saleDate' },
+          _id: '$entityId',
+          totalSales: { $sum: '$debit' },
+          lastSaleDate: { $max: '$date' },
           orderCount: { $sum: 1 }
         }
       },
@@ -1356,27 +1375,75 @@ router.get('/receivables', auth, async (req, res) => {
           as: 'buyerInfo'
         }
       },
-      { $unwind: { path: '$buyerInfo', preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          name: '$buyerInfo.name',
-          company: '$buyerInfo.company',
-          email: '$buyerInfo.email',
-          phone: '$buyerInfo.phone',
-          totalSales: 1,
-          amountReceived: 1,
-          amountGiven: '$amountReceived',
-          outstanding: { $subtract: ['$totalSales', '$amountReceived'] },
-          ledgerBalance: { $subtract: ['$totalSales', '$amountReceived'] },
-          remainingBalance: { $subtract: ['$totalSales', '$amountReceived'] },
-          lastPaymentDate: '$lastSaleDate',
-          lastPurchaseDate: '$lastSaleDate',
-          orderCount: 1
-        }
-      },
-      { $match: { outstanding: { $gt: 0 } } },
-      { $sort: { outstanding: -1 } }
+      { $unwind: { path: '$buyerInfo', preserveNullAndEmptyArrays: true } }
     ]);
+
+    if (salesByBuyer.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          customers: [],
+          receivables: [],
+          summary: { totalCustomers: 0, totalSales: 0, totalReceived: 0, totalOutstanding: 0 }
+        }
+      });
+    }
+
+    // Step 3: Get total receipts (payments received) per buyer from the Ledger,
+    // up to asOfDate only — credits count regardless of the startDate window.
+    const buyerIds = salesByBuyer.map(s => s._id).filter(Boolean);
+    const receiptMatch = {
+      type: 'buyer',
+      transactionType: { $in: ['receipt', 'credit_application'] },
+      entityId: { $in: buyerIds }
+    };
+    if (asOfDate) {
+      const end = new Date(asOfDate);
+      end.setHours(23, 59, 59, 999);
+      receiptMatch.date = { $lte: end };
+    }
+
+    const receiptAgg = await Ledger.aggregate([
+      { $match: receiptMatch },
+      {
+        $group: {
+          _id: '$entityId',
+          totalReceived: { $sum: '$credit' }
+        }
+      }
+    ]);
+
+    const receivedMap = {};
+    for (const row of receiptAgg) {
+      receivedMap[row._id.toString()] = row.totalReceived || 0;
+    }
+
+    // Step 4: Merge and compute outstanding per buyer.
+    const receivables = salesByBuyer.map(sale => {
+      const buyerId = sale._id?.toString();
+      const totalSales = sale.totalSales || 0;
+      const amountReceived = receivedMap[buyerId] || 0;
+      const outstanding = totalSales - amountReceived;
+
+      return {
+        _id: sale._id,
+        name: sale.buyerInfo?.name,
+        company: sale.buyerInfo?.company,
+        email: sale.buyerInfo?.email,
+        phone: sale.buyerInfo?.phone,
+        totalSales,
+        amountReceived,
+        amountGiven: amountReceived,
+        outstanding,
+        ledgerBalance: outstanding,
+        remainingBalance: outstanding,
+        lastSaleDate: sale.lastSaleDate,
+        lastPaymentDate: sale.lastSaleDate,
+        lastPurchaseDate: sale.lastSaleDate,
+        orderCount: sale.orderCount
+      };
+    }).filter(r => r.outstanding > 0)
+      .sort((a, b) => b.outstanding - a.outstanding);
 
     res.json({
       success: true,
