@@ -1853,10 +1853,12 @@ router.get('/profit-loss', auth, async (req, res) => {
 
           plData.push({
             sno: plData.length + 1,
+            saleId: sale._id,
             transactionDate: sale.saleDate,
             invoiceNumber: sale.saleNumber || sale.invoiceNumber,
             customerName: sale.buyer?.name || sale.buyer?.company || 'Walk-in',
             productCode: item.product?.productCode || '—',
+            productId: item.product?._id,
             itemsSold: quantity,
             sellingPrice: unitSellingPrice,
             totalSales: item.totalPrice || 0,
