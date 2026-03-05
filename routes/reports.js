@@ -1400,16 +1400,22 @@ router.get('/receivables', auth, async (req, res) => {
 // Payables Report
 router.get('/payables', auth, async (req, res) => {
   try {
-    // Get all dispatch orders grouped by supplier with payment details
+    // Step 1: Get total purchases per supplier from confirmed dispatch orders only.
+    // For supplier-portal entries use supplierPaymentTotal (discount already applied).
+    // For manual entries use grandTotal.
     const purchasesBySupplier = await DispatchOrder.aggregate([
+      { $match: { status: 'confirmed' } },
       {
         $group: {
           _id: '$supplier',
-          totalPurchases: { $sum: '$supplierPaymentTotal' },
-          totalPaid: { 
-            $sum: { 
-              $add: ['$paymentDetails.cashPayment', '$paymentDetails.bankPayment'] 
-            } 
+          totalPurchases: {
+            $sum: {
+              $cond: [
+                { $eq: ['$supplierUser', null] },
+                { $ifNull: ['$grandTotal', 0] },
+                { $ifNull: ['$supplierPaymentTotal', 0] }
+              ]
+            }
           },
           lastPurchaseDate: { $max: '$dispatchDate' },
           orderCount: { $sum: 1 }
@@ -1426,12 +1432,49 @@ router.get('/payables', auth, async (req, res) => {
       { $unwind: { path: '$supplierInfo', preserveNullAndEmptyArrays: true } }
     ]);
 
-    // Merge and calculate outstanding
+    if (purchasesBySupplier.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          suppliers: [],
+          payables: [],
+          summary: { totalSuppliers: 0, totalPurchases: 0, totalPaid: 0, totalOutstanding: 0 }
+        }
+      });
+    }
+
+    // Step 2: Get total payments per supplier from the Ledger collection.
+    // This is the source of truth — unlike paymentDetails on DispatchOrder which is
+    // only set at confirmation and never updated when subsequent payments are made.
+    const supplierIds = purchasesBySupplier.map(p => p._id).filter(Boolean);
+    const paymentAgg = await Ledger.aggregate([
+      {
+        $match: {
+          type: 'supplier',
+          transactionType: 'payment',
+          entityId: { $in: supplierIds }
+        }
+      },
+      {
+        $group: {
+          _id: '$entityId',
+          totalPaid: { $sum: '$credit' }
+        }
+      }
+    ]);
+
+    const paidMap = {};
+    for (const row of paymentAgg) {
+      paidMap[row._id.toString()] = row.totalPaid || 0;
+    }
+
+    // Step 3: Merge and calculate outstanding balance per supplier.
     const payables = purchasesBySupplier.map(purchase => {
+      const supplierId = purchase._id?.toString();
       const totalPurchases = purchase.totalPurchases || 0;
-      const totalPaid = purchase.totalPaid || 0;
+      const totalPaid = paidMap[supplierId] || 0;
       const outstanding = totalPurchases - totalPaid;
-      
+
       return {
         _id: purchase._id,
         name: purchase.supplierInfo?.name,
@@ -1439,9 +1482,9 @@ router.get('/payables', auth, async (req, res) => {
         company: purchase.supplierInfo?.company,
         email: purchase.supplierInfo?.email,
         phone: purchase.supplierInfo?.phone,
-        totalPurchases: totalPurchases,
+        totalPurchases,
         totalAmount: totalPurchases,
-        totalPaid: totalPaid,
+        totalPaid,
         amountPaid: totalPaid,
         outstanding,
         remainingBalance: outstanding,
@@ -1566,6 +1609,90 @@ router.get('/buying-returns', auth, async (req, res) => {
     });
   } catch (error) {
     console.error('Buying returns report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Sales Returns Product-wise Report
+router.get('/sales-returns-product-wise', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.returnedAt = {};
+      if (startDate) matchConditions.returnedAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.returnedAt.$lte = end;
+      }
+    }
+
+    const returns = await SaleReturn.find(matchConditions)
+      .populate('sale', 'saleNumber saleDate')
+      .populate('buyer', 'name company')
+      .populate({
+        path: 'items.product',
+        select: 'name productCode sku',
+        populate: { path: 'supplier', select: 'name company' }
+      })
+      .sort({ returnedAt: -1 })
+      .lean();
+
+    const totalItems = returns.reduce((sum, r) => sum + (r.items?.length || 0), 0);
+    const totalValue = returns.reduce((sum, r) => sum + (r.totalReturnValue || 0), 0);
+
+    res.json({
+      success: true,
+      data: {
+        returns,
+        summary: { totalReturns: returns.length, totalItems, totalValue }
+      }
+    });
+  } catch (error) {
+    console.error('Sales returns product-wise report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Buying Returns Product-wise Report
+router.get('/buying-returns-product-wise', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    const matchConditions = {};
+    if (startDate || endDate) {
+      matchConditions.returnedAt = {};
+      if (startDate) matchConditions.returnedAt.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.returnedAt.$lte = end;
+      }
+    }
+
+    const returns = await Return.find(matchConditions)
+      .populate('dispatchOrder', 'orderNumber')
+      .populate('supplier', 'name company')
+      .populate('items.product', 'name productCode sku')
+      .sort({ returnedAt: -1 })
+      .lean();
+
+    const totalItems = returns.reduce((sum, r) => sum + (r.items?.length || 0), 0);
+    const totalValue = returns.reduce((sum, r) => sum + (r.totalReturnValue || 0), 0);
+    const totalCashRefund = returns.reduce((sum, r) => sum + (r.cashRefund || 0), 0);
+    const totalAccountCredit = returns.reduce((sum, r) => sum + (r.accountCredit || 0), 0);
+
+    res.json({
+      success: true,
+      data: {
+        returns,
+        summary: { totalReturns: returns.length, totalItems, totalValue, totalCashRefund, totalAccountCredit }
+      }
+    });
+  } catch (error) {
+    console.error('Buying returns product-wise report error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
