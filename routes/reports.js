@@ -2060,4 +2060,186 @@ router.get('/cash-in-hand', auth, async (req, res) => {
   }
 });
 
+// Product Summary Report
+router.get('/product-summary', auth, async (req, res) => {
+  try {
+    const { startDate, endDate } = req.query;
+
+    // Build optional date filters for dispatch orders and sales
+    const dispatchDateFilter = {};
+    const saleDateFilter = {};
+    if (startDate || endDate) {
+      if (startDate) {
+        dispatchDateFilter['$gte'] = new Date(startDate);
+        saleDateFilter['$gte'] = new Date(startDate);
+      }
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        dispatchDateFilter['$lte'] = end;
+        saleDateFilter['$lte'] = end;
+      }
+    }
+
+    const hasDateFilter = startDate || endDate;
+
+    // Build sub-pipelines for dispatch orders (items bought)
+    const dispatchPipeline = [
+      ...(hasDateFilter ? [{ $match: { dispatchDate: dispatchDateFilter } }] : []),
+      {
+        $match: {
+          $expr: {
+            $in: ['$$productId', { $map: { input: '$items', as: 'item', in: '$$item.product' } }]
+          }
+        }
+      },
+      { $unwind: '$items' },
+      { $match: { $expr: { $eq: ['$items.product', '$$productId'] } } },
+      {
+        $group: {
+          _id: null,
+          totalBought: { $sum: '$items.quantity' },
+          totalCost: { $sum: { $multiply: ['$items.quantity', { $ifNull: ['$items.landedPrice', '$items.costPrice'] }] } }
+        }
+      }
+    ];
+
+    // Build sub-pipelines for sales (items sold + revenue)
+    const salesPipeline = [
+      ...(hasDateFilter ? [{ $match: { saleDate: saleDateFilter } }] : []),
+      {
+        $match: {
+          $expr: {
+            $in: ['$$productId', { $map: { input: '$items', as: 'item', in: '$$item.product' } }]
+          }
+        }
+      },
+      { $unwind: '$items' },
+      { $match: { $expr: { $eq: ['$items.product', '$$productId'] } } },
+      {
+        $group: {
+          _id: null,
+          totalSold: { $sum: '$items.quantity' },
+          totalSalesRevenue: {
+            $sum: { $multiply: ['$items.quantity', '$items.unitPrice'] }
+          }
+        }
+      }
+    ];
+
+    const stockData = await Inventory.aggregate([
+      { $match: { isActive: true } },
+      {
+        $lookup: {
+          from: 'products',
+          localField: 'product',
+          foreignField: '_id',
+          as: 'productInfo'
+        }
+      },
+      { $unwind: '$productInfo' },
+      {
+        $lookup: {
+          from: 'suppliers',
+          localField: 'productInfo.supplier',
+          foreignField: '_id',
+          as: 'supplierInfo'
+        }
+      },
+      { $unwind: { path: '$supplierInfo', preserveNullAndEmptyArrays: true } },
+      {
+        $lookup: {
+          from: 'dispatchorders',
+          let: { productId: '$product' },
+          pipeline: dispatchPipeline,
+          as: 'purchaseData'
+        }
+      },
+      {
+        $lookup: {
+          from: 'sales',
+          let: { productId: '$product' },
+          pipeline: salesPipeline,
+          as: 'salesData'
+        }
+      },
+      {
+        $project: {
+          supplierName: { $ifNull: ['$supplierInfo.name', '—'] },
+          productCode: { $ifNull: ['$productInfo.productCode', '$productInfo.sku'] },
+          productName: { $ifNull: ['$productInfo.name', '—'] },
+          color: {
+            $cond: {
+              if: { $gt: [{ $size: { $ifNull: ['$productInfo.color', []] } }, 0] },
+              then: { $arrayElemAt: ['$productInfo.color', 0] },
+              else: '—'
+            }
+          },
+          itemsBought: { $ifNull: [{ $arrayElemAt: ['$purchaseData.totalBought', 0] }, 0] },
+          itemsSold: { $ifNull: [{ $arrayElemAt: ['$salesData.totalSold', 0] }, 0] },
+          itemsRemaining: {
+            $subtract: [
+              { $ifNull: [{ $arrayElemAt: ['$purchaseData.totalBought', 0] }, 0] },
+              { $ifNull: [{ $arrayElemAt: ['$salesData.totalSold', 0] }, 0] }
+            ]
+          },
+          stockInHand: '$currentStock',
+          totalPrice: {
+            $multiply: [
+              '$currentStock',
+              { $ifNull: ['$averageCostPrice', 0] }
+            ]
+          },
+          totalSales: { $ifNull: [{ $arrayElemAt: ['$salesData.totalSalesRevenue', 0] }, 0] },
+          percentage: {
+            $cond: {
+              if: { $gt: [{ $ifNull: [{ $arrayElemAt: ['$purchaseData.totalBought', 0] }, 0] }, 0] },
+              then: {
+                $multiply: [
+                  {
+                    $divide: [
+                      { $ifNull: [{ $arrayElemAt: ['$salesData.totalSold', 0] }, 0] },
+                      { $arrayElemAt: ['$purchaseData.totalBought', 0] }
+                    ]
+                  },
+                  100
+                ]
+              },
+              else: 0
+            }
+          },
+          landedPrice: { $ifNull: ['$averageCostPrice', 0] },
+          minSellingPrice: {
+            $ifNull: [
+              '$productInfo.pricing.minSellingPrice',
+              { $multiply: [{ $ifNull: ['$averageCostPrice', 0] }, 1.2] }
+            ]
+          }
+        }
+      },
+      { $sort: { supplierName: 1, productCode: 1 } }
+    ]).allowDiskUse(true);
+
+    const summary = {
+      totalProducts: stockData.length,
+      totalItemsBought: stockData.reduce((sum, p) => sum + (p.itemsBought || 0), 0),
+      totalItemsSold: stockData.reduce((sum, p) => sum + (p.itemsSold || 0), 0),
+      totalStockInHand: stockData.reduce((sum, p) => sum + (p.stockInHand || 0), 0),
+      totalStockValue: stockData.reduce((sum, p) => sum + (p.totalPrice || 0), 0),
+      totalSalesValue: stockData.reduce((sum, p) => sum + (p.totalSales || 0), 0),
+    };
+
+    res.json({
+      success: true,
+      data: {
+        products: stockData,
+        summary,
+      },
+    });
+  } catch (error) {
+    console.error('Product summary report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;
