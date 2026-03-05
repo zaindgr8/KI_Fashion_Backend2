@@ -47,6 +47,7 @@ const productionOrigins = [
   "https://www.ki-fashion-admin-panel.vercel.app",
   "https://kifashion-website.vercel.app",
   "https://www.kifashion-website.vercel.app",
+  "https://ki-fashion-admin-panel-mghs.vercel.app",
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:3002",
