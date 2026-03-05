@@ -1400,11 +1400,25 @@ router.get('/receivables', auth, async (req, res) => {
 // Payables Report
 router.get('/payables', auth, async (req, res) => {
   try {
-    // Step 1: Get total purchases per supplier from confirmed dispatch orders only.
+    const { startDate, endDate } = req.query;
+
+    // Step 1: Build match for confirmed dispatch orders, filtered by dispatch date if provided.
+    const orderMatch = { status: 'confirmed' };
+    if (startDate || endDate) {
+      orderMatch.dispatchDate = {};
+      if (startDate) orderMatch.dispatchDate.$gte = new Date(startDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        orderMatch.dispatchDate.$lte = end;
+      }
+    }
+
+    // Step 2: Get total purchases per supplier from confirmed dispatch orders in the date range.
     // For supplier-portal entries use supplierPaymentTotal (discount already applied).
     // For manual entries use grandTotal.
     const purchasesBySupplier = await DispatchOrder.aggregate([
-      { $match: { status: 'confirmed' } },
+      { $match: orderMatch },
       {
         $group: {
           _id: '$supplier',
@@ -1443,18 +1457,24 @@ router.get('/payables', auth, async (req, res) => {
       });
     }
 
-    // Step 2: Get total payments per supplier from the Ledger collection.
+    // Step 3: Get total payments per supplier from the Ledger collection, up to endDate.
     // This is the source of truth — unlike paymentDetails on DispatchOrder which is
     // only set at confirmation and never updated when subsequent payments are made.
     const supplierIds = purchasesBySupplier.map(p => p._id).filter(Boolean);
+    const paymentMatch = {
+      type: 'supplier',
+      transactionType: 'payment',
+      entityId: { $in: supplierIds }
+    };
+    // Only count payments made on or before the endDate (as-of semantics)
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      paymentMatch.date = { $lte: end };
+    }
+
     const paymentAgg = await Ledger.aggregate([
-      {
-        $match: {
-          type: 'supplier',
-          transactionType: 'payment',
-          entityId: { $in: supplierIds }
-        }
-      },
+      { $match: paymentMatch },
       {
         $group: {
           _id: '$entityId',
@@ -1468,7 +1488,7 @@ router.get('/payables', auth, async (req, res) => {
       paidMap[row._id.toString()] = row.totalPaid || 0;
     }
 
-    // Step 3: Merge and calculate outstanding balance per supplier.
+    // Step 4: Merge and calculate outstanding balance per supplier.
     const payables = purchasesBySupplier.map(purchase => {
       const supplierId = purchase._id?.toString();
       const totalPurchases = purchase.totalPurchases || 0;
