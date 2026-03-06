@@ -5,6 +5,7 @@ const Ledger = require("../models/Ledger");
 const DispatchOrder = require("../models/DispatchOrder");
 const Sale = require("../models/Sale");
 const Supplier = require("../models/Supplier");
+const SupplierPaymentReceipt = require("../models/SupplierPaymentReceipt");
 const Buyer = require("../models/Buyer");
 const LogisticsCompany = require("../models/LogisticsCompany");
 const auth = require("../middleware/auth");
@@ -1512,6 +1513,21 @@ router.get("/logistics", auth, async (req, res) => {
 router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
   try {
     const { amount, paymentMethod, date, description } = req.body;
+    const parsedAmount = parseFloat(amount);
+
+    if (!parsedAmount || parsedAmount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Amount must be greater than 0'
+      });
+    }
+
+    if (!paymentMethod || !['cash', 'bank'].includes(paymentMethod)) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment method must be 'cash' or 'bank'"
+      });
+    }
 
     // Verify supplier exists
     const supplierExists = await Supplier.findById(req.params.id);
@@ -1528,11 +1544,12 @@ router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
     // Distribute payment
     const result = await BalanceService.distributeUniversalPayment({
       supplierId: req.params.id,
-      amount: parseFloat(amount),
+      amount: parsedAmount,
       paymentMethod,
       date: date ? new Date(date) : new Date(),
       description,
       createdBy: req.user._id,
+      balanceBefore: beforeSummary.currentBalance,
     });
 
     // Get updated balance
@@ -1540,15 +1557,19 @@ router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
 
     res.json({
       success: true,
-      message: `Payment of €${amount.toFixed(2)} distributed successfully`,
+      message: `Payment of €${parsedAmount.toFixed(2)} distributed successfully`,
       data: {
+        receipt: {
+          receiptNumber: result.receiptNumber,
+          receiptId: result.receiptId
+        },
         payment: {
-          amount: parseFloat(amount),
+          amount: parsedAmount,
           method: paymentMethod,
           date: date || new Date()
         },
         distribution: {
-          ordersAffected: result.distributions.length,
+          ordersAffected: result.distributions.filter(d => !d.isAdvance).length,
           fullyPaidOrders: result.distributions.filter(d => d.fullyPaid).length,
           distributedAmount: result.totalDistributed,
           advanceAmount: result.remainingCredit
@@ -1581,6 +1602,77 @@ router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
   }
 }
 );
+
+/**
+ * GET /ledger/supplier/:id/payment-receipts
+ * List supplier payment receipts for a supplier
+ */
+router.get('/supplier/:id/payment-receipts', auth, async (req, res) => {
+  try {
+    const { limit = 50, offset = 0 } = req.query;
+
+    const supplierExists = await Supplier.findById(req.params.id).select('_id');
+    if (!supplierExists) {
+      return res.status(404).json({
+        success: false,
+        message: 'Supplier not found'
+      });
+    }
+
+    const receipts = await SupplierPaymentReceipt.getSupplierReceipts(req.params.id, {
+      limit: parseInt(limit, 10),
+      offset: parseInt(offset, 10)
+    });
+
+    const total = await SupplierPaymentReceipt.countDocuments({ supplierId: req.params.id });
+
+    res.json({
+      success: true,
+      data: {
+        receipts,
+        pagination: {
+          total,
+          limit: parseInt(limit, 10),
+          offset: parseInt(offset, 10)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Get supplier payment receipts error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch supplier payment receipts'
+    });
+  }
+});
+
+/**
+ * GET /ledger/supplier/:id/payment-receipts/:receiptNumber
+ * Get a specific supplier payment receipt
+ */
+router.get('/supplier/:id/payment-receipts/:receiptNumber', auth, async (req, res) => {
+  try {
+    const receipt = await SupplierPaymentReceipt.getByReceiptNumber(req.params.receiptNumber);
+
+    if (!receipt || String(receipt.supplierId?._id || receipt.supplierId) !== String(req.params.id)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Supplier payment receipt not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: receipt
+    });
+  } catch (error) {
+    console.error('Get supplier payment receipt error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch supplier payment receipt'
+    });
+  }
+});
 
 
 /**

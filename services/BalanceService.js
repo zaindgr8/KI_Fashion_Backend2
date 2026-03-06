@@ -15,8 +15,55 @@ const mongoose = require('mongoose');
 const Ledger = require('../models/Ledger');
 const DispatchOrder = require('../models/DispatchOrder');
 const Return = require('../models/Return');
+const SupplierPaymentReceipt = require('../models/SupplierPaymentReceipt');
 
 class BalanceService {
+  static async createSupplierPaymentReceipt({
+    supplierId,
+    amount,
+    paymentMethod,
+    createdBy,
+    description,
+    date,
+    balanceBefore,
+    distributions,
+    session
+  }) {
+    const receiptNumber = await SupplierPaymentReceipt.getNextReceiptNumber(session);
+    const advanceAmount = distributions
+      .filter((distribution) => distribution.isAdvance)
+      .reduce((sum, distribution) => sum + (distribution.amountApplied || 0), 0);
+
+    const receipt = new SupplierPaymentReceipt({
+      receiptNumber,
+      supplierId,
+      totalAmount: amount,
+      cashAmount: paymentMethod === 'cash' ? amount : 0,
+      bankAmount: paymentMethod === 'bank' ? amount : 0,
+      paymentMethodSummary: paymentMethod,
+      paymentDate: date,
+      notes: description,
+      distributions: distributions.map((distribution) => ({
+        dispatchOrderId: distribution.orderId || null,
+        orderNumber: distribution.orderNumber,
+        amountApplied: distribution.amountApplied,
+        previousBalance: distribution.previousRemaining || 0,
+        newBalance: distribution.newRemaining || 0,
+        ledgerEntryId: distribution.ledgerEntryId || null,
+        isAdvance: !!distribution.isAdvance,
+      })),
+      advanceAmount,
+      ordersAffected: distributions.filter((distribution) => !distribution.isAdvance).length,
+      balanceBefore,
+      balanceAfter: balanceBefore - amount,
+      status: 'active',
+      createdBy,
+    });
+
+    await receipt.save({ session });
+    return receipt;
+  }
+
   // =====================================================
   // ENTITY BALANCE METHODS
   // =====================================================
@@ -590,6 +637,7 @@ static async getSupplierBalanceSummary(supplierId) {
     createdBy,
     description,
     date = new Date(),
+    balanceBefore = null,
     session: externalSession = null
   }) {
     // Use external session if provided, otherwise create a new transaction
@@ -621,12 +669,13 @@ static async getSupplierBalanceSummary(supplierId) {
        
 
       let result;
+      const startingBalance = balanceBefore !== null ? balanceBefore : await this.getSupplierBalance(supplierId);
 
       // Handle case when there are no pending orders - create advance/credit entry
       if (pendingOrders.length === 0) {
         console.log(`No pending orders found - Creating advance/credit entry for full amount: €${amount.toFixed(2)}`);
 
-        await Ledger.createEntry({
+        const advanceEntry = await Ledger.createEntry({
           type: 'supplier',
           entityId: supplierId,
           entityModel: 'Supplier',
@@ -662,6 +711,7 @@ static async getSupplierBalanceSummary(supplierId) {
             newRemaining: -amount, // Negative = supplier has credit
             fullyPaid: false,
             isAdvance: true,
+            ledgerEntryId: advanceEntry._id,
             totalAmount: undefined, // Not applicable
             totalPaid: undefined // Not applicable
           }],
@@ -690,7 +740,7 @@ static async getSupplierBalanceSummary(supplierId) {
             console.log(`Applying €${paymentForOrder.toFixed(2)} to ${order.orderNumber} (Remaining after: €${newOrderRemaining.toFixed(2)})`);
 
             // Create ledger entry linked to this specific order
-            await Ledger.createEntry({
+            const ledgerEntry = await Ledger.createEntry({
               type: 'supplier',
               entityId: supplierId,
               entityModel: 'Supplier',
@@ -717,6 +767,7 @@ static async getSupplierBalanceSummary(supplierId) {
               previousRemaining: orderRemaining,
               newRemaining: newOrderRemaining,
               fullyPaid: newOrderRemaining === 0,
+              ledgerEntryId: ledgerEntry._id,
               totalAmount: order.totalAmount,
               totalPaid: order.totalPaid
             });
@@ -730,7 +781,7 @@ static async getSupplierBalanceSummary(supplierId) {
         if (remainingAmount > 0) {
           console.log(`\nExcess payment: €${remainingAmount.toFixed(2)} - Creating advance/credit entry`);
 
-          await Ledger.createEntry({
+          const advanceEntry = await Ledger.createEntry({
             type: 'supplier',
             entityId: supplierId,
             entityModel: 'Supplier',
@@ -757,6 +808,7 @@ static async getSupplierBalanceSummary(supplierId) {
             newRemaining: -remainingAmount, // Negative = supplier has credit
             fullyPaid: false,
             isAdvance: true,
+            ledgerEntryId: advanceEntry._id,
             totalAmount: undefined, // Not applicable
             totalPaid: undefined // Not applicable
           });
@@ -775,6 +827,21 @@ static async getSupplierBalanceSummary(supplierId) {
           remainingCredit: remainingAmount > 0 ? remainingAmount : 0
         };
       }
+
+      const receipt = await this.createSupplierPaymentReceipt({
+        supplierId,
+        amount,
+        paymentMethod,
+        createdBy,
+        description,
+        date,
+        balanceBefore: startingBalance,
+        distributions: result.distributions,
+        session,
+      });
+
+      result.receiptNumber = receipt.receiptNumber;
+      result.receiptId = receipt._id;
 
       // Commit the transaction if we created our own session
       if (!useExternalSession) {
