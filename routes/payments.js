@@ -302,6 +302,16 @@ router.post('/customer', auth, async (req, res) => {
             } else if (newTotalPaid > 0) {
               saleDoc.paymentStatus = 'partial';
             }
+
+            // Link this payment receipt to the sale for backward traceability
+            if (!saleDoc.paymentReferences) saleDoc.paymentReferences = [];
+            saleDoc.paymentReferences.push({
+              paymentNumber,
+              paymentId: null, // Will be set after Payment is created
+              amountApplied: paymentForSale,
+              paymentMethod,
+              date: paymentDate
+            });
             
             await saleDoc.save({ session });
           }
@@ -380,6 +390,16 @@ router.post('/customer', auth, async (req, res) => {
     });
 
     await payment.save({ session });
+
+    // Back-fill paymentId on affected sales now that we have the Payment _id
+    const saleDistributions = distributions.filter(d => !d.isAdvance && d.saleId);
+    if (saleDistributions.length > 0) {
+      await Sale.updateMany(
+        { _id: { $in: saleDistributions.map(d => d.saleId) }, 'paymentReferences.paymentNumber': paymentNumber },
+        { $set: { 'paymentReferences.$[elem].paymentId': payment._id } },
+        { arrayFilters: [{ 'elem.paymentNumber': paymentNumber }], session }
+      );
+    }
 
     // Commit transaction
     await session.commitTransaction();

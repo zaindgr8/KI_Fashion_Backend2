@@ -222,6 +222,17 @@ const saleSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Track all payment receipts that contributed to this sale
+  paymentReferences: [{
+    paymentNumber: String,
+    paymentId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Payment'
+    },
+    amountApplied: Number,
+    paymentMethod: String,
+    date: Date
+  }],
   notes: {
     type: String,
     trim: true
