@@ -285,7 +285,7 @@ const dispatchOrderSchema = new mongoose.Schema({
     barcodeImage: String,
     data: String,
     dataUrl: String,
-    type: String,
+    type: { type: String },
     size: String,
     color: String,
     quantity: Number,
