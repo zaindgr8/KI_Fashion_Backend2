@@ -2713,8 +2713,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
       // Save barcode data to dispatch order (with dataURL like QR codes)
       dispatchOrder.barcodeData = barcodeResults;
       dispatchOrder.barcodeGeneratedAt = new Date();
-      
-       
+      await dispatchOrder.save();
       
     } catch (barcodeError) {
       console.error('Barcode generation error:', barcodeError);
