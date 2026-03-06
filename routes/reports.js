@@ -2214,7 +2214,8 @@ router.get('/product-summary', auth, async (req, res) => {
               '$productInfo.pricing.minSellingPrice',
               { $multiply: [{ $ifNull: ['$averageCostPrice', 0] }, 1.2] }
             ]
-          }
+          },
+          productId: '$product'
         }
       },
       { $sort: { supplierName: 1, productCode: 1 } }
@@ -2238,6 +2239,105 @@ router.get('/product-summary', auth, async (req, res) => {
     });
   } catch (error) {
     console.error('Product summary report error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Product History Report (drilldown from Product Summary)
+router.get('/product-history', auth, async (req, res) => {
+  try {
+    const { productId } = req.query;
+    if (!productId) {
+      return res.status(400).json({ success: false, message: 'productId is required' });
+    }
+
+    const mongoose = require('mongoose');
+    let pid;
+    try {
+      pid = new mongoose.Types.ObjectId(productId);
+    } catch {
+      return res.status(400).json({ success: false, message: 'Invalid productId' });
+    }
+
+    const [sales, orders, saleReturns, buyingReturns] = await Promise.all([
+      Sale.find({ 'items.product': pid }).populate('buyer', 'name company').lean(),
+      DispatchOrder.find({ 'items.product': pid }).populate('supplier', 'name company').lean(),
+      SaleReturn.find({ 'items.product': pid }).populate('buyer', 'name company').lean(),
+      Return.find({ 'items.product': pid }).populate('supplier', 'name company').lean(),
+    ]);
+
+    const rows = [];
+
+    for (const s of sales) {
+      const relevantItems = s.items.filter(i => i.product?.toString() === productId);
+      const itemTotal = relevantItems.reduce((sum, i) => sum + (i.quantity || 0) * (i.unitPrice || 0), 0);
+      const discount = relevantItems.reduce((sum, i) => sum + (i.discount || 0), 0);
+      rows.push({
+        id: s.saleNumber || s._id,
+        _id: s._id,
+        transactionType: 'Selling',
+        partyName: s.buyer?.name || s.buyer?.company || s.manualCustomer?.name || '\u2014',
+        transactionDate: s.saleDate,
+        quantity: relevantItems.reduce((sum, i) => sum + (i.quantity || 0), 0),
+        total: itemTotal,
+        discount,
+        totalAfterDiscount: itemTotal - discount,
+      });
+    }
+
+    for (const o of orders) {
+      const relevantItems = o.items.filter(i => i.product?.toString() === productId);
+      const itemTotal = relevantItems.reduce((sum, i) => sum + (i.quantity || 0) * (i.landedPrice || i.costPrice || 0), 0);
+      rows.push({
+        id: o.orderNumber || o._id,
+        _id: o._id,
+        transactionType: 'Buying',
+        partyName: o.supplier?.name || o.supplier?.company || '\u2014',
+        transactionDate: o.dispatchDate || o.createdAt,
+        quantity: relevantItems.reduce((sum, i) => sum + (i.quantity || 0), 0),
+        total: itemTotal,
+        discount: 0,
+        totalAfterDiscount: itemTotal,
+      });
+    }
+
+    for (const r of saleReturns) {
+      const relevantItems = r.items.filter(i => i.product?.toString() === productId);
+      const itemTotal = relevantItems.reduce((sum, i) => sum + (i.returnedQuantity || 0) * (i.unitPrice || 0), 0);
+      rows.push({
+        id: r._id,
+        _id: r._id,
+        transactionType: 'SellingReturn',
+        partyName: r.buyer?.name || r.buyer?.company || '\u2014',
+        transactionDate: r.returnedAt || r.createdAt,
+        quantity: relevantItems.reduce((sum, i) => sum + (i.returnedQuantity || 0), 0),
+        total: itemTotal,
+        discount: 0,
+        totalAfterDiscount: itemTotal,
+      });
+    }
+
+    for (const br of buyingReturns) {
+      const relevantItems = br.items.filter(i => i.product?.toString() === productId);
+      const itemTotal = relevantItems.reduce((sum, i) => sum + (i.returnedQuantity || 0) * (i.costPrice || 0), 0);
+      rows.push({
+        id: br._id,
+        _id: br._id,
+        transactionType: 'BuyingReturn',
+        partyName: br.supplier?.name || br.supplier?.company || '\u2014',
+        transactionDate: br.returnedAt || br.createdAt,
+        quantity: relevantItems.reduce((sum, i) => sum + (i.returnedQuantity || 0), 0),
+        total: itemTotal,
+        discount: 0,
+        totalAfterDiscount: itemTotal,
+      });
+    }
+
+    rows.sort((a, b) => new Date(a.transactionDate) - new Date(b.transactionDate));
+
+    res.json({ success: true, data: { transactions: rows } });
+  } catch (error) {
+    console.error('Product history report error:', error);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
