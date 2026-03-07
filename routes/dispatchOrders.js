@@ -625,6 +625,13 @@ router.post('/', auth, async (req, res) => {
       return cleanedItem;
     });
 
+    // Ensure every item has packet configuration before allowing order creation
+    const unconfiguredItems = processedItems.filter(item => !item.packets || item.packets.length === 0);
+    if (unconfiguredItems.length > 0) {
+      const names = unconfiguredItems.map(item => `"${item.productName || item.productCode}"`).join(', ');
+      return sendResponse.error(res, `All items must have packet configuration before creating an order. Unconfigured items: ${names}`, 400);
+    }
+
     // Set dispatch date from date field or use current date
     const dispatchDate = req.body.date ? new Date(req.body.date) : new Date();
 
@@ -1547,6 +1554,13 @@ router.post('/:id/confirm', auth, async (req, res) => {
 
     if (!['pending', 'pending-approval'].includes(dispatchOrder.status)) {
       return sendResponse.error(res, 'Only pending or pending-approval dispatch orders can be confirmed', 400);
+    }
+
+    // Ensure every item has packet configuration before allowing confirmation
+    const unconfiguredItems = (dispatchOrder.items || []).filter(item => !item.packets || item.packets.length === 0);
+    if (unconfiguredItems.length > 0) {
+      const names = unconfiguredItems.map(item => `"${item.productName || item.productCode}"`).join(', ');
+      return sendResponse.error(res, `Cannot confirm order: the following items are missing packet configuration: ${names}`, 400);
     }
 
     // Validate and set exchange rate and percentage from admin input
