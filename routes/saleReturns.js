@@ -360,12 +360,19 @@ router.post('/', auth, async (req, res) => {
 
       const key = `${value.sale}_${returnItem.itemIndex}`;
       const alreadyReturned = returnedQuantities[key] || 0;
-      const availableToReturn = saleItem.quantity - alreadyReturned;
+      // For packet sales, returnedQuantity is in packets (or packet fractions).
+      // saleItem.quantity is total items, so convert to packets for comparison.
+      const availableToReturn = (saleItem.isPacketSale && saleItem.totalItemsPerPacket)
+        ? (saleItem.quantity / saleItem.totalItemsPerPacket) - alreadyReturned
+        : saleItem.quantity - alreadyReturned;
 
-      if (returnItem.returnedQuantity > availableToReturn) {
+      if (returnItem.returnedQuantity > availableToReturn + 0.001) { // small epsilon for floating-point
         await session.abortTransaction();
         session.endSession();
-        return sendResponse.error(res, `Cannot return ${returnItem.returnedQuantity} items. Only ${availableToReturn} available to return for item at index ${returnItem.itemIndex}`, 400);
+        const displayAvailable = (saleItem.isPacketSale && saleItem.totalItemsPerPacket)
+          ? `${availableToReturn} packet(s)`
+          : `${availableToReturn} unit(s)`;
+        return sendResponse.error(res, `Cannot return that quantity. Only ${displayAvailable} available to return for this item.`, 400);
       }
 
       if (returnItem.originalQuantity !== saleItem.quantity) {
