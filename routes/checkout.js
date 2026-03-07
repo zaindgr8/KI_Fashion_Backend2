@@ -6,6 +6,7 @@ const Inventory = require('../models/Inventory');
 const Buyer = require('../models/Buyer');
 const Product = require('../models/Product');
 const Ledger = require('../models/Ledger');
+const Payment = require('../models/Payment');
 const User = require('../models/User');
 const PacketStock = require('../models/PacketStock');
 const Settings = require('../models/Settings');
@@ -611,7 +612,7 @@ async function handleSuccessfulPayment(session) {
       });
 
       // Receipt entry (credit) for payment
-      await Ledger.createEntry({
+      const receiptEntry = await Ledger.createEntry({
         type: 'buyer',
         entityId: sale.buyer._id,
         entityModel: 'Buyer',
@@ -630,6 +631,36 @@ async function handleSuccessfulPayment(session) {
         },
         createdBy: userId
       });
+
+      // Create Payment receipt document (visible in Payment Receipts tab)
+      const paymentNumber = await Payment.getNextPaymentNumber();
+      const paymentReceipt = new Payment({
+        paymentNumber,
+        paymentType: 'customer',
+        paymentDirection: 'credit',
+        customerId: sale.buyer._id,
+        totalAmount: sale.grandTotal,
+        cashAmount: 0,
+        bankAmount: sale.grandTotal,
+        paymentMethod: 'bank',
+        paymentDate: new Date(),
+        description: `Stripe payment for ${sale.saleNumber}`,
+        distributions: [{
+          saleId: sale._id,
+          saleNumber: sale.saleNumber,
+          amountApplied: sale.grandTotal,
+          previousBalance: sale.grandTotal,
+          newBalance: 0,
+          ledgerEntryId: receiptEntry._id,
+          isAdvance: false
+        }],
+        advanceAmount: 0,
+        balanceBefore: sale.grandTotal,
+        balanceAfter: 0,
+        status: 'active',
+        createdBy: userId
+      });
+      await paymentReceipt.save();
 
       // Update buyer totals
       await Buyer.findByIdAndUpdate(sale.buyer._id, {
