@@ -30,7 +30,7 @@ const productSchema = Joi.object({
   sku: Joi.string().required().uppercase(),
   supplier: Joi.string().optional(), // Primary supplier ObjectId (required by model, but optional here for backward compat)
   description: Joi.string().optional(),
-  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season')).min(1).required(),
+  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season', 'accessories')).min(1).required(),
   category: Joi.string().required(),
   brand: Joi.string().optional(),
   unit: Joi.string().valid('piece', 'kg', 'g', 'liter', 'ml', 'meter', 'cm', 'dozen', 'box', 'pack').default('piece'),

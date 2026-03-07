@@ -23,7 +23,7 @@ const productSchema = new mongoose.Schema({
     type: String,
     trim: true
   },
-  season: [{ type: String, enum: ['winter', 'summer', 'spring', 'autumn', 'all_season'] }],
+  season: [{ type: String, enum: ['winter', 'summer', 'spring', 'autumn', 'all_season', 'accessories'] }],
   category: {
     type: String,
     required: true,

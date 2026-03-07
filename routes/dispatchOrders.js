@@ -405,7 +405,7 @@ const packetSchema = Joi.object({
 const dispatchItemSchema = Joi.object({
   productName: Joi.string().min(1).required(),
   productCode: Joi.string().min(1).required(),
-  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season')).min(1).required(),
+  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season', 'accessories')).min(1).required(),
   costPrice: Joi.number().min(0).required(),
   primaryColor: Joi.array().items(Joi.string()).optional(),
   size: Joi.array().items(Joi.string()).optional(),
@@ -461,7 +461,7 @@ const manualEntryItemSchema = Joi.object({
   product: Joi.string().optional(), // Product reference
   productName: Joi.string().optional(), // For new products
   productCode: Joi.string().optional(), // For new products
-  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season')).min(1).optional(), // For new products
+  season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season', 'accessories')).min(1).optional(), // For new products
   costPrice: Joi.number().min(0).optional(), // For new products
   primaryColor: Joi.alternatives().try(
     Joi.string().allow(null, ''),
