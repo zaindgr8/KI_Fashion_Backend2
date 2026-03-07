@@ -43,6 +43,7 @@ const saleReturnItemSchema = Joi.object({
   returnedQuantity: Joi.number().min(1).required(),
   unitPrice: Joi.number().min(0).required(),
   reason: Joi.string().allow('', null).optional(),
+  isPartialReturn: Joi.boolean().optional(),
   returnComposition: Joi.array().items(Joi.object({
     _id: Joi.string().optional(),
     size: Joi.string().required(),
@@ -155,7 +156,14 @@ router.get('/universal-search', auth, async (req, res) => {
         for (const returnItem of saleReturn.items) {
           const key = returnItem.itemIndex;
           const existing = returnedByItemIndex.get(key) || 0;
-          returnedByItemIndex.set(key, existing + returnItem.returnedQuantity);
+          // Normalize to individual items: partial returns are already in items,
+          // whole-packet returns are in packets and need conversion
+          let returnedInItems = returnItem.returnedQuantity;
+          if (!returnItem.isPartialReturn && sale.items[returnItem.itemIndex]?.isPacketSale) {
+            const itemsPerPacket = sale.items[returnItem.itemIndex]?.totalItemsPerPacket || 1;
+            returnedInItems = returnItem.returnedQuantity * itemsPerPacket;
+          }
+          returnedByItemIndex.set(key, existing + returnedInItems);
         }
       }
 
@@ -298,16 +306,24 @@ router.post('/', auth, async (req, res) => {
       status: { $in: ['pending', 'approved'] }
     }).session(session);
 
-    // Calculate already returned quantities per item
+    // Calculate already returned quantities per item (normalized to individual items)
     const returnedQuantities = {};
     existingReturns.forEach(ret => {
-      ret.items.forEach(item => {
-        const key = `${ret.sale}_${item.itemIndex}`;
+      ret.items.forEach(retItem => {
+        const key = `${ret.sale}_${retItem.itemIndex}`;
         if (!returnedQuantities[key]) {
           returnedQuantities[key] = 0;
         }
         if (ret.status === 'approved') {
-          returnedQuantities[key] += item.returnedQuantity;
+          // Normalize: partial returns already in items; whole-packet returns in packets → convert
+          let returnedInItems = retItem.returnedQuantity;
+          if (!retItem.isPartialReturn) {
+            const saleItem = sale.items[retItem.itemIndex];
+            if (saleItem?.isPacketSale && saleItem?.totalItemsPerPacket) {
+              returnedInItems = retItem.returnedQuantity * saleItem.totalItemsPerPacket;
+            }
+          }
+          returnedQuantities[key] += returnedInItems;
         }
       });
     });
@@ -347,9 +363,10 @@ router.post('/', auth, async (req, res) => {
         : tempDerivedComposition;
       if (compositionToValidate && compositionToValidate.length > 0) {
         const compositionTotal = compositionToValidate.reduce((sum, comp) => sum + (comp.quantity || 0), 0);
-        // For packet sales, returnedQuantity is in packets; composition quantities are individual items.
-        // Expected total = returnedQuantity × itemsPerPacket. For loose/non-packet sales, expected = returnedQuantity.
-        const expectedTotal = (saleItem.isPacketSale && saleItem.totalItemsPerPacket)
+        // For partial returns, returnedQuantity is in individual items; expectedTotal = returnedQuantity.
+        // For whole-packet returns, returnedQuantity is in packets; expectedTotal = returnedQuantity × itemsPerPacket.
+        const isPartial = returnItem.isPartialReturn || (returnItem.returnComposition && returnItem.returnComposition.length > 0);
+        const expectedTotal = (!isPartial && saleItem.isPacketSale && saleItem.totalItemsPerPacket)
           ? returnItem.returnedQuantity * saleItem.totalItemsPerPacket
           : returnItem.returnedQuantity;
         if (compositionTotal !== expectedTotal) {
@@ -364,19 +381,28 @@ router.post('/', auth, async (req, res) => {
       }
 
       const key = `${value.sale}_${returnItem.itemIndex}`;
-      const alreadyReturned = returnedQuantities[key] || 0;
-      // For packet sales, returnedQuantity is in packets (or packet fractions).
-      // saleItem.quantity is total items, so convert to packets for comparison.
-      const availableToReturn = (saleItem.isPacketSale && saleItem.totalItemsPerPacket)
-        ? (saleItem.quantity / saleItem.totalItemsPerPacket) - alreadyReturned
-        : saleItem.quantity - alreadyReturned;
+      const alreadyReturnedItems = returnedQuantities[key] || 0; // always in individual items
+      const isPartial = returnItem.isPartialReturn || (returnItem.returnComposition && returnItem.returnComposition.length > 0);
 
-      if (returnItem.returnedQuantity > availableToReturn + 0.001) { // small epsilon for floating-point
+      let availableToReturn;
+      if (isPartial) {
+        // Partial return: returnedQuantity is individual items
+        availableToReturn = saleItem.quantity - alreadyReturnedItems;
+      } else if (saleItem.isPacketSale && saleItem.totalItemsPerPacket) {
+        // Whole-packet return: convert remaining items to packets
+        availableToReturn = (saleItem.quantity - alreadyReturnedItems) / saleItem.totalItemsPerPacket;
+      } else {
+        availableToReturn = saleItem.quantity - alreadyReturnedItems;
+      }
+
+      if (returnItem.returnedQuantity > availableToReturn + 0.001) {
         await session.abortTransaction();
         session.endSession();
-        const displayAvailable = (saleItem.isPacketSale && saleItem.totalItemsPerPacket)
-          ? `${availableToReturn} packet(s)`
-          : `${availableToReturn} unit(s)`;
+        const displayAvailable = isPartial
+          ? `${availableToReturn} item(s)`
+          : (saleItem.isPacketSale && saleItem.totalItemsPerPacket)
+            ? `${availableToReturn} packet(s)`
+            : `${availableToReturn} unit(s)`;
         return sendResponse.error(res, `Cannot return that quantity. Only ${displayAvailable} available to return for this item.`, 400);
       }
 
@@ -386,7 +412,14 @@ router.post('/', auth, async (req, res) => {
         return sendResponse.error(res, `Original quantity mismatch for item at index ${returnItem.itemIndex}`, 400);
       }
 
-      totalReturnValue += returnItem.returnedQuantity * returnItem.unitPrice;
+      // Calculate return value
+      // unitPrice is per-item. For whole-packet returns, returnedQuantity is in packets.
+      if (!isPartial && saleItem.isPacketSale && saleItem.totalItemsPerPacket) {
+        totalReturnValue += returnItem.returnedQuantity * saleItem.totalItemsPerPacket * returnItem.unitPrice;
+      } else {
+        // Partial return or loose: returnedQuantity is individual items
+        totalReturnValue += returnItem.returnedQuantity * returnItem.unitPrice;
+      }
     }
 
     // Determine status: approved if created by admin, pending if by distributor
@@ -511,10 +544,15 @@ async function processSaleReturn(returnId, userId) {
           }
         }
 
-        // [IMPROVED] Use restoreWithBatch to maintain FIFO integrity if batch info is available
+        // For inventory, quantity should always be in individual items
+        const isPartialItemReturn = item.returnComposition && item.returnComposition.length > 0 && item.isPartialReturn;
+        const inventoryQty = (!isPartialItemReturn && originalSaleItem?.isPacketSale && originalSaleItem?.totalItemsPerPacket)
+          ? item.returnedQuantity * originalSaleItem.totalItemsPerPacket  // whole-packet: packets to items
+          : item.returnedQuantity;  // partial or loose: already in items
+
         if (originalBatchInfo && compositionToAdd.length > 0) {
           await inventory.restoreWithBatch(
-            item.returnedQuantity,
+            inventoryQty,
             compositionToAdd,
             originalBatchInfo,
             'SaleReturn',
@@ -523,9 +561,8 @@ async function processSaleReturn(returnId, userId) {
             `Sale Return from Sale ${saleReturn.sale.saleNumber}`
           );
         } else if (compositionToAdd.length > 0) {
-          // Fallback: Use addStockWithVariants if no batch info (still updates stock correctly, but no batch)
           await inventory.addStockWithVariants(
-            item.returnedQuantity,
+            inventoryQty,
             compositionToAdd,
             'SaleReturn',
             saleReturn._id,
@@ -534,9 +571,8 @@ async function processSaleReturn(returnId, userId) {
           );
           await inventory.save({ session });
         } else {
-          // Fallback for non-variant products
           await inventory.addStock(
-            item.returnedQuantity,
+            inventoryQty,
             'SaleReturn',
             saleReturn._id,
             userId,

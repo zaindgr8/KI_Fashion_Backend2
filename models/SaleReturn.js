@@ -11,6 +11,7 @@ const saleReturnItemSchema = new mongoose.Schema({
   returnedQuantity: { type: Number, required: true, min: 0 },
   unitPrice: { type: Number, required: true, min: 0 },
   reason: { type: String },
+  isPartialReturn: { type: Boolean, default: false },
   returnComposition: [{
     size: String,
     color: String,
