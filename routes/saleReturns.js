@@ -44,6 +44,7 @@ const saleReturnItemSchema = Joi.object({
   unitPrice: Joi.number().min(0).required(),
   reason: Joi.string().allow('', null).optional(),
   returnComposition: Joi.array().items(Joi.object({
+    _id: Joi.string().optional(),
     size: Joi.string().required(),
     color: Joi.string().required(),
     quantity: Joi.number().min(0).required()
