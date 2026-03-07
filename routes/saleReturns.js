@@ -328,10 +328,12 @@ router.post('/', auth, async (req, res) => {
         return sendResponse.error(res, `Product mismatch for item index ${returnItem.itemIndex}`, 400);
       }
 
-      // Auto-derive returnComposition for packet sales when not provided (whole-packet return)
+      // For whole-packet returns (no explicit composition), derive composition temporarily for validation only.
+      // Do NOT persist it — processSaleReturn uses absence of returnComposition to know it should call restorePackets.
+      let tempDerivedComposition = null;
       if (saleItem.isPacketSale && (!returnItem.returnComposition || returnItem.returnComposition.length === 0)) {
         if (saleItem.packetComposition && saleItem.packetComposition.length > 0) {
-          returnItem.returnComposition = saleItem.packetComposition.map(v => ({
+          tempDerivedComposition = saleItem.packetComposition.map(v => ({
             size: v.size,
             color: v.color,
             quantity: v.quantity * returnItem.returnedQuantity
@@ -339,9 +341,12 @@ router.post('/', auth, async (req, res) => {
         }
       }
 
-      // Validate returnComposition sum matches expected total
-      if (returnItem.returnComposition && returnItem.returnComposition.length > 0) {
-        const compositionTotal = returnItem.returnComposition.reduce((sum, comp) => sum + (comp.quantity || 0), 0);
+      // Validate returnComposition sum matches expected total (use explicit or temp-derived)
+      const compositionToValidate = (returnItem.returnComposition && returnItem.returnComposition.length > 0)
+        ? returnItem.returnComposition
+        : tempDerivedComposition;
+      if (compositionToValidate && compositionToValidate.length > 0) {
+        const compositionTotal = compositionToValidate.reduce((sum, comp) => sum + (comp.quantity || 0), 0);
         // For packet sales, returnedQuantity is in packets; composition quantities are individual items.
         // Expected total = returnedQuantity × itemsPerPacket. For loose/non-packet sales, expected = returnedQuantity.
         const expectedTotal = (saleItem.isPacketSale && saleItem.totalItemsPerPacket)
@@ -470,11 +475,19 @@ async function processSaleReturn(returnId, userId) {
         // Determine variant composition to restore
         let compositionToAdd = [];
 
-        // 1. Explicit composition (Partial Packet Return)
+        // 1. Explicit composition (Partial Packet Return — user-selected individual items)
         if (item.returnComposition && item.returnComposition.length > 0) {
           compositionToAdd = item.returnComposition;
         }
-        // 2. Original Sale Variant (Loose Item Sale)
+        // 2. Whole-packet return — derive composition from original packet on-the-fly
+        else if (originalSaleItem?.isPacketSale && originalSaleItem?.packetComposition?.length > 0) {
+          compositionToAdd = originalSaleItem.packetComposition.map(v => ({
+            size: v.size,
+            color: v.color,
+            quantity: v.quantity * item.returnedQuantity
+          }));
+        }
+        // 3. Original Sale Variant (Loose Item Sale)
         else if (originalSaleItem?.variant && originalSaleItem.variant.size) {
           compositionToAdd = [{
             size: originalSaleItem.variant.size,
