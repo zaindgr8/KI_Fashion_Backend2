@@ -1893,7 +1893,7 @@ router.get('/profit-loss', auth, async (req, res) => {
 
 // =====================================================
 // GET /reports/cash-in-hand
-// Daily cash-flow report: Sales (in) + Expenses (out) with running balance
+// Daily cash-flow report: Sales (in) + Buyer Payments (in) + Expenses (out) with running balance
 // =============================================
 router.get('/cash-in-hand', auth, async (req, res) => {
   try {
@@ -1901,16 +1901,19 @@ router.get('/cash-in-hand', auth, async (req, res) => {
 
     // --- Build date conditions ---
     const saleDateCondition = {};
+    const ledgerDateCondition = {};
     const expenseDateCondition = {};
 
     if (startDate) {
       saleDateCondition.$gte = new Date(startDate);
+      ledgerDateCondition.$gte = new Date(startDate);
       expenseDateCondition.$gte = new Date(startDate);
     }
     if (endDate) {
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
       saleDateCondition.$lte = end;
+      ledgerDateCondition.$lte = end;
       expenseDateCondition.$lte = end;
     }
 
@@ -1923,7 +1926,19 @@ router.get('/cash-in-hand', auth, async (req, res) => {
       .sort({ saleDate: 1 })
       .lean();
 
-    // --- 2. Approved Expenses ---
+    // --- 2. Buyer Payment Receipts (cash inflow from buyers paying for sales) ---
+    const ledgerQuery = {
+      type: 'buyer',
+      transactionType: 'receipt',
+    };
+    if (Object.keys(ledgerDateCondition).length > 0) ledgerQuery.date = ledgerDateCondition;
+
+    const ledgerEntries = await Ledger.find(ledgerQuery)
+      .populate('entityId', 'name company')
+      .sort({ date: 1 })
+      .lean();
+
+    // --- 3. Approved Expenses ---
     const expenseQuery = { status: 'approved' };
     if (Object.keys(expenseDateCondition).length > 0) expenseQuery.expenseDate = expenseDateCondition;
 
@@ -1949,6 +1964,34 @@ router.get('/cash-in-hand', auth, async (req, res) => {
         salesCash: cashPayment,
         salesBank: bankPayment,
         salesRemainingBalance: remaining < 0 ? 0 : remaining,
+        ledgerCash: 0,
+        ledgerBank: 0,
+        expenseCash: 0,
+        expenseBank: 0,
+      });
+    });
+
+    ledgerEntries.forEach(entry => {
+      const creditAmount = entry.credit || 0;
+      const cashPaid =
+        (entry.paymentDetails?.cashPayment > 0)
+          ? entry.paymentDetails.cashPayment
+          : (entry.paymentMethod === 'cash' ? creditAmount : 0);
+      const bankPaid =
+        (entry.paymentDetails?.bankPayment > 0)
+          ? entry.paymentDetails.bankPayment
+          : (entry.paymentMethod === 'bank' ? creditAmount : 0);
+      transactions.push({
+        id: entry.entryNumber || entry._id,
+        _sortDate: entry.date,
+        transactionType: 'Ledger',
+        date: entry.date,
+        name: entry.entityId?.name || entry.entityId?.company || 'Unknown Buyer',
+        salesCash: 0,
+        salesBank: 0,
+        salesRemainingBalance: 0,
+        ledgerCash: cashPaid,
+        ledgerBank: bankPaid,
         expenseCash: 0,
         expenseBank: 0,
       });
@@ -1964,6 +2007,8 @@ router.get('/cash-in-hand', auth, async (req, res) => {
         salesCash: 0,
         salesBank: 0,
         salesRemainingBalance: 0,
+        ledgerCash: 0,
+        ledgerBank: 0,
         expenseCash: expense.cashAmount || 0,
         expenseBank: expense.bankAmount || 0,
       });
@@ -1976,17 +2021,22 @@ router.get('/cash-in-hand', auth, async (req, res) => {
     // --- Compute summary ---
     const totalSalesCash   = transactions.reduce((s, t) => s + t.salesCash, 0);
     const totalSalesBank   = transactions.reduce((s, t) => s + t.salesBank, 0);
+    const totalLedgerCash  = transactions.reduce((s, t) => s + t.ledgerCash, 0);
+    const totalLedgerBank  = transactions.reduce((s, t) => s + t.ledgerBank, 0);
     const totalExpenseCash = transactions.reduce((s, t) => s + t.expenseCash, 0);
     const totalExpenseBank = transactions.reduce((s, t) => s + t.expenseBank, 0);
 
+    // Sales + Buyer Payments are inflows, Expenses are outflows
     const netCashInHand =
-      (totalSalesCash + totalSalesBank) -
+      (totalSalesCash + totalSalesBank) +
+      (totalLedgerCash + totalLedgerBank) -
       (totalExpenseCash + totalExpenseBank);
 
     // Compute running cumulative cash-in-hand per row
     let runningBalance = 0;
     transactions.forEach(t => {
       if (t.transactionType === 'Sales') runningBalance += (t.salesCash + t.salesBank);
+      if (t.transactionType === 'Ledger') runningBalance += (t.ledgerCash + t.ledgerBank);
       if (t.transactionType === 'Expense') runningBalance -= (t.expenseCash + t.expenseBank);
       t.totalCashInHand = runningBalance;
     });
@@ -1998,6 +2048,8 @@ router.get('/cash-in-hand', auth, async (req, res) => {
         summary: {
           totalSalesCash,
           totalSalesBank,
+          totalLedgerCash,
+          totalLedgerBank,
           totalExpenseCash,
           totalExpenseBank,
           netCashInHand,
