@@ -192,7 +192,7 @@ router.post('/register', async (req, res) => {
         await buyerDoc.save();
 
         user.buyer = buyerDoc._id;
-        const portals = new Set([...(user.portalAccess || []), 'buyer']);
+        const portals = new Set([...(user.portalAccess || []), 'distributor']);
         user.portalAccess = Array.from(portals);
         await user.save();
       }
