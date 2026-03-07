@@ -847,10 +847,28 @@ router.get('/:id', auth, async (req, res) => {
     // Get inventory information
     const inventory = await Inventory.findOne({ product: product._id }).lean();
 
-    // Get all available packet configurations
+    // Find all sibling products with the same SKU (from different suppliers)
+    const siblingProducts = await Product.find({
+      sku: product.sku,
+      isActive: true
+    }).select('_id images').lean();
+    const allProductIds = siblingProducts.map(p => p._id);
+
+    // Merge images from all siblings (deduplicated)
+    const allImages = new Set(product.images || []);
+    for (const sibling of siblingProducts) {
+      if (sibling.images) {
+        for (const img of sibling.images) {
+          allImages.add(img);
+        }
+      }
+    }
+    product.images = [...allImages];
+
+    // Get all available packet configurations across all suppliers for this SKU
     const PacketStock = require('../models/PacketStock');
     const packetStocks = await PacketStock.find({ 
-      product: product._id, 
+      product: { $in: allProductIds }, 
       isActive: true,
       availablePackets: { $gt: 0 } 
     })

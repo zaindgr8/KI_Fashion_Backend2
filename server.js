@@ -143,7 +143,18 @@ mongoose
     useNewUrlParser: true,
     useUnifiedTopology: true,
   })
-  .then(() => console.log("MongoDB connected successfully"))
+  .then(async () => {
+    console.log("MongoDB connected successfully");
+    // Sync Product indexes to drop stale standalone sku_1 unique index
+    // and ensure compound {sku, supplier} unique index exists
+    try {
+      const Product = require('./models/Product');
+      await Product.syncIndexes();
+      console.log('Product indexes synced successfully');
+    } catch (err) {
+      console.error('Product index sync error:', err.message);
+    }
+  })
   .catch((err) => console.error("MongoDB connection error:", err));
 
 // Routes

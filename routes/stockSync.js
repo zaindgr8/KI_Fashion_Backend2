@@ -9,6 +9,7 @@ const auth = require('../middleware/auth');
 const StockSyncService = require('../services/StockSyncService');
 const Inventory = require('../models/Inventory');
 const PacketStock = require('../models/PacketStock');
+const Product = require('../models/Product');
 const { sendResponse } = require('../utils/helpers');
 
 const router = express.Router();
@@ -138,8 +139,15 @@ router.post('/reconcile/:productId', auth, async (req, res) => {
  */
 router.get('/packet-summary/:productId', auth, async (req, res) => {
   try {
+    // Find the product and all siblings with the same SKU (different suppliers)
+    const product = await Product.findById(req.params.productId).select('sku').lean();
+    if (!product) {
+      return sendResponse.error(res, 'Product not found', 404);
+    }
+    const siblingIds = await Product.find({ sku: product.sku, isActive: true }).distinct('_id');
+
     const packetStocks = await PacketStock.find({ 
-      product: req.params.productId, 
+      product: { $in: siblingIds }, 
       isActive: true 
     })
       .populate('supplier', 'name company')
