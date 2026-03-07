@@ -622,7 +622,12 @@ async function handleSuccessfulPayment(session) {
         credit: sale.grandTotal,
         date: new Date(),
         description: `Stripe payment for Sale ${sale.saleNumber}`,
-        paymentMethod: 'online',
+        paymentMethod: 'bank',
+        paymentDetails: {
+          cashPayment: 0,
+          bankPayment: sale.grandTotal,
+          remainingBalance: 0
+        },
         createdBy: userId
       });
 
