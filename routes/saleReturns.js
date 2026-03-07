@@ -328,15 +328,20 @@ router.post('/', auth, async (req, res) => {
         return sendResponse.error(res, `Product mismatch for item index ${returnItem.itemIndex}`, 400);
       }
 
-      // [NEW] Validate returnComposition sum matches returnedQuantity for packet sales
+      // Validate returnComposition sum matches expected total
       if (returnItem.returnComposition && returnItem.returnComposition.length > 0) {
         const compositionTotal = returnItem.returnComposition.reduce((sum, comp) => sum + (comp.quantity || 0), 0);
-        if (compositionTotal !== returnItem.returnedQuantity) {
+        // For packet sales, returnedQuantity is in packets; composition quantities are individual items.
+        // Expected total = returnedQuantity × itemsPerPacket. For loose/non-packet sales, expected = returnedQuantity.
+        const expectedTotal = (saleItem.isPacketSale && saleItem.totalItemsPerPacket)
+          ? returnItem.returnedQuantity * saleItem.totalItemsPerPacket
+          : returnItem.returnedQuantity;
+        if (compositionTotal !== expectedTotal) {
           await session.abortTransaction();
           session.endSession();
           return sendResponse.error(
             res, 
-            `Return composition total (${compositionTotal}) does not match returnedQuantity (${returnItem.returnedQuantity}) for item at index ${returnItem.itemIndex}. This is critical for packet inventory tracking.`, 
+            `Return composition total (${compositionTotal}) does not match expected total (${expectedTotal}) for item at index ${returnItem.itemIndex}. This is critical for packet inventory tracking.`, 
             400
           );
         }
