@@ -91,7 +91,7 @@ const buyerSchema = new mongoose.Schema({
   },
   customerType: {
     type: String,
-    enum: ['retail', 'wholesale', 'distributor'],
+    enum: ['retail', 'wholesale', 'buyer'],
     default: 'retail'
   },
   notes: {
