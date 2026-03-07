@@ -328,6 +328,17 @@ router.post('/', auth, async (req, res) => {
         return sendResponse.error(res, `Product mismatch for item index ${returnItem.itemIndex}`, 400);
       }
 
+      // Auto-derive returnComposition for packet sales when not provided (whole-packet return)
+      if (saleItem.isPacketSale && (!returnItem.returnComposition || returnItem.returnComposition.length === 0)) {
+        if (saleItem.packetComposition && saleItem.packetComposition.length > 0) {
+          returnItem.returnComposition = saleItem.packetComposition.map(v => ({
+            size: v.size,
+            color: v.color,
+            quantity: v.quantity * returnItem.returnedQuantity
+          }));
+        }
+      }
+
       // Validate returnComposition sum matches expected total
       if (returnItem.returnComposition && returnItem.returnComposition.length > 0) {
         const compositionTotal = returnItem.returnComposition.reduce((sum, comp) => sum + (comp.quantity || 0), 0);
@@ -341,21 +352,10 @@ router.post('/', auth, async (req, res) => {
           session.endSession();
           return sendResponse.error(
             res, 
-            `Return composition total (${compositionTotal}) does not match expected total (${expectedTotal}) for item at index ${returnItem.itemIndex}. This is critical for packet inventory tracking.`, 
+            `The return item quantities don't add up to the expected total for item at index ${returnItem.itemIndex}. Please review your selection.`, 
             400
           );
         }
-      }
-
-      // [NEW] Validate returnComposition is provided for packet sales
-      if (saleItem.isPacketSale && (!returnItem.returnComposition || returnItem.returnComposition.length === 0)) {
-        await session.abortTransaction();
-        session.endSession();
-        return sendResponse.error(
-          res, 
-          `Item at index ${returnItem.itemIndex} is a packet sale. returnComposition must be provided to specify which items are being returned (prevents inventory desync).`, 
-          400
-        );
       }
 
       const key = `${value.sale}_${returnItem.itemIndex}`;
