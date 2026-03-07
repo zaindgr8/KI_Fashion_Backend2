@@ -85,7 +85,7 @@ router.get('/universal-search', auth, async (req, res) => {
 
     // Search sales directly
     const sales = await Sale.find({
-      deliveryStatus: { $in: ['delivered', 'pending'] },
+      deliveryStatus: { $nin: ['cancelled'] },
       $or: [
         { saleNumber: searchRegex },
         { invoiceNumber: searchRegex }
@@ -123,7 +123,7 @@ router.get('/universal-search', auth, async (req, res) => {
     if (buyerIds.length > 0) {
       salesByBuyer = await Sale.find({
         buyer: { $in: buyerIds },
-        deliveryStatus: { $in: ['delivered', 'pending'] }
+        deliveryStatus: { $nin: ['cancelled'] }
       })
         .populate('buyer', 'name company email phone')
         .populate({
@@ -273,10 +273,10 @@ router.post('/', auth, async (req, res) => {
       return sendResponse.error(res, 'Sale not found', 404);
     }
 
-    if (sale.deliveryStatus !== 'delivered') {
+    if (sale.deliveryStatus === 'cancelled') {
       await session.abortTransaction();
       session.endSession();
-      return sendResponse.error(res, 'Can only return items from delivered sales', 400);
+      return sendResponse.error(res, 'Cannot return items from a cancelled sale', 400);
     }
 
     // Check if user is buyer or admin
