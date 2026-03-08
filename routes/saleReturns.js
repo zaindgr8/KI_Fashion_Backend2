@@ -594,9 +594,6 @@ async function processSaleReturn(returnId, userId) {
                
 
               for (const comp of item.returnComposition) {
-                // Create or find loose stock for this variant
-                // Note: findOrCreateLooseStock expects an array of items to create composition from
-                // We pass a single item 'template' to ensure it matches or creates right loose stock
                 const singleVariantComp = [{
                   size: comp.size,
                   color: comp.color,
@@ -607,7 +604,8 @@ async function processSaleReturn(returnId, userId) {
                   item.product._id,
                   packetStock.supplier,
                   singleVariantComp,
-                  packetStock._id
+                  packetStock._id,
+                  { session }
                 );
 
                 if (looseStock) {
@@ -616,6 +614,10 @@ async function processSaleReturn(returnId, userId) {
                    
                 }
               }
+
+              // Decrement the original packet since items were returned individually
+              packetStock.availablePackets = Math.max(0, packetStock.availablePackets - 1);
+              await packetStock.save({ session });
             } else {
               // Check if the packet was broken (has break history referencing this sale)
               const breakRecord = packetStock.breakHistory?.find(

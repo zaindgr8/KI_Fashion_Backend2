@@ -910,14 +910,11 @@ router.post('/:id/break', auth, async (req, res) => {
           looseStock.costPricePerPacket = pricePerItem;
           looseStock.landedPricePerPacket = pricePerItem;
           looseStock.suggestedSellingPrice = pricePerItem * 1.20;
-          await looseStock.save();
         }
         
-        // Add additional units if quantity > 1 (first unit already added by findOrCreateLooseStock)
-        if (remainingItem.quantity > 1) {
-          looseStock.availablePackets += (remainingItem.quantity - 1);
-          await looseStock.save();
-        }
+        // Add the returned quantity
+        looseStock.availablePackets += remainingItem.quantity;
+        await looseStock.save();
         
         // Track this loose stock creation
         looseStocksCreated.push({

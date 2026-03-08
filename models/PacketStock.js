@@ -438,9 +438,10 @@ packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn
 };
 
 // Static method to find or create loose stock for remaining items after breaking
-packetStockSchema.statics.findOrCreateLooseStock = async function (productId, supplierId, composition, parentPacketStockId) {
+packetStockSchema.statics.findOrCreateLooseStock = async function (productId, supplierId, composition, parentPacketStockId, options = {}) {
   const { generatePacketBarcode } = require('../utils/barcodeGenerator');
   const QRCode = require('qrcode');
+  const { session } = options;
 
   // Generate barcode for this loose composition
   const barcode = generatePacketBarcode(supplierId.toString(), productId.toString(), composition, true);
@@ -448,24 +449,23 @@ packetStockSchema.statics.findOrCreateLooseStock = async function (productId, su
   // Calculate total items
   const totalItems = composition.reduce((sum, item) => sum + item.quantity, 0);
 
-  // Find existing loose stock with same barcode
-  let looseStock = await this.findOne({ barcode, isActive: true });
+  // Find existing loose stock with same barcode (use session if provided)
+  const query = this.findOne({ barcode, isActive: true });
+  if (session) query.session(session);
+  let looseStock = await query;
 
   if (looseStock) {
-    // Add to existing loose stock
-    looseStock.availablePackets += 1;
-    await looseStock.save();
     return { looseStock, isNew: false };
   }
 
-  // Create new loose stock entry
+  // Create new loose stock entry with availablePackets: 0 — caller controls the count
   looseStock = new this({
     barcode,
     product: productId,
     supplier: supplierId,
     composition,
     totalItemsPerPacket: totalItems,
-    availablePackets: 1,
+    availablePackets: 0,
     reservedPackets: 0,
     soldPackets: 0,
     isLoose: true,
@@ -489,7 +489,7 @@ packetStockSchema.statics.findOrCreateLooseStock = async function (productId, su
     console.warn('QR code generation failed for loose stock:', qrError.message);
   }
 
-  await looseStock.save();
+  await looseStock.save({ session });
   return { looseStock, isNew: true };
 };
 
