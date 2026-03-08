@@ -1946,9 +1946,11 @@ router.get('/cash-in-hand', auth, async (req, res) => {
       .lean();
 
     // --- 2. Buyer Payment Receipts (cash inflow from buyers paying for sales) ---
+    // Exclude entries created automatically at sale time — those are already counted in the Sales row
     const ledgerQuery = {
       type: 'buyer',
       transactionType: 'receipt',
+      isSaleTimePayment: { $ne: true },
     };
     if (Object.keys(ledgerDateCondition).length > 0) ledgerQuery.date = ledgerDateCondition;
 
@@ -1957,8 +1959,8 @@ router.get('/cash-in-hand', auth, async (req, res) => {
       .sort({ date: 1 })
       .lean();
 
-    // --- 3. Approved Expenses ---
-    const expenseQuery = { status: 'approved' };
+    // --- 3. Approved & Paid Expenses ---
+    const expenseQuery = { status: { $in: ['approved', 'paid'] } };
     if (Object.keys(expenseDateCondition).length > 0) expenseQuery.expenseDate = expenseDateCondition;
 
     const expenses = await Expense.find(expenseQuery)
