@@ -1987,6 +1987,7 @@ router.get('/cash-in-hand', auth, async (req, res) => {
         transactionType: 'Ledger',
         date: entry.date,
         name: entry.entityId?.name || entry.entityId?.company || 'Unknown Buyer',
+        isSaleTimePayment: entry.isSaleTimePayment === true,
         salesCash: 0,
         salesBank: 0,
         salesRemainingBalance: 0,

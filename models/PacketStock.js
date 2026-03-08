@@ -340,6 +340,17 @@ packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn
     };
   }).filter(i => i.quantity > 0);
 
+  // Calculate per-item pricing from this packet so loose stocks inherit correct prices
+  const perItemCost = this.totalItemsPerPacket > 0 && this.costPricePerPacket > 0
+    ? this.costPricePerPacket / this.totalItemsPerPacket
+    : 0;
+  const perItemLanded = this.totalItemsPerPacket > 0 && this.landedPricePerPacket > 0
+    ? this.landedPricePerPacket / this.totalItemsPerPacket
+    : 0;
+  const perItemSuggested = this.totalItemsPerPacket > 0 && this.suggestedSellingPrice > 0
+    ? this.suggestedSellingPrice / this.totalItemsPerPacket
+    : 0;
+
   // Create loose stock for remaining items if any
   const looseStocksCreated = [];
 
@@ -367,6 +378,12 @@ packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn
 
       if (looseStock) {
         looseStock.availablePackets += item.quantity;
+        // Backfill price onto existing loose stock if it has none (e.g. created before this fix)
+        if (looseStock.costPricePerPacket === 0 && perItemCost > 0) {
+          looseStock.costPricePerPacket = perItemCost;
+          looseStock.landedPricePerPacket = perItemLanded;
+          looseStock.suggestedSellingPrice = perItemSuggested;
+        }
         await looseStock.save({ session });
       } else {
         looseStock = new this.constructor({
@@ -378,6 +395,9 @@ packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn
           availablePackets: item.quantity,
           reservedPackets: 0,
           soldPackets: 0,
+          costPricePerPacket: perItemCost,
+          landedPricePerPacket: perItemLanded,
+          suggestedSellingPrice: perItemSuggested,
           isLoose: true,
           parentPacketStock: this._id,
           dispatchOrderHistory: []

@@ -662,6 +662,7 @@ router.post('/', auth, async (req, res) => {
             date: sale.saleDate || new Date(),
             description: `Cash payment for Sale ${saleNumber}`,
             paymentMethod: 'cash',
+            isSaleTimePayment: true,
             paymentDetails: {
               cashPayment: cashPayment,
               bankPayment: 0,
@@ -685,6 +686,7 @@ router.post('/', auth, async (req, res) => {
             date: sale.saleDate || new Date(),
             description: `Bank/Card payment for Sale ${saleNumber}`,
             paymentMethod: 'bank',
+            isSaleTimePayment: true,
             paymentDetails: {
               cashPayment: 0,
               bankPayment: bankPayment,

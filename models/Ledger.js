@@ -70,6 +70,14 @@ const ledgerSchema = new mongoose.Schema({
     bankPayment: { type: Number, default: 0 }, // Keep for individual entry tracking
     remainingBalance: { type: Number, default: 0 } // DEPRECATED: Calculate from aggregation
   },
+  // Marks Ledger receipt entries that were created automatically at the time of a sale.
+  // At-sale payments are already captured on the Sale row in the Cash-in-Hand report;
+  // this flag lets the report optionally hide those duplicate Ledger rows.
+  isSaleTimePayment: {
+    type: Boolean,
+    default: false,
+    index: true
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
