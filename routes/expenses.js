@@ -73,13 +73,8 @@ router.post('/', auth, async (req, res) => {
     const cashAmount = paymentMethod === 'cash' ? amount : 0;
     const bankAmount = (paymentMethod !== 'cash' && paymentMethod !== 'split') ? amount : 0;
 
-    let status = 'pending';
-    let approvedBy = undefined;
-
-    if (req.user.role === 'super_admin') {
-      status = 'approved';
-      approvedBy = req.user._id;
-    }
+    const status = 'approved';
+    const approvedBy = req.user._id;
 
     const expense = new Expense({
       ...req.body,
@@ -293,80 +288,6 @@ router.put('/:id', auth, async (req, res) => {
   }
 });
 
-// Approve expense
-router.patch('/:id/approve', auth, async (req, res) => {
-  try {
-    const expense = await Expense.findByIdAndUpdate(
-      req.params.id,
-      {
-        status: 'approved',
-        approvedBy: req.user._id
-      },
-      { new: true }
-    )
-      .populate('costType', 'id name category')
-      .populate('createdBy', 'name')
-      .populate('approvedBy', 'name');
-
-    if (!expense) {
-      return res.status(404).json({
-        success: false,
-        message: 'Expense not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Expense approved successfully',
-      data: expense
-    });
-
-  } catch (error) {
-    console.error('Approve expense error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});
-
-// Reject expense
-router.patch('/:id/reject', auth, async (req, res) => {
-  try {
-    const expense = await Expense.findByIdAndUpdate(
-      req.params.id,
-      {
-        status: 'rejected',
-        approvedBy: req.user._id
-      },
-      { new: true }
-    )
-      .populate('costType', 'id name category')
-      .populate('createdBy', 'name')
-      .populate('approvedBy', 'name');
-
-    if (!expense) {
-      return res.status(404).json({
-        success: false,
-        message: 'Expense not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Expense rejected successfully',
-      data: expense
-    });
-
-  } catch (error) {
-    console.error('Reject expense error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
-  }
-});
-
 // Delete expense
 router.delete('/:id', auth, async (req, res) => {
   try {
@@ -397,7 +318,7 @@ router.delete('/:id', auth, async (req, res) => {
 router.get('/reports/summary', auth, async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
-    const matchConditions = { status: 'approved' };
+    const matchConditions = { status: { $in: ['approved', 'paid'] } };
 
     if (startDate || endDate) {
       matchConditions.expenseDate = {};
