@@ -16,7 +16,7 @@ async function generateInvoicePDF(sale, outputPath) {
       doc.pipe(stream);
 
       // Company Header
-      doc.fontSize(20).font('Helvetica-Bold').text('KL Fashion', 50, 50);
+      doc.fontSize(20).font('Helvetica-Bold').text('KI Fashion', 50, 50);
       doc.fontSize(10).font('Helvetica').text('Invoice', { align: 'right' });
       doc.moveDown(0.5);
 
@@ -152,7 +152,7 @@ async function generateInvoicePDF(sale, outputPath) {
       const pageHeight = doc.page.height;
       const pageWidth = doc.page.width;
       doc.text('Thank you for your business!', 50, pageHeight - 50, { align: 'center' });
-      doc.text('For inquiries, please contact KL Fashion', 50, pageHeight - 35, { align: 'center' });
+      doc.text('For inquiries, please contact KI Fashion', 50, pageHeight - 35, { align: 'center' });
 
       // QR Code (if available)
       if (sale.qrCode && sale.qrCode.dataUrl) {

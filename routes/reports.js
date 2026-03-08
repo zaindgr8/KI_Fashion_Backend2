@@ -1177,7 +1177,7 @@ router.get('/buying-product-wise', auth, async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
 
-    const matchConditions = {};
+    const matchConditions = { status: 'confirmed' };
     if (startDate || endDate) {
       matchConditions.dispatchDate = {};
       if (startDate) matchConditions.dispatchDate.$gte = new Date(startDate);
@@ -1555,12 +1555,29 @@ router.get('/payables', auth, async (req, res) => {
       paidMap[row._id.toString()] = row.totalPaid || 0;
     }
 
+    // Step 3b: Get total returns per supplier (deducted from outstanding regardless of date range).
+    const returnAgg = await Return.aggregate([
+      { $match: { supplier: { $in: supplierIds } } },
+      {
+        $group: {
+          _id: '$supplier',
+          totalReturns: { $sum: '$totalReturnValue' }
+        }
+      }
+    ]);
+
+    const returnMap = {};
+    for (const row of returnAgg) {
+      returnMap[row._id.toString()] = row.totalReturns || 0;
+    }
+
     // Step 4: Merge and calculate outstanding balance per supplier.
     const payables = purchasesBySupplier.map(purchase => {
       const supplierId = purchase._id?.toString();
       const totalPurchases = purchase.totalPurchases || 0;
       const totalPaid = paidMap[supplierId] || 0;
-      const outstanding = totalPurchases - totalPaid;
+      const totalReturns = returnMap[supplierId] || 0;
+      const outstanding = totalPurchases - totalPaid - totalReturns;
 
       return {
         _id: purchase._id,
@@ -1573,6 +1590,7 @@ router.get('/payables', auth, async (req, res) => {
         totalAmount: totalPurchases,
         totalPaid,
         amountPaid: totalPaid,
+        totalReturns,
         outstanding,
         remainingBalance: outstanding,
         balance: outstanding,
@@ -1590,6 +1608,7 @@ router.get('/payables', auth, async (req, res) => {
           totalSuppliers: payables.length,
           totalPurchases: payables.reduce((sum, p) => sum + p.totalPurchases, 0),
           totalPaid: payables.reduce((sum, p) => sum + p.totalPaid, 0),
+          totalReturns: payables.reduce((sum, p) => sum + p.totalReturns, 0),
           totalOutstanding: payables.reduce((sum, p) => sum + p.outstanding, 0)
         }
       }

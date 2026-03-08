@@ -108,7 +108,7 @@ async function sendInvoiceEmails(sale, pdfPath, distributorEmail, adminEmail) {
     <body>
       <div class="container">
         <div class="header">
-          <h2>Invoice from KL Fashion</h2>
+          <h2>Invoice from KI Fashion</h2>
         </div>
         <div class="content">
           <p>Dear ${sale.buyer?.name || 'Customer'},</p>
@@ -127,7 +127,7 @@ async function sendInvoiceEmails(sale, pdfPath, distributorEmail, adminEmail) {
           
           <p>If you have any questions about this invoice, please contact us.</p>
           
-          <p>Best regards,<br>KL Fashion</p>
+          <p>Best regards,<br>KI Fashion</p>
         </div>
         <div class="footer">
           <p>This is an automated email. Please do not reply to this message.</p>
@@ -138,7 +138,7 @@ async function sendInvoiceEmails(sale, pdfPath, distributorEmail, adminEmail) {
   `;
 
   const textBody = `
-    Invoice from KL Fashion
+    Invoice from KI Fashion
     
     Dear ${sale.buyer?.name || 'Customer'},
     
@@ -156,7 +156,7 @@ async function sendInvoiceEmails(sale, pdfPath, distributorEmail, adminEmail) {
     If you have any questions about this invoice, please contact us.
     
     Best regards,
-    KL Fashion
+    KI Fashion
   `;
 
   const results = {
@@ -169,7 +169,7 @@ async function sendInvoiceEmails(sale, pdfPath, distributorEmail, adminEmail) {
     try {
       results.distributor = await sendEmailWithPDF({
         to: distributorEmail,
-        subject: `Invoice ${invoiceNumber} - KL Fashion`,
+        subject: `Invoice ${invoiceNumber} - KI Fashion`,
         html: htmlBody,
         text: textBody,
         pdfPath: pdfPath,
