@@ -434,7 +434,7 @@ router.post('/create-session', auth, async (req, res) => {
     }
 
     // Create Stripe Checkout session
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    const frontendUrl = process.env.FRONTEND_URL || 'https://kifashion-website.vercel.app';
     
     const lineItems = items.map(item => ({
       price_data: {

@@ -917,16 +917,8 @@ router.post('/product-return', auth, async (req, res) => {
             session
           );
 
-          if (!packetValidation.valid) {
-            await session.abortTransaction();
-            session.endSession();
-            return sendResponse.error(res, 
-              `Packet stock validation failed for ${product.name}: ${packetValidation.errors.join(', ')}`, 
-              400
-            );
-          }
-
-          // Store for later execution
+          // Store for later execution — even if some packet stock is short,
+          // proceed with whatever adjustments ARE available (best-effort).
           processedItems.push({
             product: productId,
             inventory,
@@ -941,10 +933,10 @@ router.post('/product-return', auth, async (req, res) => {
             reason: reason || '',
             returnComposition,
             packetAdjustments: packetValidation.adjustments,
-            packetWarnings: packetValidation.warnings
+            packetWarnings: [...packetValidation.warnings, ...packetValidation.errors]
           });
 
-          packetAdjustmentWarnings.push(...packetValidation.warnings);
+          packetAdjustmentWarnings.push(...packetValidation.warnings, ...packetValidation.errors);
 
         } catch (err) {
           await session.abortTransaction();
@@ -1020,7 +1012,7 @@ router.post('/product-return', auth, async (req, res) => {
     }
 
     // -------------------------------------------------------------------
-    // PHASE 3: Execute packet stock adjustments (within transaction)
+    // PHASE 3: Execute packet stock adjustments (within transaction, best-effort)
     // -------------------------------------------------------------------
     for (const item of processedItems) {
       if (item.packetAdjustments && item.packetAdjustments.length > 0) {
@@ -1032,22 +1024,17 @@ router.post('/product-return', auth, async (req, res) => {
             session
           );
 
-          if (!execResult.success) {
-            await session.abortTransaction();
-            session.endSession();
-            return sendResponse.error(res, 
-              `Packet adjustment failed for ${item.productName}: ${execResult.errors.join(', ')}`, 
-              500
-            );
+          // Collect warnings but don't abort — inventory is already reduced
+          if (execResult.warnings && execResult.warnings.length > 0) {
+            packetAdjustmentWarnings.push(...execResult.warnings);
           }
 
           allPacketAdjustments.push(...execResult.packetAdjustments);
           item.executedPacketAdjustments = execResult.packetAdjustments;
 
         } catch (err) {
-          await session.abortTransaction();
-          session.endSession();
-          return sendResponse.error(res, `Packet adjustment error for ${item.productName}: ${err.message}`, 500);
+          // Packet adjustment failure is non-fatal; inventory reduction is the source of truth
+          packetAdjustmentWarnings.push(`Packet adjustment error for ${item.productName}: ${err.message}`);
         }
       }
     }

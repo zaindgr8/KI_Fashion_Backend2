@@ -164,6 +164,10 @@ class PacketReturnService {
       adjustmentPlan.totalItemsToReturn += vr.quantity;
     }
 
+    // Track planned breaks per packet to avoid duplicate break plans.
+    // Key: packetStockId.toString(), Value: { plannedBreaks: number, adjustmentIndex: number, availableRemaining: number }
+    const packetBreakTracker = new Map();
+
     // For each variant, find available packets
     for (const [key, requiredQty] of returnMap) {
       const [color, size] = key.split('|');
@@ -177,10 +181,6 @@ class PacketReturnService {
       // Use loose stock first
       for (const loose of looseOnly) {
         if (remainingQty <= 0) break;
-
-        const looseQtyForVariant = loose.composition.find(
-          c => c.color === color && c.size === size
-        )?.quantity || 0;
 
         // For loose stock, availablePackets = available items
         const canReturn = Math.min(loose.availablePackets, remainingQty);
@@ -210,69 +210,89 @@ class PacketReturnService {
 
         if (!variantInPacket) continue;
 
-        // Calculate how many items we can get from this packet type
+        const packetIdStr = packet._id.toString();
         const itemsPerPacket = variantInPacket.quantity;
-        
-        // Determine how many full packets we'd need
-        const fullPacketsNeeded = Math.ceil(remainingQty / itemsPerPacket);
-        const availablePackets = packet.availablePackets;
 
-        if (availablePackets > 0) {
-          if (remainingQty >= itemsPerPacket && fullPacketsNeeded <= availablePackets) {
-            // We can use exact full packets
-            const packetsToUse = Math.floor(remainingQty / itemsPerPacket);
-            const itemsFromPackets = packetsToUse * itemsPerPacket;
+        // Check if this packet is already planned for a break (from a different variant)
+        const existing = packetBreakTracker.get(packetIdStr);
 
-            if (packetsToUse > 0 && itemsFromPackets === remainingQty) {
-              // Perfect fit - but we still need to break because we're returning specific items
-              adjustmentPlan.adjustments.push({
-                packetStockId: packet._id,
-                barcode: packet.barcode,
-                isLoose: false,
-                adjustmentType: 'partial-break',
-                itemsToReturn: [{ color, size, quantity: itemsFromPackets }],
-                packetsToBreak: packetsToUse,
-                packetsToReturn: 0 // We're not returning full packets, just items
-              });
-              remainingQty -= itemsFromPackets;
-            } else {
-              // Need to break a packet
-              const itemsFromOnePacket = Math.min(itemsPerPacket, remainingQty);
-              
-              adjustmentPlan.adjustments.push({
-                packetStockId: packet._id,
-                barcode: packet.barcode,
-                isLoose: false,
-                adjustmentType: 'partial-break',
-                itemsToReturn: [{ color, size, quantity: itemsFromOnePacket }],
-                packetsToBreak: 1,
-                packetsToReturn: 0
-              });
-              remainingQty -= itemsFromOnePacket;
-            }
+        if (existing) {
+          // Packet already planned for breaking — merge this variant into the existing adjustment
+          const existingAdj = adjustmentPlan.adjustments[existing.adjustmentIndex];
+          const itemsToTake = Math.min(itemsPerPacket, remainingQty);
+
+          // Add this variant to the existing break's itemsToReturn
+          const existingVariant = existingAdj.itemsToReturn.find(
+            i => i.color === color && i.size === size
+          );
+          if (existingVariant) {
+            existingVariant.quantity += itemsToTake;
           } else {
-            // Not enough full packets, use what we can
-            const itemsToTake = Math.min(itemsPerPacket, remainingQty);
-            
+            existingAdj.itemsToReturn.push({ color, size, quantity: itemsToTake });
+          }
+
+          remainingQty -= itemsToTake;
+
+          // If we still need more from additional packets of the same type, handle overflow
+          if (remainingQty > 0 && existing.availableRemaining > 0) {
+            const additionalPacketsNeeded = Math.min(
+              Math.ceil(remainingQty / itemsPerPacket),
+              existing.availableRemaining
+            );
+            if (additionalPacketsNeeded > 0) {
+              const itemsFromAdditional = Math.min(additionalPacketsNeeded * itemsPerPacket, remainingQty);
+              existingAdj.packetsToBreak += additionalPacketsNeeded;
+              existing.availableRemaining -= additionalPacketsNeeded;
+              existing.plannedBreaks += additionalPacketsNeeded;
+
+              // Update variant quantity
+              const variantEntry = existingAdj.itemsToReturn.find(
+                i => i.color === color && i.size === size
+              );
+              if (variantEntry) {
+                variantEntry.quantity += itemsFromAdditional;
+              }
+              remainingQty -= itemsFromAdditional;
+            }
+          }
+        } else {
+          // New packet — plan a break
+          const availablePackets = packet.availablePackets;
+
+          if (availablePackets > 0) {
+            const packetsToUse = Math.min(
+              Math.ceil(remainingQty / itemsPerPacket),
+              availablePackets
+            );
+            const itemsToTake = Math.min(packetsToUse * itemsPerPacket, remainingQty);
+
+            const adjustmentIndex = adjustmentPlan.adjustments.length;
             adjustmentPlan.adjustments.push({
               packetStockId: packet._id,
               barcode: packet.barcode,
               isLoose: false,
               adjustmentType: 'partial-break',
               itemsToReturn: [{ color, size, quantity: itemsToTake }],
-              packetsToBreak: 1,
+              packetsToBreak: packetsToUse,
               packetsToReturn: 0
             });
+
+            // Track this packet so subsequent variants merge into it
+            packetBreakTracker.set(packetIdStr, {
+              plannedBreaks: packetsToUse,
+              adjustmentIndex,
+              availableRemaining: availablePackets - packetsToUse
+            });
+
             remainingQty -= itemsToTake;
           }
         }
       }
 
-      // If we still have remaining quantity, it means not enough stock
+      // If we still have remaining quantity, record as warning (not error) for best-effort
       if (remainingQty > 0) {
-        adjustmentPlan.valid = false;
-        adjustmentPlan.errors.push(
-          `Insufficient packet stock for ${color}/${size}. Short by ${remainingQty} items.`
+        adjustmentPlan.warnings.push(
+          `Insufficient packet stock for ${color}/${size}. Short by ${remainingQty} items. Inventory will still be adjusted.`
         );
       }
     }
@@ -293,6 +313,7 @@ class PacketReturnService {
       success: true,
       packetAdjustments: [],
       errors: [],
+      warnings: [],
       totalItemsAdjusted: 0
     };
 
@@ -301,8 +322,7 @@ class PacketReturnService {
         const packet = await PacketStock.findById(adj.packetStockId).session(session);
         
         if (!packet) {
-          results.errors.push(`Packet ${adj.packetStockId} not found`);
-          results.success = false;
+          results.warnings.push(`Packet ${adj.packetStockId} not found — skipped`);
           continue;
         }
 
@@ -337,29 +357,46 @@ class PacketReturnService {
           results.totalItemsAdjusted += adj.itemsToReturn;
 
         } else if (adj.adjustmentType === 'partial-break') {
-          // Break packet and return specified items
-          const breakResult = await packet.breakForSupplierReturn(
-            adj.itemsToReturn,
-            userId,
-            returnId,
-            session
-          );
+          // Break packet(s) and return specified items
+          // breakForSupplierReturn breaks 1 packet at a time, so loop for multiple
+          const packetsToBreak = adj.packetsToBreak || 1;
+          let totalItemsReturned = 0;
+          const allLooseStocks = [];
+
+          for (let i = 0; i < packetsToBreak; i++) {
+            // Re-fetch packet to get updated availablePackets count
+            const freshPacket = i === 0 ? packet : await PacketStock.findById(adj.packetStockId).session(session);
+            if (!freshPacket || freshPacket.availablePackets < 1) {
+              results.warnings.push(`Packet ${adj.barcode}: could only break ${i} of ${packetsToBreak} planned packets`);
+              break;
+            }
+
+            const breakResult = await freshPacket.breakForSupplierReturn(
+              adj.itemsToReturn,
+              userId,
+              returnId,
+              session
+            );
+            totalItemsReturned += breakResult.totalItemsReturned;
+            allLooseStocks.push(...(breakResult.looseStocksCreated || []));
+          }
 
           results.packetAdjustments.push({
             packetStockId: packet._id,
             barcode: packet.barcode,
             adjustmentType: 'partial-break',
             packetsReturned: 0,
-            itemsReturned: breakResult.totalItemsReturned,
-            looseStocksCreated: breakResult.looseStocksCreated
+            itemsReturned: totalItemsReturned,
+            looseStocksCreated: allLooseStocks
           });
 
-          results.totalItemsAdjusted += breakResult.totalItemsReturned;
+          results.totalItemsAdjusted += totalItemsReturned;
         }
 
       } catch (error) {
-        results.errors.push(`Error adjusting packet ${adj.barcode}: ${error.message}`);
-        results.success = false;
+        // Packet adjustment errors are warnings, not hard failures.
+        // The inventory reduction is the source of truth; packet stock is best-effort.
+        results.warnings.push(`Error adjusting packet ${adj.barcode}: ${error.message}`);
       }
     }
 
