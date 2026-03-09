@@ -8,6 +8,7 @@ const Inventory = require('../models/Inventory');
 const Buyer = require('../models/Buyer');
 const Product = require('../models/Product');
 const Ledger = require('../models/Ledger');
+const Payment = require('../models/Payment');
 const User = require('../models/User');
 const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
@@ -649,8 +650,9 @@ router.post('/', auth, async (req, res) => {
         });
 
         // 2. Create receipt entry (credit) for cash payment if any
+        let cashLedgerEntry = null;
         if (cashPayment > 0) {
-          await Ledger.createEntry({
+          cashLedgerEntry = await Ledger.createEntry({
             type: 'buyer',
             entityId: sale.buyer,
             entityModel: 'Buyer',
@@ -673,8 +675,9 @@ router.post('/', auth, async (req, res) => {
         }
 
         // 3. Create receipt entry (credit) for bank/card payment if any
+        let bankLedgerEntry = null;
         if (bankPayment > 0) {
-          await Ledger.createEntry({
+          bankLedgerEntry = await Ledger.createEntry({
             type: 'buyer',
             entityId: sale.buyer,
             entityModel: 'Buyer',
@@ -694,6 +697,59 @@ router.post('/', auth, async (req, res) => {
             },
             createdBy: req.user._id
           });
+        }
+
+        // 3b. Create a Payment document so sale-time payments appear in Payment Receipts tab
+        const totalPaidAtSale = cashPayment + bankPayment;
+        if (totalPaidAtSale > 0) {
+          try {
+            const paymentNumber = await Payment.getNextPaymentNumber();
+            const saleDistributions = [];
+            if (cashLedgerEntry) {
+              saleDistributions.push({
+                saleId: sale._id,
+                saleNumber,
+                amountApplied: cashPayment,
+                previousBalance: grandTotal,
+                newBalance: remainingBalance,
+                ledgerEntryId: cashLedgerEntry._id,
+                isAdvance: false
+              });
+            }
+            if (bankLedgerEntry) {
+              saleDistributions.push({
+                saleId: sale._id,
+                saleNumber,
+                amountApplied: bankPayment,
+                previousBalance: grandTotal,
+                newBalance: remainingBalance,
+                ledgerEntryId: bankLedgerEntry._id,
+                isAdvance: false
+              });
+            }
+            const salePayment = new Payment({
+              paymentNumber,
+              paymentType: 'customer',
+              paymentDirection: 'credit',
+              customerId: sale.buyer,
+              totalAmount: totalPaidAtSale,
+              cashAmount: cashPayment,
+              bankAmount: bankPayment,
+              paymentMethod: cashPayment > 0 ? 'cash' : 'bank',
+              paymentDate: sale.saleDate || new Date(),
+              description: `Payment at time of Sale ${saleNumber}`,
+              distributions: saleDistributions,
+              advanceAmount: 0,
+              balanceBefore: grandTotal,
+              balanceAfter: remainingBalance,
+              status: 'active',
+              createdBy: req.user._id
+            });
+            await salePayment.save();
+          } catch (paymentCreateError) {
+            console.error(`Error creating Payment document for sale ${saleNumber}:`, paymentCreateError);
+            // Non-fatal: ledger entries and sale are already saved
+          }
         }
 
         // 4. Update buyer balance and total sales
