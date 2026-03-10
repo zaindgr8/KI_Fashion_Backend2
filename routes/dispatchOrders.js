@@ -2754,6 +2754,329 @@ router.post('/:id/confirm', auth, async (req, res) => {
   }
 });
 
+// ==========================================
+// GET /:id/edit-impact — Impact analysis before editing a confirmed order
+// Returns per-item sold quantities and the minimum editable quantity floor.
+// Super-admin only.
+// ==========================================
+router.get('/:id/edit-impact', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'super-admin') {
+      return sendResponse.error(res, 'Only super-admin can access order edit impact analysis', 403);
+    }
+
+    const dispatchOrder = await DispatchOrder.findById(req.params.id)
+      .populate('supplier', 'name company');
+
+    if (!dispatchOrder) {
+      return sendResponse.error(res, 'Dispatch order not found', 404);
+    }
+
+    const editableStatuses = ['confirmed', 'picked_up', 'in_transit', 'delivered'];
+    if (!editableStatuses.includes(dispatchOrder.status)) {
+      return sendResponse.error(res, `Orders with status '${dispatchOrder.status}' cannot be edited`, 400);
+    }
+
+    const itemImpacts = [];
+    let hasSoldItems = false;
+    let hasFullySoldItems = false;
+
+    for (let index = 0; index < dispatchOrder.items.length; index++) {
+      const item = dispatchOrder.items[index];
+      const productId = item.product;
+
+      let soldQuantity = 0;
+      let orderedQuantity = item.quantity || 0;
+      let remainingQuantity = orderedQuantity;
+
+      if (productId) {
+        const inventory = await Inventory.findOne({ product: productId });
+        if (inventory) {
+          const batch = inventory.purchaseBatches.find(
+            b => b.dispatchOrderId && b.dispatchOrderId.toString() === dispatchOrder._id.toString()
+          );
+          if (batch) {
+            orderedQuantity = batch.quantity || orderedQuantity;
+            remainingQuantity = batch.remainingQuantity || 0;
+            soldQuantity = orderedQuantity - remainingQuantity;
+          }
+        }
+      }
+
+      if (soldQuantity > 0) hasSoldItems = true;
+      if (soldQuantity >= orderedQuantity && orderedQuantity > 0) hasFullySoldItems = true;
+
+      itemImpacts.push({
+        itemIndex: index,
+        productId: productId ? productId.toString() : null,
+        productName: item.productName,
+        productCode: item.productCode,
+        orderedQuantity,
+        soldQuantity,
+        remainingQuantity,
+        minEditableQuantity: soldQuantity,
+        currentCostPrice: item.costPrice,
+        currentLandedPrice: item.landedPrice,
+        currentSupplierPaymentAmount: item.supplierPaymentAmount
+      });
+    }
+
+    return sendResponse.success(res, {
+      orderId: dispatchOrder._id,
+      orderNumber: dispatchOrder.orderNumber,
+      status: dispatchOrder.status,
+      currentExchangeRate: dispatchOrder.exchangeRate,
+      currentPercentage: dispatchOrder.percentage,
+      currentDiscount: dispatchOrder.totalDiscount || 0,
+      currentSupplierPaymentTotal: dispatchOrder.supplierPaymentTotal,
+      currentGrandTotal: dispatchOrder.grandTotal,
+      hasSoldItems,
+      hasFullySoldItems,
+      items: itemImpacts
+    }, 'Order edit impact analysis');
+
+  } catch (error) {
+    console.error('Edit impact error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
+  }
+});
+
+// ==========================================
+// PATCH /:id/edit-confirmed — Edit financial fields on a confirmed order.
+// Allowed fields: exchangeRate, percentage, discount, items[].costPrice, items[].quantity
+// Creates a Ledger adjustment entry if the supplier payment total changes.
+// Super-admin only.
+// ==========================================
+router.patch('/:id/edit-confirmed', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'super-admin') {
+      return sendResponse.error(res, 'Only super-admin can edit confirmed orders', 403);
+    }
+
+    const {
+      exchangeRate,
+      percentage,
+      discount,
+      items: updatedItems
+    } = req.body;
+
+    const dispatchOrder = await DispatchOrder.findById(req.params.id)
+      .populate('supplier');
+
+    if (!dispatchOrder) {
+      return sendResponse.error(res, 'Dispatch order not found', 404);
+    }
+
+    const editableStatuses = ['confirmed', 'picked_up', 'in_transit', 'delivered'];
+    if (!editableStatuses.includes(dispatchOrder.status)) {
+      return sendResponse.error(res, `Orders with status '${dispatchOrder.status}' cannot be edited`, 400);
+    }
+
+    // Resolve final values (keep existing if not provided)
+    const newExchangeRate = exchangeRate !== undefined && exchangeRate !== null
+      ? parseFloat(exchangeRate) : dispatchOrder.exchangeRate;
+    const newPercentage = percentage !== undefined && percentage !== null
+      ? parseFloat(percentage) : dispatchOrder.percentage;
+    const newDiscount = discount !== undefined && discount !== null
+      ? parseFloat(discount) : (dispatchOrder.totalDiscount || 0);
+
+    if (isNaN(newExchangeRate) || newExchangeRate <= 0) {
+      return sendResponse.error(res, 'Invalid exchange rate. Must be a positive number.', 400);
+    }
+    if (isNaN(newPercentage) || newPercentage < 0) {
+      return sendResponse.error(res, 'Invalid percentage. Must be a non-negative number.', 400);
+    }
+
+    // Validate item quantity floors — cannot reduce below what has already been sold
+    if (Array.isArray(updatedItems)) {
+      for (let i = 0; i < updatedItems.length; i++) {
+        const reqItem = updatedItems[i];
+        if (!reqItem || reqItem.quantity === undefined) continue;
+
+        const item = dispatchOrder.items[i];
+        if (!item) continue;
+
+        const newQty = parseInt(reqItem.quantity);
+        if (isNaN(newQty) || newQty < 0) {
+          return sendResponse.error(res, `Invalid quantity for item ${i}`, 400);
+        }
+
+        if (item.product) {
+          const inventory = await Inventory.findOne({ product: item.product });
+          if (inventory) {
+            const batch = inventory.purchaseBatches.find(
+              b => b.dispatchOrderId && b.dispatchOrderId.toString() === dispatchOrder._id.toString()
+            );
+            if (batch) {
+              const soldQty = (batch.quantity || 0) - (batch.remainingQuantity || 0);
+              if (newQty < soldQty) {
+                return sendResponse.error(res,
+                  `Cannot reduce quantity for item "${item.productName || item.productCode}" below sold quantity (${soldQty} units already sold)`,
+                  400
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // Store old total for ledger delta
+    const oldSupplierPaymentTotal = dispatchOrder.supplierPaymentTotal || 0;
+
+    // Apply item-level cost/quantity updates
+    if (Array.isArray(updatedItems)) {
+      updatedItems.forEach((reqItem, index) => {
+        if (!reqItem) return;
+        const item = dispatchOrder.items[index];
+        if (!item) return;
+        if (reqItem.costPrice !== undefined) item.costPrice = parseFloat(reqItem.costPrice) || item.costPrice;
+        if (reqItem.quantity !== undefined) item.quantity = parseInt(reqItem.quantity) || item.quantity;
+      });
+      dispatchOrder.markModified('items');
+    }
+
+    // Recalculate totals with new rates
+    let newSupplierPaymentTotal = 0;
+    let newLandedPriceTotal = 0;
+
+    const recalcedItems = dispatchOrder.items.map((item) => {
+      const costPrice = item.costPrice || 0;
+      const qty = item.quantity || 0;
+      const supplierPaymentAmount = costPrice; // per unit, no exchange rate
+      newSupplierPaymentTotal += supplierPaymentAmount * qty;
+
+      const landedPrice = truncateToTwoDecimals((costPrice / newExchangeRate) * (1 + (newPercentage / 100)));
+      newLandedPriceTotal += truncateToTwoDecimals(landedPrice * qty);
+
+      return { item, landedPrice, supplierPaymentAmount };
+    });
+
+    const discountedSupplierPaymentTotal = Math.max(0, newSupplierPaymentTotal - newDiscount);
+    const newSubtotal = truncateToTwoDecimals(newLandedPriceTotal);
+    const newGrandTotal = truncateToTwoDecimals(Math.max(0, newSubtotal - newDiscount));
+
+    // Write recalculated per-item prices back onto order
+    recalcedItems.forEach(({ item, landedPrice, supplierPaymentAmount }) => {
+      item.supplierPaymentAmount = supplierPaymentAmount;
+      item.landedPrice = landedPrice;
+    });
+
+    // Update order-level financial fields
+    dispatchOrder.exchangeRate = newExchangeRate;
+    dispatchOrder.percentage = newPercentage;
+    dispatchOrder.totalDiscount = newDiscount;
+    dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
+    dispatchOrder.subtotal = newSubtotal;
+    dispatchOrder.grandTotal = newGrandTotal;
+
+    await dispatchOrder.save();
+
+    // Ledger adjustment entry if supplier payment total changed
+    const ledgerDelta = parseFloat((discountedSupplierPaymentTotal - oldSupplierPaymentTotal).toFixed(4));
+    let adjustmentEntry = null;
+
+    if (Math.abs(ledgerDelta) > 0.001) {
+      const isIncrease = ledgerDelta > 0;
+      adjustmentEntry = await Ledger.createEntry({
+        type: 'supplier',
+        entityId: dispatchOrder.supplier._id,
+        entityModel: 'Supplier',
+        transactionType: 'adjustment',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: isIncrease ? truncateToTwoDecimals(Math.abs(ledgerDelta)) : 0,
+        credit: !isIncrease ? truncateToTwoDecimals(Math.abs(ledgerDelta)) : 0,
+        date: new Date(), // Current date — prevents cascade recalculation of past balances
+        description: `Order ${dispatchOrder.orderNumber} edited by super-admin — supplier payment adjusted from €${oldSupplierPaymentTotal.toFixed(2)} to €${discountedSupplierPaymentTotal.toFixed(2)} (delta: ${isIncrease ? '+' : ''}€${ledgerDelta.toFixed(2)})`,
+        createdBy: req.user._id
+      });
+
+      // Keep Supplier.currentBalance in sync
+      await Supplier.findByIdAndUpdate(
+        dispatchOrder.supplier._id,
+        { $inc: { currentBalance: ledgerDelta } }
+      );
+    }
+
+    // Update inventory batch prices (non-fatal per item)
+    for (const { item, landedPrice } of recalcedItems) {
+      if (!item.product) continue;
+      try {
+        const inventory = await Inventory.findOne({ product: item.product });
+        if (!inventory) continue;
+        await inventory.updateBatchPrices(dispatchOrder._id, {
+          costPrice: item.costPrice,
+          landedPrice,
+          exchangeRate: newExchangeRate
+        });
+      } catch (invErr) {
+        console.error(`[Edit Confirmed] Failed to update inventory batch for product ${item.product}:`, invErr.message);
+      }
+    }
+
+    // Update PacketStock dispatchOrderHistory for this order (non-fatal per packet)
+    for (const { item, landedPrice } of recalcedItems) {
+      if (!item.product) continue;
+      try {
+        const packetStocks = await PacketStock.find({
+          product: item.product,
+          'dispatchOrderHistory.dispatchOrderId': dispatchOrder._id
+        });
+        for (const ps of packetStocks) {
+          const histEntry = ps.dispatchOrderHistory.find(
+            h => h.dispatchOrderId && h.dispatchOrderId.toString() === dispatchOrder._id.toString()
+          );
+          if (!histEntry) continue;
+
+          const itemsPerPacket = ps.totalItemsPerPacket || 1;
+          histEntry.landedPricePerPacket = truncateToTwoDecimals(landedPrice * itemsPerPacket);
+          histEntry.costPricePerPacket = truncateToTwoDecimals(item.costPrice * itemsPerPacket);
+          ps.markModified('dispatchOrderHistory');
+
+          // If this is the only contributing order, also update the headline per-packet prices
+          if (ps.dispatchOrderHistory.length === 1) {
+            ps.landedPricePerPacket = histEntry.landedPricePerPacket;
+            ps.costPricePerPacket = histEntry.costPricePerPacket;
+            ps.suggestedSellingPrice = truncateToTwoDecimals(histEntry.landedPricePerPacket * 1.20);
+          }
+          await ps.save();
+        }
+      } catch (psErr) {
+        console.error(`[Edit Confirmed] Failed to update PacketStock for product ${item.product}:`, psErr.message);
+      }
+    }
+
+    await dispatchOrder.populate([
+      { path: 'supplier', select: 'name company' },
+      { path: 'confirmedBy', select: 'name' }
+    ]);
+
+    await convertDispatchOrderImages(dispatchOrder);
+
+    return sendResponse.success(res, {
+      order: dispatchOrder,
+      adjustmentEntry: adjustmentEntry
+        ? {
+            _id: adjustmentEntry._id,
+            entryNumber: adjustmentEntry.entryNumber,
+            debit: adjustmentEntry.debit,
+            credit: adjustmentEntry.credit,
+            description: adjustmentEntry.description
+          }
+        : null,
+      ledgerDelta,
+      message: adjustmentEntry
+        ? `Order updated. Ledger adjustment created (${ledgerDelta > 0 ? '+' : ''}€${ledgerDelta.toFixed(2)}).`
+        : 'Order updated. No ledger change needed (supplier payment total unchanged).'
+    }, 'Confirmed order updated successfully');
+
+  } catch (error) {
+    console.error('Edit confirmed order error:', error);
+    return sendResponse.error(res, error.message || 'Server error', 500);
+  }
+});
+
 // Return items from dispatch order
 router.post('/:id/return', auth, async (req, res) => {
   try {

@@ -565,6 +565,29 @@ inventorySchema.methods.getTotalBatchQuantity = function () {
   return this.purchaseBatches.reduce((sum, batch) => sum + batch.remainingQuantity, 0);
 };
 
+// Update prices on an existing purchase batch when a confirmed order is edited.
+// Adjusts costPrice, landedPrice, and exchangeRate for the matching batch,
+// then recalculates the weighted averageCostPrice across all batches.
+inventorySchema.methods.updateBatchPrices = function (dispatchOrderId, { costPrice, landedPrice, exchangeRate }) {
+  const batch = this.purchaseBatches.find(
+    b => b.dispatchOrderId && b.dispatchOrderId.toString() === dispatchOrderId.toString()
+  );
+  if (!batch) {
+    // Batch may have been fully consumed via FIFO — nothing to update
+    return Promise.resolve(this);
+  }
+
+  batch.costPrice = costPrice;
+  batch.landedPrice = landedPrice;
+  batch.exchangeRate = exchangeRate;
+  this.markModified('purchaseBatches');
+
+  // Recalculate weighted average from all batches (uses remainingQuantity)
+  this.recalculateAverageCost();
+
+  return this.save();
+};
+
 // Performance indexes for frequently queried fields
 inventorySchema.index({ isActive: 1 });
 inventorySchema.index({ needsReorder: 1 });
