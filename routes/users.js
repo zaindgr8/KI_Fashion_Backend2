@@ -16,6 +16,7 @@ function requireAdmin(req, res, next) {
 const userSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
   email: Joi.string().email().required(),
+  password: Joi.string().min(6).required(),
   role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant').default('employee'),
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
@@ -33,6 +34,55 @@ const updateUserSchema = Joi.object({
   address: Joi.string().optional(),
   permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery')).optional(),
   isActive: Joi.boolean().optional()
+});
+
+// Create user (admin only)
+router.post('/', auth, requireAdmin, async (req, res) => {
+  try {
+    const { error } = userSchema.validate(req.body, { allowUnknown: true });
+    if (error) {
+      return res.status(400).json({ success: false, message: error.details[0].message });
+    }
+
+    const { name, email, password, role, phone, phoneAreaCode, address, permissions } = req.body;
+
+    // Only super-admin can create super-admin or admin accounts
+    if ((role === 'super-admin' || role === 'admin') && req.user.role !== 'super-admin') {
+      return res.status(403).json({ success: false, message: 'Only super-admin can create admin accounts' });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: 'User with this email already exists' });
+    }
+
+    const user = new User({
+      name,
+      email,
+      password,
+      role: role || 'employee',
+      phone,
+      phoneAreaCode,
+      address,
+      permissions: permissions || [],
+      signupSource: 'crm'
+    });
+
+    await user.save();
+
+    const userResponse = user.toObject();
+    delete userResponse.password;
+
+    res.status(201).json({
+      success: true,
+      message: 'Employee created successfully',
+      data: userResponse
+    });
+
+  } catch (error) {
+    console.error('Create user error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
 });
 
 // Get all users (admin only)
