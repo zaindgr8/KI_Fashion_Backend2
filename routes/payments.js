@@ -841,4 +841,58 @@ router.get('/:paymentNumber/receipt', auth, async (req, res) => {
   }
 });
 
+// =====================================================
+// UPDATE PAYMENT (date, method, description only)
+// =====================================================
+
+/**
+ * PATCH /payments/:paymentNumber
+ * Update non-financial metadata of an active payment.
+ * Only super-admin can do this directly; others must submit an edit request.
+ *
+ * Body: { paymentDate?, paymentMethod?, description? }
+ */
+router.patch('/:paymentNumber', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'super-admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Direct edits are not permitted. Please submit an edit request for approval.',
+        submitRequestAt: '/api/edit-requests'
+      });
+    }
+
+    const payment = await Payment.findOne({ paymentNumber: req.params.paymentNumber });
+    if (!payment) {
+      return res.status(404).json({ success: false, message: 'Payment not found' });
+    }
+    if (payment.status === 'reversed') {
+      return res.status(400).json({ success: false, message: 'Cannot edit a reversed payment' });
+    }
+
+    const { paymentDate, paymentMethod, description } = req.body;
+
+    if (paymentDate) payment.paymentDate = new Date(paymentDate);
+    if (paymentMethod && ['cash', 'bank'].includes(paymentMethod)) {
+      payment.paymentMethod = paymentMethod;
+      // Keep cash/bank amounts consistent with method
+      if (paymentMethod === 'cash') {
+        payment.cashAmount = payment.totalAmount;
+        payment.bankAmount = 0;
+      } else {
+        payment.bankAmount = payment.totalAmount;
+        payment.cashAmount = 0;
+      }
+    }
+    if (description !== undefined) payment.description = description;
+
+    await payment.save();
+
+    res.json({ success: true, message: 'Payment updated successfully', data: payment });
+  } catch (error) {
+    console.error('Update payment error:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;
