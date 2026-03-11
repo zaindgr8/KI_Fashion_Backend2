@@ -1156,6 +1156,99 @@ router.put('/:id', auth, async (req, res) => {
       });
     }
 
+    // Re-sync ledger entries for the updated sale
+    // Only re-sync if this is a buyer sale (not manual)
+    if (sale.buyer) {
+      try {
+        const saleId = sale._id;
+        const buyerId = sale.buyer._id || sale.buyer;
+        const cashPayment = sale.cashPayment || 0;
+        const bankPayment = sale.bankPayment || 0;
+        const saleDate = sale.saleDate || sale.createdAt || new Date();
+
+        // 1. Delete old sale debit entry and sale-time payment credits
+        await Ledger.deleteMany({
+          referenceId: saleId,
+          referenceModel: 'Sale',
+          transactionType: 'sale'
+        });
+        await Ledger.deleteMany({
+          referenceId: saleId,
+          referenceModel: 'Sale',
+          isSaleTimePayment: true
+        });
+
+        // 2. Recreate sale debit entry with updated grandTotal
+        await Ledger.createEntry({
+          type: 'buyer',
+          entityId: buyerId,
+          entityModel: 'Buyer',
+          transactionType: 'sale',
+          referenceId: saleId,
+          referenceModel: 'Sale',
+          debit: grandTotal,
+          credit: 0,
+          date: saleDate,
+          description: `Sale ${sale.saleNumber} - Total: ${grandTotal.toFixed(2)} (edited)`,
+          paymentDetails: {
+            cashPayment,
+            bankPayment,
+            remainingBalance: Math.max(0, grandTotal - cashPayment - bankPayment)
+          },
+          createdBy: req.user._id
+        });
+
+        // 3. Recreate sale-time payment credits
+        if (cashPayment > 0) {
+          await Ledger.createEntry({
+            type: 'buyer',
+            entityId: buyerId,
+            entityModel: 'Buyer',
+            transactionType: 'receipt',
+            referenceId: saleId,
+            referenceModel: 'Sale',
+            debit: 0,
+            credit: cashPayment,
+            date: saleDate,
+            description: `Cash payment for Sale ${sale.saleNumber}`,
+            paymentMethod: 'cash',
+            isSaleTimePayment: true,
+            paymentDetails: { cashPayment, bankPayment: 0, remainingBalance: 0 },
+            createdBy: req.user._id
+          });
+        }
+        if (bankPayment > 0) {
+          await Ledger.createEntry({
+            type: 'buyer',
+            entityId: buyerId,
+            entityModel: 'Buyer',
+            transactionType: 'receipt',
+            referenceId: saleId,
+            referenceModel: 'Sale',
+            debit: 0,
+            credit: bankPayment,
+            date: saleDate,
+            description: `Bank/Card payment for Sale ${sale.saleNumber}`,
+            paymentMethod: 'bank',
+            isSaleTimePayment: true,
+            paymentDetails: { cashPayment: 0, bankPayment, remainingBalance: 0 },
+            createdBy: req.user._id
+          });
+        }
+
+        // 4. Recalculate running balances from this sale's date onwards
+        await Ledger.recalculateBalances('buyer', buyerId, saleDate);
+
+        // 5. Sync buyer's currentBalance from aggregated ledger
+        const newBalance = await Ledger.getBalance('buyer', buyerId);
+        await Buyer.findByIdAndUpdate(buyerId, { currentBalance: newBalance });
+
+      } catch (ledgerError) {
+        console.error('Ledger re-sync error after sale edit:', ledgerError);
+        // Don't fail the sale update if ledger sync fails
+      }
+    }
+
     res.json({
       success: true,
       message: 'Sale updated successfully',
