@@ -292,7 +292,7 @@ class EditRequestService {
     // Apply order-level changes
     if (exchangeRate !== undefined) dispatchOrder.exchangeRate = exchangeRate;
     if (percentage !== undefined) dispatchOrder.percentage = percentage;
-    if (discount !== undefined) dispatchOrder.discount = discount;
+    if (discount !== undefined) dispatchOrder.totalDiscount = discount;
 
     // Apply item-level changes
     if (updatedItems && Array.isArray(updatedItems)) {
@@ -340,7 +340,7 @@ class EditRequestService {
       grandTotal += item.landedPrice * item.quantity;
     }
 
-    supplierPaymentTotal -= (dispatchOrder.discount || 0);
+    supplierPaymentTotal -= (dispatchOrder.totalDiscount || 0);
     dispatchOrder.supplierPaymentTotal = supplierPaymentTotal;
     dispatchOrder.grandTotal = grandTotal;
     dispatchOrder.subtotal = grandTotal;
@@ -374,12 +374,22 @@ class EditRequestService {
    * Apply sale edit — mirrors logic from PUT /sales/:id
    */
   static async applySaleEdit(saleId, payload, session) {
+    // Recalculate grandTotal from current sale totals + new discount/shipping
+    const currentSale = await Sale.findById(saleId).session(session);
+    if (!currentSale) throw new Error('Sale not found');
+
+    const subtotal = currentSale.subtotal || 0;
+    const totalTax = currentSale.totalTax || 0;
+    const newDiscount = payload.totalDiscount ?? currentSale.totalDiscount ?? 0;
+    const newShipping = payload.shippingCost ?? currentSale.shippingCost ?? 0;
+    const grandTotal = Math.max(0, subtotal + totalTax - newDiscount + newShipping);
+
     const sale = await Sale.findByIdAndUpdate(
       saleId,
-      { ...payload },
+      { ...payload, subtotal, totalTax, grandTotal },
       { new: true, runValidators: true, session }
     );
-    if (!sale) throw new Error('Sale not found');
+    if (!sale) throw new Error('Sale not found after update');
 
     // Re-sync ledger entries with the updated sale amounts
     if (sale.buyer) {
