@@ -774,8 +774,6 @@ router.post("/entry", auth, async (req, res) => {
         console.log(`[Payment Split] Payment (€${newPaymentTotal.toFixed(2)}) exceeds order remaining (€${orderRemainingBalance.toFixed(2)})`);
         console.log(`[Payment Split] Splitting: €${paymentForOrder.toFixed(2)} to order + €${excessPayment.toFixed(2)} as credit`);
 
-        const startingBalance = await BalanceService.getSupplierBalance(entityId);
-
         // ============================================
         // START TRANSACTION - Ensure atomic operations
         // ============================================
@@ -804,7 +802,7 @@ router.post("/entry", auth, async (req, res) => {
             }
           };
 
-          const orderEntry = await Ledger.createEntry(orderPaymentEntry, session);
+          await Ledger.createEntry(orderPaymentEntry, session);
 
           // 2. Create credit entry for overpayment (no reference)
           const creditEntry = {
@@ -825,7 +823,7 @@ router.post("/entry", auth, async (req, res) => {
             }
           };
 
-          const creditLedgerEntry = await Ledger.createEntry(creditEntry, session);
+          await Ledger.createEntry(creditEntry, session);
 
           // 3. Update dispatch order to mark as fully paid
           dispatchOrder.paymentDetails = {
@@ -836,41 +834,6 @@ router.post("/entry", auth, async (req, res) => {
           };
 
           await dispatchOrder.save({ session });
-
-          // Create supplier payment receipt
-          await BalanceService.createSupplierPaymentReceipt({
-            supplierId: entityId,
-            amount: newPaymentTotal,
-            paymentMethod,
-            createdBy: req.user._id,
-            description: entryData.description,
-            date: entryData.date || new Date(),
-            balanceBefore: startingBalance,
-            distributions: [
-              {
-                orderId: referenceId,
-                orderNumber: dispatchOrder.orderNumber,
-                amountApplied: paymentForOrder,
-                previousRemaining: orderRemainingBalance,
-                newRemaining: 0,
-                fullyPaid: true,
-                isAdvance: false,
-                ledgerEntryId: orderEntry._id,
-              },
-              {
-                orderId: null,
-                orderNumber: 'ADVANCE_CREDIT',
-                amountApplied: excessPayment,
-                previousRemaining: 0,
-                newRemaining: 0,
-                fullyPaid: false,
-                isAdvance: true,
-                ledgerEntryId: creditLedgerEntry._id,
-              }
-            ],
-            session,
-          });
-
           await session.commitTransaction();
 
            
@@ -920,8 +883,6 @@ router.post("/entry", auth, async (req, res) => {
       // Calculate remaining balance (can be negative for overpayments)
       // Negative remaining = supplier owes admin (credit with supplier)
       const remainingBalance = totalAmount - totalPaid;
-
-      const startingBalance = await BalanceService.getSupplierBalance(entityId);
 
       // ============================================
       // START TRANSACTION - Ensure atomic operations
@@ -978,30 +939,6 @@ router.post("/entry", auth, async (req, res) => {
           { $inc: { currentBalance: -newPaymentTotal } },
           { session }
         );
-
-        // Create supplier payment receipt
-        await BalanceService.createSupplierPaymentReceipt({
-          supplierId: entityId,
-          amount: newPaymentTotal,
-          paymentMethod,
-          createdBy: req.user._id,
-          description: entryData.description,
-          date: entryData.date || new Date(),
-          balanceBefore: startingBalance,
-          distributions: [
-            {
-              orderId: referenceId,
-              orderNumber: dispatchOrder.orderNumber,
-              amountApplied: newPaymentTotal,
-              previousRemaining: remainingBalance,
-              newRemaining: Math.max(0, remainingAfterPayment),
-              fullyPaid: calculatedRemainingBalance <= 0,
-              isAdvance: false,
-              ledgerEntryId: entry._id,
-            }
-          ],
-          session,
-        });
 
         // Commit transaction - all operations succeeded
         await session.commitTransaction();
@@ -1124,8 +1061,6 @@ router.post("/entry", auth, async (req, res) => {
       // Negative remaining = supplier owes admin (credit with supplier)
       const remainingBalance = totalAmount - totalPaid;
 
-      const startingBalance = await BalanceService.getSupplierBalance(entityId);
-
       // ============================================
       // START TRANSACTION - Ensure atomic operations
       // ============================================
@@ -1189,30 +1124,6 @@ router.post("/entry", auth, async (req, res) => {
           { $inc: { currentBalance: -newPaymentTotal } },
           { session }
         );
-
-        // Create supplier payment receipt
-        await BalanceService.createSupplierPaymentReceipt({
-          supplierId: entityId,
-          amount: newPaymentTotal,
-          paymentMethod,
-          createdBy: req.user._id,
-          description: entryData.description,
-          date: entryData.date || new Date(),
-          balanceBefore: startingBalance,
-          distributions: [
-            {
-              orderId: referenceId,
-              orderNumber: dispatchOrder.orderNumber,
-              amountApplied: newPaymentTotal,
-              previousRemaining: remainingBalance,
-              newRemaining: calculatedRemainingBalance,
-              fullyPaid: calculatedRemainingBalance <= 0,
-              isAdvance: false,
-              ledgerEntryId: entry._id,
-            }
-          ],
-          session,
-        });
 
         // Commit transaction - all operations succeeded
         await session.commitTransaction();
