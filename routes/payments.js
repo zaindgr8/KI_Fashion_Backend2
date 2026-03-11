@@ -612,6 +612,15 @@ router.get('/:paymentNumber', auth, async (req, res) => {
  * }
  */
 router.post('/:paymentNumber/reverse', auth, async (req, res) => {
+  // Non-super-admin must submit edit requests instead of direct reversals
+  if (req.user.role !== 'super-admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Direct payment reversals are not permitted. Please submit a delete request for approval.',
+      submitRequestAt: '/api/edit-requests'
+    });
+  }
+
   const session = await mongoose.startSession();
   session.startTransaction({
     readConcern: { level: 'snapshot' },

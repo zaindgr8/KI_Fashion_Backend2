@@ -2761,8 +2761,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
 // ==========================================
 router.get('/:id/edit-impact', auth, async (req, res) => {
   try {
-    if (req.user.role !== 'super-admin') {
-      return sendResponse.error(res, 'Only super-admin can access order edit impact analysis', 403);
+    if (req.user.role !== 'super-admin' && req.user.role !== 'admin' && req.user.role !== 'accountant') {
+      return sendResponse.error(res, 'Access denied', 403);
     }
 
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
@@ -2850,7 +2850,7 @@ router.get('/:id/edit-impact', auth, async (req, res) => {
 router.patch('/:id/edit-confirmed', auth, async (req, res) => {
   try {
     if (req.user.role !== 'super-admin') {
-      return sendResponse.error(res, 'Only super-admin can edit confirmed orders', 403);
+      return sendResponse.error(res, 'Direct edits are not permitted. Please submit an edit request for approval.', 403);
     }
 
     const {
@@ -3008,7 +3008,8 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
         await inventory.updateBatchPrices(dispatchOrder._id, {
           costPrice: item.costPrice,
           landedPrice,
-          exchangeRate: newExchangeRate
+          exchangeRate: newExchangeRate,
+          quantity: item.quantity
         });
       } catch (invErr) {
         console.error(`[Edit Confirmed] Failed to update inventory batch for product ${item.product}:`, invErr.message);

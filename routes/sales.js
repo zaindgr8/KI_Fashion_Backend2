@@ -1111,6 +1111,15 @@ router.get('/:id', auth, async (req, res) => {
 // Update sale
 router.put('/:id', auth, async (req, res) => {
   try {
+    // Non-super-admin must submit edit requests instead of direct edits
+    if (req.user.role !== 'super-admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Direct edits are not permitted. Please submit an edit request for approval.',
+        submitRequestAt: '/api/edit-requests'
+      });
+    }
+
     const { error } = saleSchema.validate(req.body);
     if (error) {
       return res.status(400).json({
@@ -1366,6 +1375,15 @@ router.patch('/:id/payment', auth, async (req, res) => {
 // Cancel sale
 router.delete('/:id', auth, async (req, res) => {
   try {
+    // Non-super-admin must submit delete requests instead of direct deletes
+    if (req.user.role !== 'super-admin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Direct deletions are not permitted. Please submit a delete request for approval.',
+        submitRequestAt: '/api/edit-requests'
+      });
+    }
+
     const sale = await Sale.findById(req.params.id);
 
     if (!sale) {

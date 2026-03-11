@@ -196,6 +196,7 @@ app.use("/api/wishlist", require("./routes/wishlist"));
 app.use("/api/addresses", require("./routes/addresses"));
 app.use("/api/checkout", require("./routes/checkout"));
 app.use("/api/settings", require("./routes/settings"));
+app.use("/api/edit-requests", require("./routes/editRequests"));
 
 // Health check endpoint
 app.get("/health", (req, res) => {

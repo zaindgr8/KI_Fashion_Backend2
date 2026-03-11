@@ -83,6 +83,10 @@ const ledgerSchema = new mongoose.Schema({
     ref: 'User',
     required: true
   },
+  editRequestId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'EditRequest'
+  },
   entryNumber: {
     type: String,
     unique: true,

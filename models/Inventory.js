@@ -568,7 +568,7 @@ inventorySchema.methods.getTotalBatchQuantity = function () {
 // Update prices on an existing purchase batch when a confirmed order is edited.
 // Adjusts costPrice, landedPrice, and exchangeRate for the matching batch,
 // then recalculates the weighted averageCostPrice across all batches.
-inventorySchema.methods.updateBatchPrices = function (dispatchOrderId, { costPrice, landedPrice, exchangeRate }) {
+inventorySchema.methods.updateBatchPrices = function (dispatchOrderId, { costPrice, landedPrice, exchangeRate, quantity }) {
   const batch = this.purchaseBatches.find(
     b => b.dispatchOrderId && b.dispatchOrderId.toString() === dispatchOrderId.toString()
   );
@@ -580,6 +580,20 @@ inventorySchema.methods.updateBatchPrices = function (dispatchOrderId, { costPri
   batch.costPrice = costPrice;
   batch.landedPrice = landedPrice;
   batch.exchangeRate = exchangeRate;
+
+  // Update batch quantity if provided (admin edited the ordered quantity)
+  if (quantity !== undefined && quantity !== null) {
+    const newQty = parseInt(quantity);
+    if (!isNaN(newQty) && newQty !== batch.quantity) {
+      const soldQty = (batch.quantity || 0) - (batch.remainingQuantity || 0);
+      const quantityDelta = newQty - (batch.quantity || 0);
+      batch.quantity = newQty;
+      batch.remainingQuantity = Math.max(0, newQty - soldQty);
+      this.currentStock = Math.max(0, (this.currentStock || 0) + quantityDelta);
+      this.availableStock = Math.max(0, (this.availableStock || 0) + quantityDelta);
+    }
+  }
+
   this.markModified('purchaseBatches');
 
   // Recalculate weighted average from all batches (uses remainingQuantity)
