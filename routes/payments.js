@@ -650,58 +650,38 @@ router.post('/:paymentNumber/reverse', auth, async (req, res) => {
       });
     }
 
-    if (payment.status === 'reversed') {
-      await session.abortTransaction();
-      return res.status(400).json({
-        success: false,
-        message: 'Payment has already been reversed'
-      });
+    console.log(`Deleting payment ${paymentNumber} - Amount: £${payment.totalAmount.toFixed(2)}`);
+
+    // Collect ledger entry IDs to delete (original credit entries from distributions)
+    const ledgerEntryIdsToDelete = payment.distributions
+      .map(d => d.ledgerEntryId)
+      .filter(Boolean);
+
+    // Delete the original ledger credit entries for each distribution
+    if (ledgerEntryIdsToDelete.length > 0) {
+      await Ledger.deleteMany({ _id: { $in: ledgerEntryIdsToDelete } }).session(session);
     }
 
-     
-     
-    console.log(`Original Amount: £${payment.totalAmount.toFixed(2)}`);
-     
-     
+    // Also clean up any old-style REVERSAL adjustment entries pointing back to this payment's sales
+    // (created by the previous reversal approach — safe no-op if none exist)
+    await Ledger.deleteMany({
+      type: 'buyer',
+      entityId: payment.customerId,
+      transactionType: 'adjustment',
+      description: { $regex: `^REVERSAL: ${paymentNumber}` }
+    }).session(session);
 
-    const reversalLedgerEntries = [];
-
-    // Reverse each distribution
+    // Roll back sale payment tracking for each distribution
     for (const dist of payment.distributions) {
-      // Create reversal ledger entry (debit to reverse the credit)
-      const reversalEntry = await Ledger.createEntry({
-        type: 'buyer',
-        entityId: payment.customerId,
-        entityModel: 'Buyer',
-        transactionType: 'adjustment',
-        referenceId: dist.saleId,
-        referenceModel: dist.saleId ? 'Sale' : undefined,
-        debit: dist.amountApplied, // Debit to reverse the credit
-        credit: 0,
-        date: new Date(),
-        description: `REVERSAL: ${paymentNumber} - ${reason}`,
-        createdBy: req.user._id,
-        paymentDetails: {
-          cashPayment: 0,
-          bankPayment: 0,
-          remainingBalance: 0
-        }
-      }, session);
-
-      reversalLedgerEntries.push(reversalEntry._id);
-
-      // If this was applied to a sale, update the sale's payment tracking
       if (dist.saleId) {
         const sale = await Sale.findById(dist.saleId).session(session);
         if (sale) {
-          // Reverse the payment amounts
           if (payment.paymentMethod === 'cash') {
             sale.cashPayment = Math.max(0, (sale.cashPayment || 0) - dist.amountApplied);
           } else {
             sale.bankPayment = Math.max(0, (sale.bankPayment || 0) - dist.amountApplied);
           }
 
-          // Recalculate payment status
           const newTotalPaid = (sale.cashPayment || 0) + (sale.bankPayment || 0);
           if (newTotalPaid <= 0) {
             sale.paymentStatus = 'pending';
@@ -711,44 +691,38 @@ router.post('/:paymentNumber/reverse', auth, async (req, res) => {
             sale.paymentStatus = 'partial';
           }
 
+          // Remove this payment from the sale's paymentReferences
+          if (sale.paymentReferences) {
+            sale.paymentReferences = sale.paymentReferences.filter(
+              pr => pr.paymentNumber !== paymentNumber
+            );
+          }
+
           await sale.save({ session });
-          console.log(`Reversed £${dist.amountApplied.toFixed(2)} from ${dist.saleNumber}`);
+          console.log(`Rolled back £${dist.amountApplied.toFixed(2)} from ${dist.saleNumber}`);
         }
-      } else {
-        console.log(`Reversed advance credit of £${dist.amountApplied.toFixed(2)}`);
       }
     }
 
-    // Update payment status
-    payment.status = 'reversed';
-    payment.reversalInfo = {
-      reversedAt: new Date(),
-      reversedBy: req.user._id,
-      reason,
-      reversalLedgerEntries
-    };
+    // Hard-delete the payment record
+    await Payment.findByIdAndDelete(payment._id).session(session);
 
-    await payment.save({ session });
-
-    // Commit transaction
+    // Commit transaction before recalculating balances (outside transaction for performance)
     await session.commitTransaction();
 
-     
-     
-     
-     
-
-    // Get updated payment
-    const updatedPayment = await Payment.findById(payment._id)
-      .populate('customerId', 'name company email phone')
-      .populate('createdBy', 'name')
-      .populate('reversalInfo.reversedBy', 'name')
-      .lean();
+    // Recalculate running balances from the payment date onwards and sync buyer balance
+    try {
+      await Ledger.recalculateBalances('buyer', payment.customerId, payment.paymentDate || payment.createdAt);
+      const newBalance = await Ledger.getBalance('buyer', payment.customerId);
+      await Buyer.findByIdAndUpdate(payment.customerId, { currentBalance: newBalance });
+    } catch (balanceError) {
+      console.error('Balance sync error after payment deletion:', balanceError);
+    }
 
     res.json({
       success: true,
-      message: `Payment ${paymentNumber} has been reversed`,
-      data: updatedPayment
+      message: `Payment ${paymentNumber} has been deleted`,
+      data: { paymentNumber }
     });
 
   } catch (error) {
