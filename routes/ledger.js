@@ -1975,4 +1975,82 @@ router.post("/buyer/:id/debit-adjustment", auth, async (req, res) => {
   }
 });
 
+/**
+ * POST /ledger/supplier/:id/payment-receipts/:receiptNumber/reverse
+ * Reverse a supplier payment receipt (super-admin only).
+ * Creates debit ledger entries to undo each distribution and marks the receipt reversed.
+ */
+router.post('/supplier/:id/payment-receipts/:receiptNumber/reverse', auth, async (req, res) => {
+  if (req.user.role !== 'super-admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Direct reversals are not permitted. Please submit a delete request for approval.',
+      submitRequestAt: '/api/edit-requests'
+    });
+  }
+
+  const { reason } = req.body;
+  if (!reason || !reason.trim()) {
+    return res.status(400).json({ success: false, message: 'Reversal reason is required' });
+  }
+
+  const session = await mongoose.startSession();
+  session.startTransaction({ readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
+
+  try {
+    const receipt = await SupplierPaymentReceipt.findOne({
+      supplierId: req.params.id,
+      receiptNumber: req.params.receiptNumber
+    }).session(session);
+
+    if (!receipt) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: 'Receipt not found' });
+    }
+    if (receipt.status === 'reversed') {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'Receipt has already been reversed' });
+    }
+
+    const reversalLedgerEntries = [];
+
+    for (const dist of receipt.distributions) {
+      const reversalEntry = await Ledger.createEntry({
+        type: 'supplier',
+        entityId: receipt.supplierId,
+        entityModel: 'Supplier',
+        transactionType: 'adjustment',
+        referenceId: dist.dispatchOrderId || undefined,
+        referenceModel: dist.dispatchOrderId ? 'DispatchOrder' : undefined,
+        debit: dist.amountApplied,
+        credit: 0,
+        date: new Date(),
+        description: `REVERSAL: ${receipt.receiptNumber} - ${reason.trim()}`,
+        createdBy: req.user._id,
+        paymentDetails: { cashPayment: 0, bankPayment: 0, remainingBalance: 0 }
+      }, session);
+      reversalLedgerEntries.push(reversalEntry._id);
+    }
+
+    receipt.status = 'reversed';
+    receipt.reversalInfo = {
+      reversedAt: new Date(),
+      reversedBy: req.user._id,
+      reason: reason.trim(),
+      reversalLedgerEntries
+    };
+    await receipt.save({ session });
+
+    await session.commitTransaction();
+
+    return res.json({ success: true, message: `Receipt ${receipt.receiptNumber} reversed successfully`, data: receipt });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Reverse supplier receipt error:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Server error' });
+  } finally {
+    session.endSession();
+  }
+});
+
 module.exports = router;

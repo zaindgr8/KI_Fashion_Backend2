@@ -92,8 +92,20 @@ const supplierPaymentReceiptSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['active'],
+    enum: ['active', 'reversed'],
     default: 'active'
+  },
+  reversalInfo: {
+    reversedAt: Date,
+    reversedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    },
+    reason: String,
+    reversalLedgerEntries: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Ledger'
+    }]
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
