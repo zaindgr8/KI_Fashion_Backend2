@@ -13,6 +13,14 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// Middleware: require super-admin role only
+function requireSuperAdmin(req, res, next) {
+  if (!req.user || req.user.role !== 'super-admin') {
+    return res.status(403).json({ success: false, message: 'Only super-admin can create users' });
+  }
+  next();
+}
+
 const userSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
   email: Joi.string().email().required(),
@@ -36,8 +44,8 @@ const updateUserSchema = Joi.object({
   isActive: Joi.boolean().optional()
 });
 
-// Create user (admin only)
-router.post('/', auth, requireAdmin, async (req, res) => {
+// Create user (super-admin only)
+router.post('/', auth, requireSuperAdmin, async (req, res) => {
   try {
     const { error } = userSchema.validate(req.body, { allowUnknown: true });
     if (error) {
