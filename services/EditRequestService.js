@@ -378,7 +378,17 @@ class EditRequestService {
     const currentSale = await Sale.findById(saleId).session(session);
     if (!currentSale) throw new Error('Sale not found');
 
-    const subtotal = currentSale.subtotal || 0;
+    // Ensure each item has totalPrice computed (frontend may not send it)
+    if (Array.isArray(payload.items)) {
+      payload.items = payload.items.map(item => ({
+        ...item,
+        totalPrice: item.totalPrice ?? (item.unitPrice * item.quantity * (1 - (item.discount || 0) / 100))
+      }));
+    }
+
+    const newItems = payload.items || currentSale.items;
+    const newSubtotal = newItems.reduce((sum, item) => sum + (item.totalPrice ?? item.unitPrice * item.quantity), 0);
+    const subtotal = payload.items ? newSubtotal : (currentSale.subtotal || 0);
     const totalTax = currentSale.totalTax || 0;
     const newDiscount = payload.totalDiscount ?? currentSale.totalDiscount ?? 0;
     const newShipping = payload.shippingCost ?? currentSale.shippingCost ?? 0;
