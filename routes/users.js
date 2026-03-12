@@ -25,7 +25,7 @@ const userSchema = Joi.object({
   name: Joi.string().min(2).max(100).required(),
   email: Joi.string().email().required(),
   password: Joi.string().min(6).required(),
-  role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant').default('employee'),
+  role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant', 'viewer').default('employee'),
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
@@ -36,7 +36,7 @@ const userSchema = Joi.object({
 const updateUserSchema = Joi.object({
   name: Joi.string().min(2).max(100).optional(),
   email: Joi.string().email().optional(),
-  role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant').optional(),
+  role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant', 'viewer').optional(),
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),

@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
-const ROLE_OPTIONS = ['super-admin', 'admin', 'employee',  'supplier', 'distributor', 'buyer'];
+const ROLE_OPTIONS = ['super-admin', 'admin', 'employee', 'accountant', 'viewer', 'supplier', 'distributor', 'buyer'];
 const PORTAL_ACCESS_OPTIONS = ['crm', 'supplier', 'distributor'];
 const SIGNUP_SOURCES = ['crm', 'supplier-portal', 'distributor-portal', 'import'];
 
