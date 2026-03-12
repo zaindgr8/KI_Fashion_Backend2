@@ -1466,10 +1466,9 @@ router.patch('/:id/payment', auth, async (req, res) => {
   }
 });
 
-// Cancel sale
+// Delete sale (Super Admin Only) — restores inventory, deletes payments and ledger entries
 router.delete('/:id', auth, async (req, res) => {
   try {
-    // Non-super-admin must submit delete requests instead of direct deletes
     if (req.user.role !== 'super-admin') {
       return res.status(403).json({
         success: false,
@@ -1478,51 +1477,25 @@ router.delete('/:id', auth, async (req, res) => {
       });
     }
 
-    const sale = await Sale.findById(req.params.id);
+    const saleId = req.params.id;
+    const session = await mongoose.startSession();
+    session.startTransaction();
 
-    if (!sale) {
-      return res.status(404).json({
-        success: false,
-        message: 'Sale not found'
-      });
+    let deletedSale;
+    try {
+      deletedSale = await EditRequestService.performSaleDeletion(saleId, req.user._id, session);
+      await session.commitTransaction();
+    } catch (err) {
+      await session.abortTransaction();
+      throw err;
+    } finally {
+      session.endSession();
     }
 
-    // Release reserved stock
-    for (const item of sale.items) {
-      await Inventory.findOneAndUpdate(
-        { product: item.product },
-        { $inc: { reservedStock: -item.quantity } }
-      );
-
-      // Release PacketStock reservation if this is a packet sale
-      if (item.isPacketSale && item.packetStock) {
-        try {
-          const packetStock = await PacketStock.findById(item.packetStock);
-          if (packetStock) {
-            await packetStock.releaseReservedPackets(item.quantity);
-
-          }
-        } catch (packetError) {
-          console.error(`Error releasing PacketStock for sale ${sale.saleNumber}:`, packetError);
-          // Continue - don't fail cancellation for packet release issues
-        }
-      }
-    }
-
-    sale.deliveryStatus = 'cancelled';
-    await sale.save();
-
-    res.json({
-      success: true,
-      message: 'Sale cancelled successfully'
-    });
-
+    res.json({ success: true, message: `Sale ${deletedSale.saleNumber} deleted successfully` });
   } catch (error) {
-    console.error('Cancel sale error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    console.error('Delete sale error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 
@@ -1599,37 +1572,6 @@ router.get('/:id/invoice', auth, async (req, res) => {
       success: false,
       message: 'Failed to generate invoice'
     });
-  }
-});
-
-// ==========================================
-// DELETE /:id — Delete a sale (Super Admin Only)
-// ==========================================
-router.delete('/:id', auth, async (req, res) => {
-  try {
-    if (req.user.role !== 'super-admin') {
-      return res.status(403).json({ success: false, message: 'Only super admin can delete sales directly' });
-    }
-
-    const saleId = req.params.id;
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
-    let deletedSale;
-    try {
-      deletedSale = await EditRequestService.performSaleDeletion(saleId, req.user._id, session);
-      await session.commitTransaction();
-    } catch (err) {
-      await session.abortTransaction();
-      throw err;
-    } finally {
-      session.endSession();
-    }
-
-    res.json({ success: true, message: `Sale ${deletedSale.saleNumber} deleted successfully` });
-  } catch (error) {
-    console.error('Delete sale error:', error);
-    res.status(500).json({ success: false, message: error.message });
   }
 });
 
