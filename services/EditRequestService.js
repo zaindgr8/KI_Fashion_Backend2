@@ -534,8 +534,20 @@ class EditRequestService {
       const inventory = await Inventory.findOne({ product: item.product }).session(session);
 
       if (inventory) {
+        // Auto-heal negative reservedStock from old bugs
+        if (inventory.reservedStock < 0) {
+          inventory.reservedStock = 0;
+        }
+
+        // Clean up any existing invalid variants in the database before saving
+        if (inventory.variantComposition && Array.isArray(inventory.variantComposition)) {
+          inventory.variantComposition = inventory.variantComposition.filter(v => v.size && v.color);
+        }
+
+        const hasValidVariant = item.variant && item.variant.size && item.variant.color;
+
         // If variant tracked, restore variant stock
-        if (product && product.variantTracking && product.variantTracking.enabled && item.variant) {
+        if (product && product.variantTracking && product.variantTracking.enabled && hasValidVariant) {
           inventory.stockMovements.push({
             type: 'in',
             quantity: item.quantity,
