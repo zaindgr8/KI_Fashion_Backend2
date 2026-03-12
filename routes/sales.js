@@ -17,6 +17,7 @@ const { generateInvoicePDF } = require('../utils/invoiceGenerator');
 const { sendInvoiceEmails } = require('../utils/emailService');
 const { generateSignedUrls } = require('../utils/imageUpload');
 const BalanceService = require('../services/BalanceService');
+const EditRequestService = require('../services/EditRequestService');
 const { normalizeBarcode, parseBarcodeType } = require('../utils/barcodeGenerator');
 
 const router = express.Router();
@@ -178,25 +179,25 @@ const calculateTotals = (items, totalDiscount = 0, shippingCost = 0) => {
 const processDeliveryWithTransaction = async (sale, productMap, inventoryMap, userId) => {
   const session = await mongoose.startSession();
   session.startTransaction();
-  
+
   const results = {
     inventoryUpdated: 0,
     packetsUpdated: 0,
     errors: []
   };
-  
+
   try {
     for (const item of sale.items) {
       const product = productMap.get(item.product.toString());
       const inventory = inventoryMap.get(item.product.toString());
-      
+
       if (!inventory) {
         results.errors.push(`Inventory not found for product ${item.product}`);
         continue;
       }
-      
+
       const quantityToDeliver = item.quantity;
-      
+
       // Handle variant-specific stock deduction
       if (product && product.variantTracking && product.variantTracking.enabled && item.variant) {
         await inventory.reduceVariantStock(
@@ -211,12 +212,12 @@ const processDeliveryWithTransaction = async (sale, productMap, inventoryMap, us
       } else {
         // Legacy stock deduction (non-variant products)
         const currentReservedStock = inventory.reservedStock || 0;
-        
+
         inventory.currentStock = Math.max(0, inventory.currentStock - quantityToDeliver);
         if (currentReservedStock > 0) {
           inventory.reservedStock = Math.max(0, currentReservedStock - quantityToDeliver);
         }
-        
+
         inventory.stockMovements.push({
           type: 'out',
           quantity: quantityToDeliver,
@@ -226,13 +227,13 @@ const processDeliveryWithTransaction = async (sale, productMap, inventoryMap, us
           notes: `Sale delivery: ${sale.saleNumber}`,
           date: new Date()
         });
-        
+
         inventory.lastStockUpdate = new Date();
         await inventory.save({ session });
       }
-      
+
       results.inventoryUpdated++;
-      
+
       // Update PacketStock atomically if this is a packet sale
       if (item.isPacketSale && item.packetStock) {
         const packetStock = await PacketStock.findById(item.packetStock).session(session);
@@ -245,17 +246,17 @@ const processDeliveryWithTransaction = async (sale, productMap, inventoryMap, us
         }
       }
     }
-    
+
     await session.commitTransaction();
     session.endSession();
-    
-     
+
+
     return { success: true, ...results };
-    
+
   } catch (error) {
     await session.abortTransaction();
     session.endSession();
-    
+
     console.error(`[Sale Delivery] Transaction failed for ${sale.saleNumber}:`, error.message);
     return { success: false, error: error.message, ...results };
   }
@@ -269,40 +270,40 @@ const processDeliveryWithTransaction = async (sale, productMap, inventoryMap, us
 router.post('/lookup-barcode', auth, async (req, res) => {
   try {
     const { barcode } = req.body;
-    
+
     if (!barcode) {
       return res.status(400).json({
         success: false,
         message: 'Barcode is required'
       });
     }
-    
+
     const normalizedBarcode = normalizeBarcode(barcode);
     const barcodeInfo = parseBarcodeType(normalizedBarcode);
-    
+
     if (!barcodeInfo.isValid) {
       return res.status(400).json({
         success: false,
         message: 'Invalid barcode format. Expected PKT-XXXXXXXX or LSE-XXXXXXXX'
       });
     }
-    
-    const packetStock = await PacketStock.findOne({ 
-      barcode: normalizedBarcode, 
-      isActive: true 
+
+    const packetStock = await PacketStock.findOne({
+      barcode: normalizedBarcode,
+      isActive: true
     })
       .populate('product', 'name sku productCode images pricing season')
       .populate('supplier', 'name company');
-    
+
     if (!packetStock) {
       return res.status(404).json({
         success: false,
         message: 'Packet not found. Check barcode and try again.'
       });
     }
-    
+
     const actualAvailable = packetStock.availablePackets - packetStock.reservedPackets;
-    
+
     if (actualAvailable <= 0) {
       return res.status(400).json({
         success: false,
@@ -314,7 +315,7 @@ router.post('/lookup-barcode', auth, async (req, res) => {
         }
       });
     }
-    
+
     // Convert product images to signed URLs if present
     let productImages = [];
     if (packetStock.product?.images && packetStock.product.images.length > 0) {
@@ -325,7 +326,7 @@ router.post('/lookup-barcode', auth, async (req, res) => {
         productImages = packetStock.product.images;
       }
     }
-    
+
     return res.json({
       success: true,
       data: {
@@ -581,7 +582,7 @@ router.post('/', auth, async (req, res) => {
           } else {
             // Deduct from total stock directly
             inventory.currentStock = Math.max(0, inventory.currentStock - item.quantity);
-            
+
             inventory.stockMovements.push({
               type: 'out',
               quantity: item.quantity,
@@ -591,10 +592,10 @@ router.post('/', auth, async (req, res) => {
               notes: `Sale: ${saleNumber}`,
               date: new Date()
             });
-            
+
             inventory.lastStockUpdate = new Date();
             await inventory.save({ session: stockSession });
-             
+
           }
 
           // Handle PacketStock - always use sellPackets (no more reservation)
@@ -603,7 +604,7 @@ router.post('/', auth, async (req, res) => {
             if (packetStock) {
               const packetQty = item.packetQuantity || Math.ceil(item.quantity / (item.totalItemsPerPacket || 1));
               await packetStock.sellPackets(packetQty);
-               
+
             } else {
               console.warn(`PacketStock not found for ID ${item.packetStock} when creating sale ${saleNumber}`);
             }
@@ -771,7 +772,7 @@ router.post('/', auth, async (req, res) => {
             sale.buyer,
             { currentBalance: ledgerBalance }
           );
-           
+
         } catch (balanceError) {
           console.error('Error syncing buyer balance from ledger after sale creation:', balanceError);
           // Don't fail the sale creation if balance sync fails
@@ -861,7 +862,7 @@ router.post('/', auth, async (req, res) => {
             distributorEmail,
             adminEmail
           );
-           
+
         } else {
           console.warn('No email addresses found for invoice delivery');
         }
@@ -1297,7 +1298,7 @@ router.patch('/:id/delivered', auth, async (req, res) => {
 
     // Process delivery with atomic transaction for stock updates
     const deliveryResult = await processDeliveryWithTransaction(sale, productMap, inventoryMap, req.user._id);
-    
+
     if (!deliveryResult.success) {
       console.error(`[Sale Delivery] Transaction failed for ${sale.saleNumber}, falling back to non-transactional update`);
       // Fallback: Continue with non-transactional approach for backward compatibility
@@ -1400,7 +1401,7 @@ router.patch('/:id/delivered', auth, async (req, res) => {
         sale.buyer,
         { currentBalance: ledgerBalance }
       );
-       
+
     } catch (balanceError) {
       console.error('Error syncing buyer balance from ledger:', balanceError);
       // Don't fail the delivery if balance sync fails
@@ -1499,7 +1500,7 @@ router.delete('/:id', auth, async (req, res) => {
           const packetStock = await PacketStock.findById(item.packetStock);
           if (packetStock) {
             await packetStock.releaseReservedPackets(item.quantity);
-             
+
           }
         } catch (packetError) {
           console.error(`Error releasing PacketStock for sale ${sale.saleNumber}:`, packetError);
@@ -1588,7 +1589,7 @@ router.get('/:id/invoice', auth, async (req, res) => {
     // Send the PDF file
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${invoiceFileName}"`);
-    
+
     const fileStream = fs.createReadStream(invoicePath);
     fileStream.pipe(res);
 
@@ -1598,6 +1599,37 @@ router.get('/:id/invoice', auth, async (req, res) => {
       success: false,
       message: 'Failed to generate invoice'
     });
+  }
+});
+
+// ==========================================
+// DELETE /:id — Delete a sale (Super Admin Only)
+// ==========================================
+router.delete('/:id', auth, async (req, res) => {
+  try {
+    if (req.user.role !== 'super-admin') {
+      return res.status(403).json({ success: false, message: 'Only super admin can delete sales directly' });
+    }
+
+    const saleId = req.params.id;
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    let deletedSale;
+    try {
+      deletedSale = await EditRequestService.performSaleDeletion(saleId, req.user._id, session);
+      await session.commitTransaction();
+    } catch (err) {
+      await session.abortTransaction();
+      throw err;
+    } finally {
+      session.endSession();
+    }
+
+    res.json({ success: true, message: `Sale ${deletedSale.saleNumber} deleted successfully` });
+  } catch (error) {
+    console.error('Delete sale error:', error);
+    res.status(500).json({ success: false, message: error.message });
   }
 });
 

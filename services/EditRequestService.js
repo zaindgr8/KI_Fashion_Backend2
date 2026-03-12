@@ -510,33 +510,124 @@ class EditRequestService {
       }
       throw new Error('Only pending dispatch orders can be deleted');
     } else if (entityType === 'sale') {
-      const sale = await Sale.findById(entityId).session(session);
-      if (!sale) throw new Error('Sale not found');
-
-      // Release reserved stock
-      for (const item of sale.items) {
-        await Inventory.findOneAndUpdate(
-          { product: item.product },
-          { $inc: { reservedStock: -item.quantity } },
-          { session }
-        );
-        if (item.isPacketSale && item.packetStock) {
-          const packetStock = await PacketStock.findById(item.packetStock).session(session);
-          if (packetStock) {
-            await packetStock.releaseReservedPackets(item.quantity);
-          }
-        }
-      }
-
-      sale.deliveryStatus = 'cancelled';
-      await sale.save({ session });
-      return { message: `Sale ${sale.saleNumber} cancelled` };
+      const sale = await EditRequestService.performSaleDeletion(entityId, reviewerId, session);
+      return { message: `Sale ${sale.saleNumber} deleted` };
     } else if (entityType === 'payment') {
       // Payment deletion = reversal
       return { message: 'Payment delete applied (reversal)' };
     }
 
     return { message: 'Delete applied' };
+  }
+
+  /**
+   * Performs the full deletion logic for a Sale (restoring stock, removing ledgers, updating buyer balance).
+   * Used for both direct super-admin deletes and approved delete requests.
+   */
+  static async performSaleDeletion(saleId, userId, session) {
+    const sale = await Sale.findById(saleId).session(session);
+    if (!sale) throw new Error('Sale not found');
+
+    // 1. Restore Inventory and PacketStock
+    for (const item of sale.items) {
+      const product = await mongoose.model('Product').findById(item.product).session(session);
+      const inventory = await Inventory.findOne({ product: item.product }).session(session);
+
+      if (inventory) {
+        // If variant tracked, restore variant stock
+        if (product && product.variantTracking && product.variantTracking.enabled && item.variant) {
+          inventory.stockMovements.push({
+            type: 'in',
+            quantity: item.quantity,
+            reference: 'Sale Deletion',
+            referenceId: sale._id,
+            user: userId,
+            notes: `Deleted Sale: ${sale.saleNumber}`,
+            date: new Date()
+          });
+          inventory.currentStock += item.quantity;
+
+          let variantFound = false;
+          inventory.variantComposition.forEach(v => {
+            if (v.size === item.variant.size && v.color === item.variant.color) {
+              v.quantity += item.quantity;
+              variantFound = true;
+            }
+          });
+          if (!variantFound) {
+            inventory.variantComposition.push({
+              size: item.variant.size,
+              color: item.variant.color,
+              quantity: item.quantity,
+              reservedQuantity: 0
+            });
+          }
+          inventory.lastStockUpdate = new Date();
+          await inventory.save({ session });
+        } else {
+          inventory.currentStock += item.quantity;
+          inventory.stockMovements.push({
+            type: 'in',
+            quantity: item.quantity,
+            reference: 'Sale Deletion',
+            referenceId: sale._id,
+            user: userId,
+            notes: `Deleted Sale: ${sale.saleNumber}`,
+            date: new Date()
+          });
+          inventory.lastStockUpdate = new Date();
+          await inventory.save({ session });
+        }
+      }
+
+      if (item.isPacketSale && item.packetStock) {
+        const packetStock = await PacketStock.findById(item.packetStock).session(session);
+        if (packetStock) {
+          const packetQty = item.packetQuantity || Math.ceil(item.quantity / (item.totalItemsPerPacket || 1));
+          packetStock.availablePackets += packetQty;
+          packetStock.soldPackets = Math.max(0, packetStock.soldPackets - packetQty);
+          await packetStock.save({ session });
+        }
+      }
+    }
+
+    // 2. Delete Ledger Entries
+    await Ledger.deleteMany({ referenceId: sale._id, referenceModel: 'Sale' }).session(session);
+    await Ledger.deleteMany({ referenceId: sale._id, isSaleTimePayment: true }).session(session);
+
+    // 3. Delete Payment distributions
+    const salePayments = await Payment.find({ 'distributions.saleId': sale._id }).session(session);
+    for (const payment of salePayments) {
+      if (payment.distributions.length === 1 && payment.distributions[0].saleId.toString() === sale._id.toString()) {
+        await Payment.findByIdAndDelete(payment._id).session(session);
+      } else {
+        payment.distributions = payment.distributions.filter(d => d.saleId.toString() !== sale._id.toString());
+        await payment.save({ session });
+      }
+    }
+
+    // 4. Update Buyer Metrics
+    if (sale.buyer) {
+      const cashPayment = sale.cashPayment || 0;
+      const bankPayment = sale.bankPayment || 0;
+      const remainingBalance = sale.grandTotal - cashPayment - bankPayment;
+
+      await Buyer.findByIdAndUpdate(
+        sale.buyer,
+        {
+          $inc: {
+            totalSales: -sale.grandTotal,
+            currentBalance: -remainingBalance
+          }
+        },
+        { session }
+      );
+    }
+
+    // 5. Delete the Sale Document
+    await Sale.findByIdAndDelete(saleId).session(session);
+
+    return sale;
   }
 
   /**
