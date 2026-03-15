@@ -1583,11 +1583,6 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.exchangeRate = finalExchangeRate;
     dispatchOrder.percentage = finalPercentage;
 
-    const transactionDate = dispatchOrder.dispatchDate ? new Date(dispatchOrder.dispatchDate) : null;
-    if (!transactionDate || Number.isNaN(transactionDate.getTime())) {
-      return sendResponse.error(res, 'Dispatch date is required before confirming this order.', 400);
-    }
-
     // Update logistics and date if provided (Super-admin can refine these during confirmation)
     if (logisticsCompany) {
       dispatchOrder.logisticsCompany = logisticsCompany;
