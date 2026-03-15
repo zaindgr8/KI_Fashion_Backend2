@@ -2816,6 +2816,8 @@ router.get('/:id/edit-impact', auth, async (req, res) => {
         season: Array.isArray(item.season) ? item.season : [],
         material: item.material || '',
         description: item.description || '',
+        packets: Array.isArray(item.packets) ? item.packets : [],
+        useVariantTracking: item.useVariantTracking || false,
         orderedQuantity,
         soldQuantity,
         remainingQuantity,
@@ -2935,7 +2937,9 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
           reqItem.season !== undefined ||
           reqItem.material !== undefined ||
           reqItem.description !== undefined ||
-          reqItem.productId !== undefined;
+          reqItem.productId !== undefined ||
+          reqItem.packets !== undefined ||
+          reqItem.useVariantTracking !== undefined;
 
         if (hasConfigMutation && item.product) {
           const inventory = await Inventory.findOne({ product: item.product });
@@ -2976,6 +2980,8 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
         if (reqItem.season !== undefined) item.season = Array.isArray(reqItem.season) ? reqItem.season.filter(Boolean) : [];
         if (reqItem.material !== undefined) item.material = reqItem.material ?? '';
         if (reqItem.description !== undefined) item.description = reqItem.description ?? '';
+        if (reqItem.packets !== undefined) item.packets = Array.isArray(reqItem.packets) ? reqItem.packets : [];
+        if (reqItem.useVariantTracking !== undefined) item.useVariantTracking = Boolean(reqItem.useVariantTracking);
         if (reqItem.productId !== undefined && mongoose.Types.ObjectId.isValid(reqItem.productId)) {
           item.product = new mongoose.Types.ObjectId(reqItem.productId);
         }

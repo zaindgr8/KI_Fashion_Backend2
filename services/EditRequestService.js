@@ -336,7 +336,9 @@ class EditRequestService {
           update.season !== undefined ||
           update.material !== undefined ||
           update.description !== undefined ||
-          update.productId !== undefined;
+          update.productId !== undefined ||
+          update.packets !== undefined ||
+          update.useVariantTracking !== undefined;
 
         if (hasConfigMutation && soldQty > 0) {
           throw new Error(
@@ -364,6 +366,12 @@ class EditRequestService {
         }
         if (update.description !== undefined) {
           dispatchOrder.items[i].description = update.description ?? '';
+        }
+        if (update.packets !== undefined) {
+          dispatchOrder.items[i].packets = Array.isArray(update.packets) ? update.packets : [];
+        }
+        if (update.useVariantTracking !== undefined) {
+          dispatchOrder.items[i].useVariantTracking = Boolean(update.useVariantTracking);
         }
         if (update.productId !== undefined && mongoose.Types.ObjectId.isValid(update.productId)) {
           dispatchOrder.items[i].product = new mongoose.Types.ObjectId(update.productId);
