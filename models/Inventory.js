@@ -173,14 +173,16 @@ inventorySchema.pre('save', function (next) {
   next();
 });
 
-inventorySchema.methods.addStock = function (quantity, reference, referenceId, user, notes = '') {
+inventorySchema.methods.addStock = function (quantity, reference, referenceId, user, notes = '', movementDate = null) {
+  const transactionDate = movementDate ? new Date(movementDate) : new Date();
   this.stockMovements.push({
     type: 'in',
     quantity: quantity,
     reference: reference,
     referenceId: referenceId,
     user: user,
-    notes: notes
+    notes: notes,
+    date: Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate
   });
   this.currentStock += quantity;
   this.lastStockUpdate = new Date();
@@ -219,14 +221,16 @@ inventorySchema.methods.adjustStock = function (newQuantity, reference, user, no
 };
 
 // Add stock with variant composition
-inventorySchema.methods.addStockWithVariants = function (quantity, variantComposition, reference, referenceId, user, notes = '') {
+inventorySchema.methods.addStockWithVariants = function (quantity, variantComposition, reference, referenceId, user, notes = '', movementDate = null) {
+  const transactionDate = movementDate ? new Date(movementDate) : new Date();
   this.stockMovements.push({
     type: 'in',
     quantity: quantity,
     reference: reference,
     referenceId: referenceId,
     user: user,
-    notes: notes
+    notes: notes,
+    date: Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate
   });
   this.currentStock += quantity;
 
@@ -338,12 +342,16 @@ inventorySchema.methods.getVariantAvailableStock = function (size, color) {
 };
 
 // Add stock with batch tracking (for FIFO cost calculation)
-inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, reference, referenceId, user, notes = '') {
+inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, reference, referenceId, user, notes = '', movementDate = null) {
+  const transactionDate = movementDate
+    ? new Date(movementDate)
+    : (batchInfo?.purchaseDate ? new Date(batchInfo.purchaseDate) : new Date());
+
   // Add to purchase batches for FIFO tracking
   this.purchaseBatches.push({
     dispatchOrderId: batchInfo.dispatchOrderId || referenceId,
     supplierId: batchInfo.supplierId,
-    purchaseDate: batchInfo.purchaseDate || new Date(),
+    purchaseDate: Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate,
     quantity: quantity,
     remainingQuantity: quantity,
     costPrice: batchInfo.costPrice,
@@ -360,7 +368,7 @@ inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, refer
     referenceId: referenceId,
     user: user,
     notes: notes,
-    date: new Date()
+    date: Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate
   });
 
   this.currentStock += quantity;

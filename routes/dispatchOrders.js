@@ -1583,6 +1583,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.exchangeRate = finalExchangeRate;
     dispatchOrder.percentage = finalPercentage;
 
+    const transactionDate = dispatchOrder.dispatchDate ? new Date(dispatchOrder.dispatchDate) : null;
+    if (!transactionDate || Number.isNaN(transactionDate.getTime())) {
+      return sendResponse.error(res, 'Dispatch date is required before confirming this order.', 400);
+    }
+
     // Update logistics and date if provided (Super-admin can refine these during confirmation)
     if (logisticsCompany) {
       dispatchOrder.logisticsCompany = logisticsCompany;
@@ -1590,8 +1595,12 @@ router.post('/:id/confirm', auth, async (req, res) => {
       // Re-populate to ensure we have rates for ledger calculation later
       await dispatchOrder.populate('logisticsCompany', 'name code contactInfo rates');
     }
-    if (dispatchDate) {
-      dispatchOrder.dispatchDate = new Date(dispatchDate);
+    if (dispatchDate !== undefined) {
+      const parsedDispatchDate = new Date(dispatchDate);
+      if (Number.isNaN(parsedDispatchDate.getTime())) {
+        return sendResponse.error(res, 'Invalid dispatch date.', 400);
+      }
+      dispatchOrder.dispatchDate = parsedDispatchDate;
       dispatchOrder.markModified('dispatchDate');
     }
     if (isTotalBoxesConfirmed !== undefined) {
@@ -1601,6 +1610,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
     if (totalBoxes !== undefined) {
       dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
       dispatchOrder.markModified('totalBoxes');
+    }
+
+    const transactionDate = dispatchOrder.dispatchDate ? new Date(dispatchOrder.dispatchDate) : null;
+    if (!transactionDate || Number.isNaN(transactionDate.getTime())) {
+      return sendResponse.error(res, 'Dispatch date is required before confirming this order.', 400);
     }
 
     // Update items - handle structural changes (add/remove)
@@ -1974,7 +1988,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         const batchInfo = {
           dispatchOrderId: dispatchOrder._id,
           supplierId: dispatchOrder.supplier._id || dispatchOrder.supplier,
-          purchaseDate: dispatchOrder.dispatchDate || new Date(),
+          purchaseDate: transactionDate,
           costPrice: item.costPrice || 0, // Actual cost price paid to supplier
           landedPrice: landedPrice, // Landed price for inventory valuation
           exchangeRate: finalExchangeRate
@@ -2006,7 +2020,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
             'DispatchOrder',
             dispatchOrder._id,
             req.user._id,
-            `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed quantity with variants`
+            `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed quantity with variants`,
+            transactionDate
           );
 
           // Also add purchase batch for FIFO tracking
@@ -2481,7 +2496,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
       referenceModel: 'DispatchOrder',
       debit: discountedSupplierPaymentTotal, // What admin owes supplier (cost / exchange rate, NO profit, after discount)
       credit: 0,
-      date: new Date(),
+      date: transactionDate,
       description: `Dispatch Order ${dispatchOrder.orderNumber} confirmed - Supplier Payment: €${supplierPaymentTotal.toFixed(2)} (Cost ÷ Exchange Rate × Qty), Discount: €${totalDiscount.toFixed(2)}, Final Amount: €${discountedSupplierPaymentTotal.toFixed(2)}, Ledger shows: €${landedPriceTotal.toFixed(2)} ((Cost ÷ Exchange Rate + ${finalPercentage}%) × Qty), Cash: €${parseFloat(cashPayment).toFixed(2)}, Bank: €${parseFloat(bankPayment).toFixed(2)}, Remaining: €${dispatchOrder.paymentDetails.remainingBalance.toFixed(2)}`,
       paymentDetails: {
         cashPayment: parseFloat(cashPayment) || 0,
@@ -2506,7 +2521,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         referenceModel: 'DispatchOrder',
         debit: 0,
         credit: cashPaymentAmount,
-        date: new Date(),
+        date: transactionDate,
         description: `Cash payment for Dispatch Order ${dispatchOrder.orderNumber}`,
         paymentMethod: 'cash',
         paymentDetails: {
@@ -2529,7 +2544,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         referenceModel: 'DispatchOrder',
         debit: 0,
         credit: bankPaymentAmount,
-        date: new Date(),
+        date: transactionDate,
         description: `Bank payment for Dispatch Order ${dispatchOrder.orderNumber}`,
         paymentMethod: 'bank',
         paymentDetails: {
@@ -2563,7 +2578,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             referenceModel: 'DispatchOrder',
             debit: logisticsCharge,
             credit: 0,
-            date: new Date(),
+            date: transactionDate,
             description: `Logistics charge for Dispatch Order ${dispatchOrder.orderNumber} - ${totalBoxes} boxes × £${boxRate.toFixed(2)}/box = £${logisticsCharge.toFixed(2)}`,
             createdBy: req.user._id
           });
@@ -3647,7 +3662,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       referenceModel: 'DispatchOrder',
       debit: supplierPaymentTotal,
       credit: 0,
-      date: new Date(),
+      date: transactionDate,
       description: `Dispatch Order ${dispatchOrder.orderNumber} confirmed via QR scan - Supplier Payment: €${supplierPaymentTotal.toFixed(2)} (Cost ÷ Exchange Rate × Qty), Ledger shows: €${landedPriceTotal.toFixed(2)} ((Cost ÷ Exchange Rate + ${finalPercentage}%) × Qty), Cash: €${parseFloat(cashPayment).toFixed(2)}, Bank: €${parseFloat(bankPayment).toFixed(2)}, Remaining: €${dispatchOrder.paymentDetails.remainingBalance.toFixed(2)}`,
       paymentDetails: {
         cashPayment: parseFloat(cashPayment) || 0,
@@ -3672,7 +3687,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
           referenceModel: 'DispatchOrder',
           debit: 0,
           credit: cashPaymentAmount,
-          date: new Date(),
+          date: transactionDate,
           description: `Cash payment for Dispatch Order ${dispatchOrder.orderNumber} (QR scan)`,
           paymentMethod: 'cash',
           paymentDetails: {
@@ -3698,7 +3713,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
           referenceModel: 'DispatchOrder',
           debit: 0,
           credit: bankPaymentAmount,
-          date: new Date(),
+          date: transactionDate,
           description: `Bank payment for Dispatch Order ${dispatchOrder.orderNumber} (QR scan)`,
           paymentMethod: 'bank',
           paymentDetails: {
@@ -3924,7 +3939,8 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
               'DispatchOrder',
               dispatchOrder._id,
               req.user._id,
-              `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed via QR scan with variants`
+              `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed via QR scan with variants`,
+              transactionDate
             );
           } else {
             // Add stock without variant tracking (legacy behavior)
@@ -3933,7 +3949,8 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
               'DispatchOrder',
               dispatchOrder._id,
               req.user._id,
-              `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed via QR scan`
+              `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed via QR scan`,
+              transactionDate
             );
           }
 
