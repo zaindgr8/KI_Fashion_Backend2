@@ -300,11 +300,8 @@ class EditRequestService {
         const update = updatedItems[i];
         if (!update) continue;
 
-        if (update.costPrice !== undefined) {
-          dispatchOrder.items[i].costPrice = update.costPrice;
-        }
-        if (update.quantity !== undefined) {
-          // Quantity floor check: find sold quantity from inventory
+        let soldQty = 0;
+        if (dispatchOrder.items[i].product) {
           const batch = await Inventory.findOne({
             product: dispatchOrder.items[i].product,
             'batches.dispatchOrderId': orderId,
@@ -316,15 +313,63 @@ class EditRequestService {
               b => b.dispatchOrderId?.toString() === orderId.toString() && b.itemIndex === i
             );
             if (matchingBatch) {
-              const soldQty = (matchingBatch.quantity || 0) - (matchingBatch.remainingQuantity || 0);
-              if (update.quantity < soldQty) {
-                throw new Error(`Cannot reduce item ${i + 1} quantity below sold amount (${soldQty})`);
-              }
+              soldQty = (matchingBatch.quantity || 0) - (matchingBatch.remainingQuantity || 0);
             }
+          }
+        }
+
+        if (update.costPrice !== undefined) {
+          dispatchOrder.items[i].costPrice = update.costPrice;
+        }
+        if (update.quantity !== undefined) {
+          if (update.quantity < soldQty) {
+            throw new Error(`Cannot reduce item ${i + 1} quantity below sold amount (${soldQty})`);
           }
           dispatchOrder.items[i].quantity = update.quantity;
         }
+
+        const hasConfigMutation =
+          update.productName !== undefined ||
+          update.productCode !== undefined ||
+          update.primaryColor !== undefined ||
+          update.size !== undefined ||
+          update.season !== undefined ||
+          update.material !== undefined ||
+          update.description !== undefined ||
+          update.productId !== undefined;
+
+        if (hasConfigMutation && soldQty > 0) {
+          throw new Error(
+            `Configuration changes are only allowed when sold quantity is 0 for item ${i + 1}. Sold amount: ${soldQty}`
+          );
+        }
+
+        if (update.productName !== undefined) {
+          dispatchOrder.items[i].productName = String(update.productName || '').trim() || dispatchOrder.items[i].productName;
+        }
+        if (update.productCode !== undefined) {
+          dispatchOrder.items[i].productCode = String(update.productCode || '').trim().toUpperCase() || dispatchOrder.items[i].productCode;
+        }
+        if (update.primaryColor !== undefined) {
+          dispatchOrder.items[i].primaryColor = Array.isArray(update.primaryColor) ? update.primaryColor.filter(Boolean) : [];
+        }
+        if (update.size !== undefined) {
+          dispatchOrder.items[i].size = Array.isArray(update.size) ? update.size.filter(Boolean) : [];
+        }
+        if (update.season !== undefined) {
+          dispatchOrder.items[i].season = Array.isArray(update.season) ? update.season.filter(Boolean) : [];
+        }
+        if (update.material !== undefined) {
+          dispatchOrder.items[i].material = update.material ?? '';
+        }
+        if (update.description !== undefined) {
+          dispatchOrder.items[i].description = update.description ?? '';
+        }
+        if (update.productId !== undefined && mongoose.Types.ObjectId.isValid(update.productId)) {
+          dispatchOrder.items[i].product = new mongoose.Types.ObjectId(update.productId);
+        }
       }
+      dispatchOrder.markModified('items');
     }
 
     // Recalculate totals

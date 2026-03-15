@@ -2811,10 +2811,16 @@ router.get('/:id/edit-impact', auth, async (req, res) => {
         productId: productId ? productId.toString() : null,
         productName: item.productName,
         productCode: item.productCode,
+        primaryColor: Array.isArray(item.primaryColor) ? item.primaryColor : [],
+        size: Array.isArray(item.size) ? item.size : [],
+        season: Array.isArray(item.season) ? item.season : [],
+        material: item.material || '',
+        description: item.description || '',
         orderedQuantity,
         soldQuantity,
         remainingQuantity,
         minEditableQuantity: soldQuantity,
+        canEditConfiguration: soldQuantity === 0,
         currentCostPrice: item.costPrice,
         currentLandedPrice: item.landedPrice,
         currentSupplierPaymentAmount: item.supplierPaymentAmount
@@ -2887,21 +2893,51 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
       return sendResponse.error(res, 'Invalid percentage. Must be a non-negative number.', 400);
     }
 
-    // Validate item quantity floors — cannot reduce below what has already been sold
+    // Validate item updates — quantity floors and safe configuration edits
     if (Array.isArray(updatedItems)) {
       for (let i = 0; i < updatedItems.length; i++) {
         const reqItem = updatedItems[i];
-        if (!reqItem || reqItem.quantity === undefined) continue;
+        if (!reqItem) continue;
 
         const item = dispatchOrder.items[i];
         if (!item) continue;
 
-        const newQty = parseInt(reqItem.quantity);
-        if (isNaN(newQty) || newQty < 0) {
-          return sendResponse.error(res, `Invalid quantity for item ${i}`, 400);
+        if (reqItem.quantity !== undefined) {
+          const newQty = parseInt(reqItem.quantity);
+          if (isNaN(newQty) || newQty < 0) {
+            return sendResponse.error(res, `Invalid quantity for item ${i}`, 400);
+          }
+
+          if (item.product) {
+            const inventory = await Inventory.findOne({ product: item.product });
+            if (inventory) {
+              const batch = inventory.purchaseBatches.find(
+                b => b.dispatchOrderId && b.dispatchOrderId.toString() === dispatchOrder._id.toString()
+              );
+              if (batch) {
+                const soldQty = (batch.quantity || 0) - (batch.remainingQuantity || 0);
+                if (newQty < soldQty) {
+                  return sendResponse.error(res,
+                    `Cannot reduce quantity for item "${item.productName || item.productCode}" below sold quantity (${soldQty} units already sold)`,
+                    400
+                  );
+                }
+              }
+            }
+          }
         }
 
-        if (item.product) {
+        const hasConfigMutation =
+          reqItem.productName !== undefined ||
+          reqItem.productCode !== undefined ||
+          reqItem.primaryColor !== undefined ||
+          reqItem.size !== undefined ||
+          reqItem.season !== undefined ||
+          reqItem.material !== undefined ||
+          reqItem.description !== undefined ||
+          reqItem.productId !== undefined;
+
+        if (hasConfigMutation && item.product) {
           const inventory = await Inventory.findOne({ product: item.product });
           if (inventory) {
             const batch = inventory.purchaseBatches.find(
@@ -2909,9 +2945,10 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
             );
             if (batch) {
               const soldQty = (batch.quantity || 0) - (batch.remainingQuantity || 0);
-              if (newQty < soldQty) {
-                return sendResponse.error(res,
-                  `Cannot reduce quantity for item "${item.productName || item.productCode}" below sold quantity (${soldQty} units already sold)`,
+              if (soldQty > 0) {
+                return sendResponse.error(
+                  res,
+                  `Configuration changes are only allowed when sold quantity is 0. Item "${item.productName || item.productCode}" has ${soldQty} sold units.`,
                   400
                 );
               }
@@ -2932,6 +2969,16 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
         if (!item) return;
         if (reqItem.costPrice !== undefined) item.costPrice = parseFloat(reqItem.costPrice) || item.costPrice;
         if (reqItem.quantity !== undefined) item.quantity = parseInt(reqItem.quantity) || item.quantity;
+        if (reqItem.productName !== undefined) item.productName = String(reqItem.productName || '').trim() || item.productName;
+        if (reqItem.productCode !== undefined) item.productCode = String(reqItem.productCode || '').trim().toUpperCase() || item.productCode;
+        if (reqItem.primaryColor !== undefined) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor.filter(Boolean) : [];
+        if (reqItem.size !== undefined) item.size = Array.isArray(reqItem.size) ? reqItem.size.filter(Boolean) : [];
+        if (reqItem.season !== undefined) item.season = Array.isArray(reqItem.season) ? reqItem.season.filter(Boolean) : [];
+        if (reqItem.material !== undefined) item.material = reqItem.material ?? '';
+        if (reqItem.description !== undefined) item.description = reqItem.description ?? '';
+        if (reqItem.productId !== undefined && mongoose.Types.ObjectId.isValid(reqItem.productId)) {
+          item.product = new mongoose.Types.ObjectId(reqItem.productId);
+        }
       });
       dispatchOrder.markModified('items');
     }
