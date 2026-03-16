@@ -4165,7 +4165,7 @@ router.put('/:id', auth, async (req, res) => {
   }
 });
 
-// Delete dispatch order (only pending orders)
+// Delete dispatch order (super-admin can delete any status; admin/supplier only pending)
 router.delete('/:id', auth, async (req, res) => {
   try {
     const dispatchOrder = await DispatchOrder.findById(req.params.id);
@@ -4174,21 +4174,25 @@ router.delete('/:id', auth, async (req, res) => {
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    // Only pending orders can be deleted
-    if (dispatchOrder.status !== 'pending') {
-      return sendResponse.error(res, 'Only pending dispatch orders can be deleted', 400);
-    }
+    const isSuperAdmin = req.user.role === 'super-admin';
+    const isAdmin = req.user.role === 'admin';
+    const isSupplier = req.user.role === 'supplier';
 
     // Check permissions
-    if (req.user.role === 'supplier') {
+    if (isSupplier) {
       const isOrderSupplier = dispatchOrder.supplier?.toString() === req.user.supplier?.toString();
       const isCreator = dispatchOrder.supplierUser?.toString() === req.user._id.toString();
 
       if (!isOrderSupplier && !isCreator) {
         return sendResponse.error(res, 'You do not have permission to delete this dispatch order', 403);
       }
-    } else if (req.user.role !== 'super-admin' && req.user.role !== 'admin') {
+    } else if (!isSuperAdmin && !isAdmin) {
       return sendResponse.error(res, 'You do not have permission to delete dispatch orders', 403);
+    }
+
+    // Status guard: only super-admin can delete non-pending orders
+    if (!isSuperAdmin && dispatchOrder.status !== 'pending') {
+      return sendResponse.error(res, 'Only pending dispatch orders can be deleted', 400);
     }
 
     // Delete associated images from Google Cloud Storage
