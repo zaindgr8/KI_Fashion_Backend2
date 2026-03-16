@@ -125,6 +125,10 @@ const saleSchema = new mongoose.Schema({
       color: String,
       quantity: Number
     }],
+    packetQuantity: {
+      type: Number,
+      min: 1
+    },
     totalItemsPerPacket: {
       type: Number,
       min: 1

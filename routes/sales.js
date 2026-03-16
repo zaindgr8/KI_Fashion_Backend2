@@ -144,6 +144,47 @@ const saleSchema = Joi.object({
 // Generate sale number
 const { generateSaleNumber } = require('../utils/sale-number');
 
+const getPacketQuantity = (item) => {
+  if (!item?.isPacketSale) {
+    return null;
+  }
+
+  const explicitPacketQuantity = Number(item.packetQuantity);
+  if (Number.isFinite(explicitPacketQuantity) && explicitPacketQuantity > 0) {
+    return explicitPacketQuantity;
+  }
+
+  const totalItemsPerPacket = Number(item.totalItemsPerPacket);
+  const quantity = Number(item.quantity);
+
+  if (
+    !Number.isFinite(totalItemsPerPacket) ||
+    totalItemsPerPacket <= 0 ||
+    !Number.isFinite(quantity) ||
+    quantity <= 0
+  ) {
+    return null;
+  }
+
+  const derivedPacketQuantity = quantity / totalItemsPerPacket;
+  return Number.isInteger(derivedPacketQuantity) && derivedPacketQuantity > 0
+    ? derivedPacketQuantity
+    : null;
+};
+
+const normalizePacketSaleItems = (items = []) => {
+  return items.map((item) => {
+    if (!item?.isPacketSale) {
+      return item;
+    }
+
+    const packetQuantity = getPacketQuantity(item);
+    return packetQuantity
+      ? { ...item, packetQuantity }
+      : item;
+  });
+};
+
 // Calculate sale totals
 const calculateTotals = (items, totalDiscount = 0, shippingCost = 0) => {
   let subtotal = 0;
@@ -386,6 +427,8 @@ router.post('/', auth, async (req, res) => {
       });
     }
 
+    req.body.items = normalizePacketSaleItems(req.body.items);
+
     // Verify buyer exists (only if buyer is provided, not for manual customers)
     let buyer = null;
     let isManualSale = false;
@@ -602,8 +645,12 @@ router.post('/', auth, async (req, res) => {
           if (item.isPacketSale && item.packetStock) {
             const packetStock = await PacketStock.findById(item.packetStock).session(stockSession);
             if (packetStock) {
-              const packetQty = item.packetQuantity || Math.ceil(item.quantity / (item.totalItemsPerPacket || 1));
-              await packetStock.sellPackets(packetQty);
+              const packetQty = getPacketQuantity(item);
+              if (packetQty) {
+                await packetStock.sellPackets(packetQty);
+              } else {
+                console.warn(`Skipping packet stock deduction for sale ${sale.saleNumber}: could not resolve packetQuantity for item ${item.product}`);
+              }
 
             } else {
               console.warn(`PacketStock not found for ID ${item.packetStock} when creating sale ${saleNumber}`);
@@ -1128,6 +1175,8 @@ router.put('/:id', auth, async (req, res) => {
         message: error.details[0].message
       });
     }
+
+    req.body.items = normalizePacketSaleItems(req.body.items);
 
     const { subtotal, totalTax, grandTotal } = calculateTotals(
       req.body.items,
