@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
 const BalanceService = require('../services/BalanceService');
+const SupplierDeletionService = require('../services/SupplierDeletionService');
 
 const router = express.Router();
 
@@ -29,6 +30,18 @@ const supplierSchema = Joi.object({
   rating: Joi.number().min(1).max(5).default(3),
   notes: Joi.string().optional()
 });
+
+function requireSuperAdmin(req, res) {
+  if (req.user.role !== 'super-admin') {
+    res.status(403).json({
+      success: false,
+      message: 'Only super-admin can permanently delete suppliers',
+    });
+    return false;
+  }
+
+  return true;
+}
 
 // Create supplier
 router.post('/', auth, async (req, res) => {
@@ -202,6 +215,28 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
+// Get supplier hard-delete summary
+router.get('/:id/delete-summary', auth, async (req, res) => {
+  try {
+    if (!requireSuperAdmin(req, res)) {
+      return;
+    }
+
+    const summary = await SupplierDeletionService.getDeletionSummary(req.params.id);
+
+    res.json({
+      success: true,
+      data: summary,
+    });
+  } catch (error) {
+    console.error('Get supplier delete summary error:', error);
+    res.status(error.status || 500).json({
+      success: false,
+      message: error.message || 'Server error',
+    });
+  }
+});
+
 // Update supplier
 router.put('/:id', auth, async (req, res) => {
   try {
@@ -309,6 +344,29 @@ router.patch('/:id/balance', auth, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error'
+    });
+  }
+});
+
+// Hard delete supplier and all related records
+router.delete('/:id/hard', auth, async (req, res) => {
+  try {
+    if (!requireSuperAdmin(req, res)) {
+      return;
+    }
+
+    const deletionResult = await SupplierDeletionService.hardDeleteSupplier(req.params.id);
+
+    res.json({
+      success: true,
+      message: `Supplier ${deletionResult.supplier.name} and related records deleted successfully`,
+      data: deletionResult,
+    });
+  } catch (error) {
+    console.error('Hard delete supplier error:', error);
+    res.status(error.status || 500).json({
+      success: false,
+      message: error.message || 'Server error',
     });
   }
 });
