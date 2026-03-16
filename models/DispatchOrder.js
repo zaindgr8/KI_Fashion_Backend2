@@ -37,6 +37,7 @@ const dispatchItemSchema = new mongoose.Schema({
   productCode: { type: String },
   season: [{ type: String, enum: ['winter', 'summer', 'spring', 'autumn', 'all_season', 'accessories'] }],
   costPrice: { type: Number, min: 0 },
+  minSellingPrice: { type: Number, min: 0 },
   primaryColor: [{ type: String }],
   size: [{ type: String }],
   material: { type: String },

@@ -30,6 +30,14 @@ const truncateToTwoDecimals = (value) => {
   return Math.floor(value * 100) / 100;
 };
 
+const resolveMinSellingPrice = (value, fallback = 0) => {
+  const parsed = Number(value);
+  if (Number.isFinite(parsed) && parsed >= 0) return truncateToTwoDecimals(parsed);
+  const parsedFallback = Number(fallback);
+  if (Number.isFinite(parsedFallback) && parsedFallback >= 0) return truncateToTwoDecimals(parsedFallback);
+  return 0;
+};
+
 // Configure multer for memory storage
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -264,6 +272,7 @@ async function normalizeDispatchOrderForAdmin(dispatchOrder, input = {}, user, o
         if (reqItem.productName) item.productName = reqItem.productName;
         if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
         if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
+        if (reqItem.minSellingPrice !== undefined) item.minSellingPrice = Number(reqItem.minSellingPrice);
         if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
         if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
         if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
@@ -407,6 +416,7 @@ const dispatchItemSchema = Joi.object({
   productCode: Joi.string().min(1).required(),
   season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season', 'accessories')).min(1).required(),
   costPrice: Joi.number().min(0).required(),
+  minSellingPrice: Joi.number().min(0).optional(),
   primaryColor: Joi.array().items(Joi.string()).optional(),
   size: Joi.array().items(Joi.string()).optional(),
   material: Joi.string().allow(null, '').optional(),
@@ -463,6 +473,7 @@ const manualEntryItemSchema = Joi.object({
   productCode: Joi.string().optional(), // For new products
   season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season', 'accessories')).min(1).optional(), // For new products
   costPrice: Joi.number().min(0).optional(), // For new products
+  minSellingPrice: Joi.number().min(0).optional(),
   primaryColor: Joi.alternatives().try(
     Joi.string().allow(null, ''),
     Joi.array().items(Joi.string())
@@ -764,6 +775,8 @@ router.post('/manual', auth, async (req, res) => {
       const costPrice = item.costPrice || (product ? product.pricing?.costPrice : 0);
       const exchangeRate = value.exchangeRate || 1.0;
       const percentage = value.percentage || 0;
+      const defaultMinSell = truncateToTwoDecimals((costPrice / exchangeRate) * (1 + (percentage / 100)));
+      const minSellingPrice = resolveMinSellingPrice(item.minSellingPrice, defaultMinSell);
 
       // Calculate supplier payment amount (what admin pays supplier - NO exchange rate, NO profit margin)
       // Formula: cost price × quantity
@@ -782,6 +795,7 @@ router.post('/manual', auth, async (req, res) => {
         productCode: item.productCode || (product ? (product.productCode || product.sku) : undefined),
         season: season,
         costPrice: costPrice,
+        minSellingPrice,
         primaryColor: item.primaryColor || (product ? product.primaryColor : undefined),
         size: item.size || (product ? product.size : undefined), // Add size field
         material: item.material || (product ? product.specifications?.material : undefined),
@@ -1055,7 +1069,8 @@ router.post('/manual', auth, async (req, res) => {
             unit: 'piece',
             pricing: {
               costPrice: item.costPrice || (item.landedTotal / item.quantity),
-              sellingPrice: (item.costPrice || (item.landedTotal / item.quantity)) * 1.2
+              sellingPrice: resolveMinSellingPrice(item.minSellingPrice, (item.costPrice || (item.landedTotal / item.quantity)) * 1.2),
+              minSellingPrice: resolveMinSellingPrice(item.minSellingPrice, (item.costPrice || (item.landedTotal / item.quantity)) * 1.2)
             },
             size: productSizes,
             color: productColors,
@@ -1623,6 +1638,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             if (reqItem.productName) item.productName = reqItem.productName;
             if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
             if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
+            if (reqItem.minSellingPrice !== undefined) item.minSellingPrice = Number(reqItem.minSellingPrice);
             if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
             if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
             if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
@@ -1809,7 +1825,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
             unit: 'piece',
             pricing: {
               costPrice: landedPrice,
-              sellingPrice: landedPrice * 1.2
+              sellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2),
+              minSellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2)
             },
             // Only set color and size if arrays have values
             ...(colors.length > 0 && { color: colors }),
@@ -1876,6 +1893,15 @@ router.post('/:id/confirm', auth, async (req, res) => {
             product.pricing.costPrice = landedPrice;
             productNeedsSave = true;
              
+          }
+
+          if (item.minSellingPrice !== undefined) {
+            const resolvedMinSell = resolveMinSellingPrice(item.minSellingPrice, product.pricing?.minSellingPrice);
+            if (product.pricing.minSellingPrice !== resolvedMinSell || product.pricing.sellingPrice !== resolvedMinSell) {
+              product.pricing.minSellingPrice = resolvedMinSell;
+              product.pricing.sellingPrice = resolvedMinSell;
+              productNeedsSave = true;
+            }
           }
 
           // Always ensure product is active before proceeding
@@ -2122,6 +2148,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     batchInfo.costPrice,
                     batchInfo.landedPrice
                   );
+                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
+                  packetStock.suggestedSellingPrice = itemMinSell;
+                  await packetStock.save();
                   console.log(`[Confirm Order] Added ${looseItem.quantity} loose items (${looseItem.color}/${looseItem.size}) to existing PacketStock ${looseBarcode}`);
                 } else {
                   // Create new packet stock for this loose item variant
@@ -2137,7 +2166,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     availablePackets: looseItem.quantity,
                     costPricePerPacket: batchInfo.costPrice,
                     landedPricePerPacket: batchInfo.landedPrice,
-                    suggestedSellingPrice: batchInfo.landedPrice * 1.20,
+                    suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20),
                     isLoose: true,
                     barcodeImage: looseBarcodeImage ? {
                       dataUrl: looseBarcodeImage,
@@ -2206,6 +2235,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     costPerPacket,
                     landedPerPacket
                   );
+                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, landedPerPacket * 1.20);
+                  packetStock.suggestedSellingPrice = truncateToTwoDecimals(itemMinSell * (packetGroup.totalItemsPerPacket || 1));
+                  await packetStock.save();
                    
                 } else {
                   // Create new packet stock
@@ -2221,7 +2253,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     availablePackets: packetGroup.count,
                     costPricePerPacket: costPerPacket,
                     landedPricePerPacket: landedPerPacket,
-                    suggestedSellingPrice: landedPerPacket * 1.20,
+                    suggestedSellingPrice: truncateToTwoDecimals(resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.20) * (packetGroup.totalItemsPerPacket || 1)),
                     isLoose: false,
                     barcodeImage: packetBarcodeImage ? {
                       dataUrl: packetBarcodeImage,
@@ -2295,6 +2327,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 batchInfo.costPrice,
                 batchInfo.landedPrice
               );
+              const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
+              packetStock.suggestedSellingPrice = itemMinSell;
+              await packetStock.save();
                
             } else {
               // Create new packet stock for loose items
@@ -2325,7 +2360,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 availablePackets: confirmedQuantity,
                 costPricePerPacket: batchInfo.costPrice,
                 landedPricePerPacket: batchInfo.landedPrice,
-                suggestedSellingPrice: batchInfo.landedPrice * 1.20,
+                suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20),
                 isLoose: true,
                 barcodeImage: looseBarcodeImageDataUrl ? {
                   dataUrl: looseBarcodeImageDataUrl,
@@ -2469,6 +2504,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     dispatchOrder.items.forEach((item, index) => {
       item.supplierPaymentAmount = itemsWithPrices[index].supplierPaymentAmount;
       item.landedPrice = itemsWithPrices[index].landedPrice;
+      item.minSellingPrice = resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2);
     });
 
     await dispatchOrder.save();
@@ -2834,6 +2870,7 @@ router.get('/:id/edit-impact', auth, async (req, res) => {
         minEditableQuantity: soldQuantity,
         canEditConfiguration: soldQuantity === 0,
         currentCostPrice: item.costPrice,
+        currentMinSellingPrice: item.minSellingPrice,
         currentLandedPrice: item.landedPrice,
         currentSupplierPaymentAmount: item.supplierPaymentAmount
       });
@@ -2942,6 +2979,7 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
         const hasConfigMutation =
           reqItem.productName !== undefined ||
           reqItem.productCode !== undefined ||
+          reqItem.minSellingPrice !== undefined ||
           reqItem.primaryColor !== undefined ||
           reqItem.size !== undefined ||
           reqItem.season !== undefined ||
@@ -2985,6 +3023,7 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
         if (reqItem.quantity !== undefined) item.quantity = parseInt(reqItem.quantity) || item.quantity;
         if (reqItem.productName !== undefined) item.productName = String(reqItem.productName || '').trim() || item.productName;
         if (reqItem.productCode !== undefined) item.productCode = String(reqItem.productCode || '').trim().toUpperCase() || item.productCode;
+        if (reqItem.minSellingPrice !== undefined) item.minSellingPrice = parseFloat(reqItem.minSellingPrice);
         if (reqItem.primaryColor !== undefined) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor.filter(Boolean) : [];
         if (reqItem.size !== undefined) item.size = Array.isArray(reqItem.size) ? reqItem.size.filter(Boolean) : [];
         if (reqItem.season !== undefined) item.season = Array.isArray(reqItem.season) ? reqItem.season.filter(Boolean) : [];
@@ -3012,7 +3051,9 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
       const landedPrice = truncateToTwoDecimals((costPrice / newExchangeRate) * (1 + (newPercentage / 100)));
       newLandedPriceTotal += truncateToTwoDecimals(landedPrice * qty);
 
-      return { item, landedPrice, supplierPaymentAmount };
+      const minSellingPrice = resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2);
+
+      return { item, landedPrice, supplierPaymentAmount, minSellingPrice };
     });
 
     const discountedSupplierPaymentTotal = Math.max(0, newSupplierPaymentTotal - newDiscount);
@@ -3020,9 +3061,10 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
     const newGrandTotal = truncateToTwoDecimals(Math.max(0, newSubtotal - newDiscount));
 
     // Write recalculated per-item prices back onto order
-    recalcedItems.forEach(({ item, landedPrice, supplierPaymentAmount }) => {
+    recalcedItems.forEach(({ item, landedPrice, supplierPaymentAmount, minSellingPrice }) => {
       item.supplierPaymentAmount = supplierPaymentAmount;
       item.landedPrice = landedPrice;
+      item.minSellingPrice = minSellingPrice;
     });
 
     // Update order-level financial fields
@@ -3063,7 +3105,7 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
     }
 
     // Update inventory batch prices (non-fatal per item)
-    for (const { item, landedPrice } of recalcedItems) {
+    for (const { item, landedPrice, minSellingPrice } of recalcedItems) {
       if (!item.product) continue;
       try {
         const inventory = await Inventory.findOne({ product: item.product });
@@ -3079,8 +3121,23 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
       }
     }
 
+    // Keep product pricing aligned with edited minimum selling prices
+    for (const { item, minSellingPrice } of recalcedItems) {
+      if (!item.product) continue;
+      try {
+        await Product.findByIdAndUpdate(item.product, {
+          $set: {
+            'pricing.minSellingPrice': minSellingPrice,
+            'pricing.sellingPrice': minSellingPrice,
+          }
+        });
+      } catch (productErr) {
+        console.error(`[Edit Confirmed] Failed to update Product pricing for ${item.product}:`, productErr.message);
+      }
+    }
+
     // Update PacketStock dispatchOrderHistory for this order (non-fatal per packet)
-    for (const { item, landedPrice } of recalcedItems) {
+    for (const { item, landedPrice, minSellingPrice } of recalcedItems) {
       if (!item.product) continue;
       try {
         const packetStocks = await PacketStock.find({
@@ -3102,8 +3159,10 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
           if (ps.dispatchOrderHistory.length === 1) {
             ps.landedPricePerPacket = histEntry.landedPricePerPacket;
             ps.costPricePerPacket = histEntry.costPricePerPacket;
-            ps.suggestedSellingPrice = truncateToTwoDecimals(histEntry.landedPricePerPacket * 1.20);
           }
+
+          // Dispatch-order min sell price is authoritative for customer-facing packet price.
+          ps.suggestedSellingPrice = truncateToTwoDecimals(minSellingPrice * (ps.totalItemsPerPacket || 1));
           await ps.save();
         }
       } catch (psErr) {
