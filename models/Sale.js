@@ -165,6 +165,34 @@ const saleSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  addShippingCost: {
+    type: Boolean,
+    default: false
+  },
+  buyerShippingCharge: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  shippingBoxes: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  logisticsCompany: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'LogisticsCompany'
+  },
+  logisticsBoxRateSnapshot: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  logisticsPayable: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   grandTotal: {
     type: Number,
     required: true,

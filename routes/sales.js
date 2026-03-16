@@ -11,6 +11,7 @@ const Ledger = require('../models/Ledger');
 const Payment = require('../models/Payment');
 const User = require('../models/User');
 const PacketStock = require('../models/PacketStock');
+const LogisticsCompany = require('../models/LogisticsCompany');
 const auth = require('../middleware/auth');
 const { generateSaleQR } = require('../utils/qrCode');
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
@@ -131,6 +132,20 @@ const saleSchema = Joi.object({
   items: Joi.array().items(saleItemSchema).min(1).required(),
   totalDiscount: Joi.number().min(0).default(0),
   shippingCost: Joi.number().min(0).default(0),
+  addShippingCost: Joi.boolean().default(false),
+  buyerShippingCharge: Joi.number().min(0).default(0),
+  shippingBoxes: Joi.number().integer().min(1).when('addShippingCost', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.number().integer().min(0).default(0)
+  }),
+  logisticsCompanyId: Joi.string().when('addShippingCost', {
+    is: true,
+    then: Joi.required(),
+    otherwise: Joi.optional().allow('', null)
+  }),
+  logisticsBoxRateSnapshot: Joi.number().min(0).optional(),
+  logisticsPayable: Joi.number().min(0).optional(),
   cashPayment: Joi.number().min(0).default(0),
   bankPayment: Joi.number().min(0).default(0),
   paymentMethod: Joi.string().valid('cash', 'card', 'bank_transfer', 'cheque', 'online', 'credit').optional(),
@@ -183,6 +198,47 @@ const normalizePacketSaleItems = (items = []) => {
       ? { ...item, packetQuantity }
       : item;
   });
+};
+
+const normalizeShippingPayload = async (payload = {}) => {
+  const addShippingCost = Boolean(payload.addShippingCost);
+
+  if (!addShippingCost) {
+    return {
+      addShippingCost: false,
+      buyerShippingCharge: 0,
+      shippingBoxes: 0,
+      logisticsCompanyId: null,
+      logisticsBoxRateSnapshot: 0,
+      logisticsPayable: 0,
+      logisticsCompany: null
+    };
+  }
+
+  const buyerShippingCharge = Number(payload.buyerShippingCharge ?? payload.shippingCost ?? 0);
+  const shippingBoxes = Number(payload.shippingBoxes || 0);
+
+  const logisticsCompany = await LogisticsCompany.findById(payload.logisticsCompanyId).lean();
+  if (!logisticsCompany) {
+    throw new Error('Selected logistics company not found');
+  }
+
+  const requestedSnapshotRate = Number(payload.logisticsBoxRateSnapshot);
+  const logisticsBoxRateSnapshot = Number.isFinite(requestedSnapshotRate) && requestedSnapshotRate >= 0
+    ? requestedSnapshotRate
+    : Number(logisticsCompany?.rates?.boxRate || 0);
+
+  const logisticsPayable = Math.max(0, logisticsBoxRateSnapshot * Math.max(0, shippingBoxes));
+
+  return {
+    addShippingCost: true,
+    buyerShippingCharge: Math.max(0, buyerShippingCharge),
+    shippingBoxes: Math.max(0, shippingBoxes),
+    logisticsCompanyId: logisticsCompany._id,
+    logisticsBoxRateSnapshot,
+    logisticsPayable,
+    logisticsCompany
+  };
 };
 
 // Calculate sale totals
@@ -429,6 +485,16 @@ router.post('/', auth, async (req, res) => {
 
     req.body.items = normalizePacketSaleItems(req.body.items);
 
+    let shippingMeta;
+    try {
+      shippingMeta = await normalizeShippingPayload(req.body);
+    } catch (shippingError) {
+      return res.status(400).json({
+        success: false,
+        message: shippingError.message
+      });
+    }
+
     // Verify buyer exists (only if buyer is provided, not for manual customers)
     let buyer = null;
     let isManualSale = false;
@@ -523,7 +589,7 @@ router.post('/', auth, async (req, res) => {
     const { subtotal, totalTax, grandTotal } = calculateTotals(
       req.body.items,
       req.body.totalDiscount,
-      req.body.shippingCost
+      shippingMeta.buyerShippingCharge
     );
 
     // Determine payment amounts based on payment method
@@ -586,6 +652,13 @@ router.post('/', auth, async (req, res) => {
       subtotal,
       totalTax,
       grandTotal,
+      shippingCost: shippingMeta.buyerShippingCharge,
+      addShippingCost: shippingMeta.addShippingCost,
+      buyerShippingCharge: shippingMeta.buyerShippingCharge,
+      shippingBoxes: shippingMeta.shippingBoxes,
+      logisticsCompany: shippingMeta.logisticsCompanyId,
+      logisticsBoxRateSnapshot: shippingMeta.logisticsBoxRateSnapshot,
+      logisticsPayable: shippingMeta.logisticsPayable,
       cashPayment,
       bankPayment,
       paymentStatus,
@@ -825,6 +898,23 @@ router.post('/', auth, async (req, res) => {
           // Don't fail the sale creation if balance sync fails
         }
       }
+
+      if (shippingMeta.logisticsPayable > 0 && shippingMeta.logisticsCompanyId) {
+        await Ledger.createEntry({
+          type: 'logistics',
+          entityId: shippingMeta.logisticsCompanyId,
+          entityModel: 'LogisticsCompany',
+          transactionType: 'charge',
+          referenceId: sale._id,
+          referenceModel: 'Sale',
+          debit: shippingMeta.logisticsPayable,
+          credit: 0,
+          date: sale.saleDate || new Date(),
+          description: `Shipping payable for Sale ${saleNumber} - ${shippingMeta.shippingBoxes} boxes x ${shippingMeta.logisticsBoxRateSnapshot.toFixed(2)} = ${shippingMeta.logisticsPayable.toFixed(2)}`,
+          remarks: `shippingBoxes=${shippingMeta.shippingBoxes};buyerShippingCharge=${shippingMeta.buyerShippingCharge.toFixed(2)}`,
+          createdBy: req.user._id
+        });
+      }
     } catch (ledgerError) {
       console.error('Error creating ledger entries for sale:', ledgerError);
       // Don't fail the sale creation if ledger update fails, but log it
@@ -834,6 +924,7 @@ router.post('/', auth, async (req, res) => {
     let populatedSale = await Sale.findById(sale._id)
       .populate('buyer', 'name company email phone address')
       .populate('items.product', 'name sku unit pricing images')
+      .populate('logisticsCompany', 'name code rates.boxRate')
       .populate('deliveryPersonnel', 'name phone')
       .populate('createdBy', 'name email');
 
@@ -981,10 +1072,13 @@ router.post('/bulk', auth, async (req, res) => {
         if (!stockCheck) continue;
 
         const saleNumber = await generateSaleNumber();
+        const effectiveShipping = saleData.addShippingCost
+          ? Number(saleData.buyerShippingCharge ?? saleData.shippingCost ?? 0)
+          : 0;
         const { subtotal, totalTax, grandTotal } = calculateTotals(
           saleData.items,
           saleData.totalDiscount,
-          saleData.shippingCost
+          effectiveShipping
         );
 
         const sale = new Sale({
@@ -993,6 +1087,8 @@ router.post('/bulk', auth, async (req, res) => {
           subtotal,
           totalTax,
           grandTotal,
+          shippingCost: effectiveShipping,
+          buyerShippingCharge: effectiveShipping,
           createdBy: req.user._id
         });
 
@@ -1093,6 +1189,7 @@ router.get('/', auth, async (req, res) => {
     const sales = await Sale.find(query)
       .populate('buyer', 'name company')
       .populate('items.product', 'name sku productCode images pricing')
+      .populate('logisticsCompany', 'name code rates.boxRate')
       .populate('deliveryPersonnel', 'name phone')
       .populate('createdBy', 'name')
       .sort({ saleDate: -1 })
@@ -1128,6 +1225,7 @@ router.get('/:id', auth, async (req, res) => {
     const sale = await Sale.findById(req.params.id)
       .populate('buyer', 'name company phone phoneAreaCode email address')
       .populate({ path: 'items.product', select: 'name sku unit pricing images supplier', populate: { path: 'supplier', select: 'name' } })
+      .populate('logisticsCompany', 'name code rates.boxRate')
       .populate('deliveryPersonnel', 'name phone vehicleInfo')
       .populate('createdBy', 'name email')
       .lean();
@@ -1178,11 +1276,29 @@ router.put('/:id', auth, async (req, res) => {
 
     req.body.items = normalizePacketSaleItems(req.body.items);
 
+    let shippingMeta;
+    try {
+      shippingMeta = await normalizeShippingPayload(req.body);
+    } catch (shippingError) {
+      return res.status(400).json({
+        success: false,
+        message: shippingError.message
+      });
+    }
+
     const { subtotal, totalTax, grandTotal } = calculateTotals(
       req.body.items,
       req.body.totalDiscount,
-      req.body.shippingCost
+      shippingMeta.buyerShippingCharge
     );
+
+    const previousSale = await Sale.findById(req.params.id).lean();
+    if (!previousSale) {
+      return res.status(404).json({
+        success: false,
+        message: 'Sale not found'
+      });
+    }
 
     const sale = await Sale.findByIdAndUpdate(
       req.params.id,
@@ -1190,45 +1306,52 @@ router.put('/:id', auth, async (req, res) => {
         ...req.body,
         subtotal,
         totalTax,
-        grandTotal
+        grandTotal,
+        shippingCost: shippingMeta.buyerShippingCharge,
+        addShippingCost: shippingMeta.addShippingCost,
+        buyerShippingCharge: shippingMeta.buyerShippingCharge,
+        shippingBoxes: shippingMeta.shippingBoxes,
+        logisticsCompany: shippingMeta.logisticsCompanyId,
+        logisticsBoxRateSnapshot: shippingMeta.logisticsBoxRateSnapshot,
+        logisticsPayable: shippingMeta.logisticsPayable
       },
       { new: true, runValidators: true }
     )
       .populate('buyer', 'name company')
       .populate('items.product', 'name sku')
+      .populate('logisticsCompany', 'name code rates.boxRate')
       .populate('deliveryPersonnel', 'name phone')
       .populate('createdBy', 'name');
 
-    if (!sale) {
-      return res.status(404).json({
-        success: false,
-        message: 'Sale not found'
-      });
-    }
-
     // Re-sync ledger entries for the updated sale
-    // Only re-sync if this is a buyer sale (not manual)
-    if (sale.buyer) {
-      try {
-        const saleId = sale._id;
+    try {
+      const saleId = sale._id;
+      const saleDate = sale.saleDate || sale.createdAt || new Date();
+      const cashPayment = sale.cashPayment || 0;
+      const bankPayment = sale.bankPayment || 0;
+
+      // 1. Delete previous buyer sale/receipt entries and old logistics charge entries.
+      await Ledger.deleteMany({
+        referenceId: saleId,
+        referenceModel: 'Sale',
+        transactionType: 'sale'
+      });
+      await Ledger.deleteMany({
+        referenceId: saleId,
+        referenceModel: 'Sale',
+        isSaleTimePayment: true
+      });
+      await Ledger.deleteMany({
+        referenceId: saleId,
+        referenceModel: 'Sale',
+        type: 'logistics',
+        transactionType: 'charge'
+      });
+
+      // 2. Recreate buyer ledger entries only if buyer sale.
+      if (sale.buyer) {
         const buyerId = sale.buyer._id || sale.buyer;
-        const cashPayment = sale.cashPayment || 0;
-        const bankPayment = sale.bankPayment || 0;
-        const saleDate = sale.saleDate || sale.createdAt || new Date();
 
-        // 1. Delete old sale debit entry and sale-time payment credits
-        await Ledger.deleteMany({
-          referenceId: saleId,
-          referenceModel: 'Sale',
-          transactionType: 'sale'
-        });
-        await Ledger.deleteMany({
-          referenceId: saleId,
-          referenceModel: 'Sale',
-          isSaleTimePayment: true
-        });
-
-        // 2. Recreate sale debit entry with updated grandTotal
         await Ledger.createEntry({
           type: 'buyer',
           entityId: buyerId,
@@ -1248,7 +1371,6 @@ router.put('/:id', auth, async (req, res) => {
           createdBy: req.user._id
         });
 
-        // 3. Recreate sale-time payment credits
         if (cashPayment > 0) {
           await Ledger.createEntry({
             type: 'buyer',
@@ -1267,6 +1389,7 @@ router.put('/:id', auth, async (req, res) => {
             createdBy: req.user._id
           });
         }
+
         if (bankPayment > 0) {
           await Ledger.createEntry({
             type: 'buyer',
@@ -1286,17 +1409,41 @@ router.put('/:id', auth, async (req, res) => {
           });
         }
 
-        // 4. Recalculate running balances from this sale's date onwards
         await Ledger.recalculateBalances('buyer', buyerId, saleDate);
-
-        // 5. Sync buyer's currentBalance from aggregated ledger
         const newBalance = await Ledger.getBalance('buyer', buyerId);
         await Buyer.findByIdAndUpdate(buyerId, { currentBalance: newBalance });
-
-      } catch (ledgerError) {
-        console.error('Ledger re-sync error after sale edit:', ledgerError);
-        // Don't fail the sale update if ledger sync fails
       }
+
+      // 3. Recreate logistics charge if shipping cost tracking is enabled.
+      if (sale.logisticsPayable > 0 && sale.logisticsCompany) {
+        const logisticsCompanyId = sale.logisticsCompany._id || sale.logisticsCompany;
+
+        await Ledger.createEntry({
+          type: 'logistics',
+          entityId: logisticsCompanyId,
+          entityModel: 'LogisticsCompany',
+          transactionType: 'charge',
+          referenceId: saleId,
+          referenceModel: 'Sale',
+          debit: sale.logisticsPayable,
+          credit: 0,
+          date: saleDate,
+          description: `Shipping payable for Sale ${sale.saleNumber} - ${sale.shippingBoxes || 0} boxes x ${(sale.logisticsBoxRateSnapshot || 0).toFixed(2)} = ${(sale.logisticsPayable || 0).toFixed(2)}`,
+          remarks: `shippingBoxes=${sale.shippingBoxes || 0};buyerShippingCharge=${(sale.buyerShippingCharge || 0).toFixed(2)}`,
+          createdBy: req.user._id
+        });
+
+        await Ledger.recalculateBalances('logistics', logisticsCompanyId, saleDate);
+      }
+
+      // If logistics company changed, recalculate old company balance too.
+      if (previousSale.logisticsCompany && String(previousSale.logisticsCompany) !== String(sale.logisticsCompany?._id || sale.logisticsCompany || '')) {
+        await Ledger.recalculateBalances('logistics', previousSale.logisticsCompany, saleDate);
+      }
+
+    } catch (ledgerError) {
+      console.error('Ledger re-sync error after sale edit:', ledgerError);
+      // Don't fail the sale update if ledger sync fails
     }
 
     res.json({
