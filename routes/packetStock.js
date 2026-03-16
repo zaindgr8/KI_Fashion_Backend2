@@ -159,7 +159,7 @@ router.get('/', auth, async (req, res) => {
     if (hasStock === 'true') query.availablePackets = { $gt: 0 };
     
     let packetStocks = await PacketStock.find(query)
-      .populate('product', 'name sku productCode images')
+      .populate('product', 'name sku productCode images pricing.minSellingPrice pricing.sellingPrice')
       .populate('supplier', 'name company')
       .sort({ updatedAt: -1 })
       .limit(parseInt(limit))

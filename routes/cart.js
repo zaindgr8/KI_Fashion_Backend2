@@ -3,6 +3,7 @@ const Joi = require('joi');
 const Product = require('../models/Product');
 const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
+const { getProductMinSellingPrice, getEffectivePacketSellingPrice } = require('../utils/websitePricing');
 
 const router = express.Router();
 
@@ -88,7 +89,9 @@ router.post('/validate', auth, async (req, res) => {
     const packetStocks = await PacketStock.find({
       barcode: { $in: packetBarcodes },
       isActive: true
-    }).lean();
+    })
+      .populate('product', 'pricing.minSellingPrice pricing.sellingPrice')
+      .lean();
     
     const packetMap = new Map(packetStocks.map(p => [p.barcode, p]));
 
@@ -149,16 +152,18 @@ router.post('/validate', auth, async (req, res) => {
           hasErrors = true;
           validatedItem.isValid = false;
         } else {
+          const effectivePacketPrice = getEffectivePacketSellingPrice(packetStock, packetStock.product);
+
           // Check price changes
-          if (packetStock.suggestedSellingPrice !== item.price) {
+          if (effectivePacketPrice !== item.price) {
             itemIssues.push({
               type: 'PRICE_CHANGED',
-              message: `Price has changed from £${item.price.toFixed(2)} to £${packetStock.suggestedSellingPrice.toFixed(2)}`,
+              message: `Price has changed from £${item.price.toFixed(2)} to £${effectivePacketPrice.toFixed(2)}`,
               severity: 'warning',
               oldPrice: item.price,
-              newPrice: packetStock.suggestedSellingPrice
+              newPrice: effectivePacketPrice
             });
-            validatedItem.price = packetStock.suggestedSellingPrice;
+            validatedItem.price = effectivePacketPrice;
             validatedItem.priceUpdated = true;
           }
 
@@ -201,17 +206,18 @@ router.post('/validate', auth, async (req, res) => {
         if (matchingPackets.length > 0) {
           const primaryPacket = matchingPackets[0];
           const availableStock = primaryPacket.availablePackets - primaryPacket.reservedPackets;
+          const effectiveLoosePrice = getEffectivePacketSellingPrice(primaryPacket, primaryPacket.product);
           
           // Check price changes
-          if (primaryPacket.suggestedSellingPrice !== item.price) {
+          if (effectiveLoosePrice !== item.price) {
             itemIssues.push({
               type: 'PRICE_CHANGED',
-              message: `Price has changed from £${item.price.toFixed(2)} to £${primaryPacket.suggestedSellingPrice.toFixed(2)}`,
+              message: `Price has changed from £${item.price.toFixed(2)} to £${effectiveLoosePrice.toFixed(2)}`,
               severity: 'warning',
               oldPrice: item.price,
-              newPrice: primaryPacket.suggestedSellingPrice
+              newPrice: effectiveLoosePrice
             });
-            validatedItem.price = primaryPacket.suggestedSellingPrice;
+            validatedItem.price = effectiveLoosePrice;
             validatedItem.priceUpdated = true;
           }
 
@@ -326,13 +332,14 @@ router.post('/stock-check', auth, async (req, res) => {
         barcode: { $in: barcodes },
         isActive: true
       })
-        .select('barcode availablePackets reservedPackets suggestedSellingPrice')
+        .populate('product', 'pricing.minSellingPrice pricing.sellingPrice')
+        .select('barcode availablePackets reservedPackets suggestedSellingPrice totalItemsPerPacket product')
         .lean();
 
       packets.forEach(p => {
         result[p.barcode] = {
           available: p.availablePackets - p.reservedPackets,
-          price: p.suggestedSellingPrice
+          price: getEffectivePacketSellingPrice(p, p.product)
         };
       });
 
@@ -350,14 +357,16 @@ router.post('/stock-check', auth, async (req, res) => {
         _id: { $in: productIds },
         isActive: true
       })
-        .select('_id name')
+        .select('_id name pricing.minSellingPrice pricing.sellingPrice')
         .lean();
 
-      const activeProductIds = new Set(products.map(p => p._id.toString()));
+      const activeProducts = new Map(products.map(p => [p._id.toString(), p]));
       
       productIds.forEach(id => {
+        const product = activeProducts.get(id);
         result[`product_${id}`] = {
-          exists: activeProductIds.has(id)
+          exists: Boolean(product),
+          price: product ? getProductMinSellingPrice(product) : null
         };
       });
     }

@@ -7,6 +7,7 @@ const QRCode = require('qrcode');
 const auth = require('../middleware/auth');
 const { validateImageFile, uploadImage, deleteImage, generateSignedUrls } = require('../utils/imageUpload');
 const { initializeGCS } = require('../config/gcs');
+const { getProductMinSellingPrice, getEffectivePacketSellingPrice, toMoney } = require('../utils/websitePricing');
 
 const router = express.Router();
 
@@ -223,7 +224,8 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         // Average pricing if included
         ...(includePricing && {
           avgCostPrice: { $avg: '$pricing.costPrice' },
-          avgWholesalePrice: { $avg: '$pricing.wholesalePrice' }
+          avgWholesalePrice: { $avg: '$pricing.wholesalePrice' },
+          minSellingPrice: { $min: '$pricing.minSellingPrice' }
         })
       }
     },
@@ -245,7 +247,8 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         _allProductIds: '$allProductIds',
         ...(includePricing && {
           _avgCostPrice: '$avgCostPrice',
-          _avgWholesalePrice: '$avgWholesalePrice'
+          _avgWholesalePrice: '$avgWholesalePrice',
+          _minSellingPrice: '$minSellingPrice'
         })
       }
     },
@@ -279,6 +282,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         isActive: true,
         availablePackets: { $gt: 0 }
       })
+        .populate('product', 'pricing.minSellingPrice pricing.sellingPrice')
         .populate('supplier', 'name company')
         .sort({ isLoose: 1, suggestedSellingPrice: 1 })
         .lean();
@@ -296,15 +300,19 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
           }
         });
 
-        const avgLandedPricePerItem = landedPriceCount > 0 
+        const avgLandedPricePerItem = landedPriceCount > 0
           ? totalLandedPrice / landedPriceCount 
           : (product._avgCostPrice || 0);
 
-        // Calculate selling price: average landed price + 20%
-        const sellingPrice = avgLandedPricePerItem * 1.20;
+        // Website price source of truth is minSellingPrice when available.
+        const minSellingPrice = Number(product._minSellingPrice);
+        const sellingPrice = Number.isFinite(minSellingPrice) && minSellingPrice >= 0
+          ? minSellingPrice
+          : (avgLandedPricePerItem * 1.20);
 
         product.pricing = {
-          sellingPrice: parseFloat(sellingPrice.toFixed(2)),
+          sellingPrice: toMoney(sellingPrice),
+          minSellingPrice: toMoney(sellingPrice),
           wholesalePrice: product._avgWholesalePrice ? parseFloat(product._avgWholesalePrice.toFixed(2)) : null,
           costPrice: product._avgCostPrice ? parseFloat(product._avgCostPrice.toFixed(2)) : null
         };
@@ -312,6 +320,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         // Clean up temporary fields
         delete product._avgCostPrice;
         delete product._avgWholesalePrice;
+        delete product._minSellingPrice;
       }
 
       if (includePackets) {
@@ -321,7 +330,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
           composition: packet.composition,
           totalItemsPerPacket: packet.totalItemsPerPacket,
           isLoose: packet.isLoose,
-          suggestedSellingPrice: packet.suggestedSellingPrice,
+          suggestedSellingPrice: getEffectivePacketSellingPrice(packet, packet.product),
           costPricePerPacket: packet.costPricePerPacket,
           availableStock: packet.availablePackets,
           supplierName: packet.supplier?.name || packet.supplier?.company || 'Unknown Supplier'
@@ -813,6 +822,14 @@ router.get('/lookup/:productCode', auth, async (req, res) => {
     // Convert images to signed URLs
     await convertProductImagesToSignedUrls(product);
 
+    // Keep detail fallback pricing aligned with website pricing source of truth.
+    const effectiveMinSellingPrice = getProductMinSellingPrice(product);
+    product.pricing = {
+      ...(product.pricing || {}),
+      sellingPrice: effectiveMinSellingPrice,
+      minSellingPrice: effectiveMinSellingPrice
+    };
+
     res.json({
       success: true,
       data: {
@@ -872,6 +889,7 @@ router.get('/:id', auth, async (req, res) => {
       isActive: true,
       availablePackets: { $gt: 0 } 
     })
+      .populate('product', 'pricing.minSellingPrice pricing.sellingPrice')
       .populate('supplier', 'name company')
       .sort({ isLoose: 1, totalItemsPerPacket: -1 }) // Prioritize packets over loose, larger packets first
       .lean();
@@ -882,7 +900,7 @@ router.get('/:id', auth, async (req, res) => {
       composition: packet.composition,
       totalItemsPerPacket: packet.totalItemsPerPacket,
       isLoose: packet.isLoose,
-      suggestedSellingPrice: packet.suggestedSellingPrice,
+      suggestedSellingPrice: getEffectivePacketSellingPrice(packet, packet.product),
       costPricePerPacket: packet.costPricePerPacket,
       availableStock: packet.availablePackets,
       supplierName: packet.supplier?.name || packet.supplier?.company || 'Unknown Supplier'
@@ -1003,6 +1021,62 @@ router.put('/:id', auth, async (req, res) => {
 
   } catch (error) {
     console.error('Update product error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error'
+    });
+  }
+});
+
+// Update product min selling price (targeted admin/super-admin update)
+router.patch('/:id/min-selling-price', auth, async (req, res) => {
+  try {
+    if (!['super-admin', 'admin'].includes(req.user?.role)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Only admin or super-admin can update minimum selling price'
+      });
+    }
+
+    const schema = Joi.object({
+      minSellingPrice: Joi.number().min(0).required()
+    });
+
+    const { error } = schema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message
+      });
+    }
+
+    const minSellingPrice = toMoney(req.body.minSellingPrice);
+
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
+    product.pricing = {
+      ...(product.pricing || {}),
+      minSellingPrice,
+      // Keep legacy field aligned so existing internal consumers remain consistent.
+      sellingPrice: minSellingPrice
+    };
+
+    await product.save();
+    await populateProductDocument(product);
+
+    res.json({
+      success: true,
+      message: 'Minimum selling price updated successfully',
+      data: product
+    });
+  } catch (error) {
+    console.error('Update min selling price error:', error);
     res.status(500).json({
       success: false,
       message: 'Server error'

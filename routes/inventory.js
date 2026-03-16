@@ -701,6 +701,7 @@ router.put('/:inventoryId/settings', auth, async (req, res) => {
       maxStockLevel: Joi.number().min(0).optional(),
       reorderLevel: Joi.number().min(0).optional(),
       reorderQuantity: Joi.number().min(0).optional(),
+      minSellingPrice: Joi.number().min(0).optional(),
       location: Joi.object({
         warehouse: Joi.string().optional(),
         section: Joi.string().optional(),
@@ -708,6 +709,7 @@ router.put('/:inventoryId/settings', auth, async (req, res) => {
         bin: Joi.string().optional()
       }).optional()
     });
+
 
     const { error } = settingsSchema.validate(req.body);
     if (error) {
@@ -717,18 +719,39 @@ router.put('/:inventoryId/settings', auth, async (req, res) => {
       });
     }
 
-    const inventory = await Inventory.findByIdAndUpdate(
-      req.params.inventoryId,
-      req.body,
-      { new: true, runValidators: true }
-    ).populate('product', 'name sku');
-
-    if (!inventory) {
+    const existingInventory = await Inventory.findById(req.params.inventoryId).select('product');
+    if (!existingInventory) {
       return res.status(404).json({
         success: false,
         message: 'Inventory not found'
       });
     }
+
+    if (req.body.minSellingPrice !== undefined) {
+      if (!['super-admin', 'admin'].includes(req.user?.role)) {
+        return res.status(403).json({
+          success: false,
+          message: 'Only admin or super-admin can update minimum selling price'
+        });
+      }
+
+      await Product.findByIdAndUpdate(
+        existingInventory.product,
+        {
+          $set: {
+            'pricing.minSellingPrice': Number(req.body.minSellingPrice),
+            'pricing.sellingPrice': Number(req.body.minSellingPrice),
+          }
+        },
+        { new: false }
+      );
+    }
+
+    const inventory = await Inventory.findByIdAndUpdate(
+      req.params.inventoryId,
+      req.body,
+      { new: true, runValidators: true }
+    ).populate('product', 'name sku');
 
     res.json({
       success: true,
