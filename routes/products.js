@@ -8,6 +8,7 @@ const auth = require('../middleware/auth');
 const { validateImageFile, uploadImage, deleteImage, generateSignedUrls } = require('../utils/imageUpload');
 const { initializeGCS } = require('../config/gcs');
 const { getProductMinSellingPrice, getEffectivePacketSellingPrice, toMoney } = require('../utils/websitePricing');
+const { loadActiveCampaigns, getProductCampaignPricing } = require('../services/CampaignPricingService');
 
 const router = express.Router();
 
@@ -274,6 +275,22 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
   // Fetch PacketStock data for each deduplicated product
   if (includePackets || includePricing) {
     const PacketStock = require('../models/PacketStock');
+    const campaigns = includePricing ? await loadActiveCampaigns() : [];
+    const needsStockState = campaigns.some((campaign) => campaign?.filters?.stockState && campaign.filters.stockState !== 'any');
+    const inventoryMap = new Map();
+
+    if (needsStockState) {
+      const productIds = [...new Set(products.flatMap((product) => product._allProductIds || []))];
+      if (productIds.length > 0) {
+        const inventories = await Inventory.find({ product: { $in: productIds } })
+          .select('product currentStock reorderLevel')
+          .lean();
+
+        inventories.forEach((inventory) => {
+          inventoryMap.set(String(inventory.product), inventory);
+        });
+      }
+    }
     
     await Promise.all(products.map(async (product) => {
       // Get all packet stocks for all supplier variations of this product
@@ -317,6 +334,24 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
           costPrice: product._avgCostPrice ? parseFloat(product._avgCostPrice.toFixed(2)) : null
         };
 
+        const campaignPricing = getProductCampaignPricing({
+          product,
+          basePrice: product.pricing.sellingPrice,
+          campaigns,
+          context: {
+            inventory: (product._allProductIds || [])
+              .map((id) => inventoryMap.get(String(id)))
+              .find(Boolean),
+            candidateProductIds: product._allProductIds,
+          },
+        });
+
+        product.pricing.originalPrice = campaignPricing.originalPrice;
+        product.pricing.sellingPrice = campaignPricing.effectivePrice;
+        product.pricing.minSellingPrice = campaignPricing.effectivePrice;
+        product.activeCampaigns = campaignPricing.activeCampaigns;
+        product.bestCampaign = campaignPricing.bestCampaign;
+
         // Clean up temporary fields
         delete product._avgCostPrice;
         delete product._avgWholesalePrice;
@@ -326,15 +361,41 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
       if (includePackets) {
         // Map packet configurations for frontend
         product.availablePackets = packetStocks.map(packet => ({
+          ...(() => {
+            const basePacketPrice = getEffectivePacketSellingPrice(packet, packet.product);
+            const packetCampaignPricing = includePricing
+              ? getProductCampaignPricing({
+                  product,
+                  basePrice: basePacketPrice,
+                  campaigns,
+                  context: {
+                    inventory: (product._allProductIds || [])
+                      .map((id) => inventoryMap.get(String(id)))
+                      .find(Boolean),
+                    candidateProductIds: product._allProductIds,
+                  },
+                })
+              : { effectivePrice: basePacketPrice };
+
+            return {
+              _price: packetCampaignPricing.effectivePrice,
+            };
+          })(),
           barcode: packet.barcode,
           composition: packet.composition,
           totalItemsPerPacket: packet.totalItemsPerPacket,
           isLoose: packet.isLoose,
-          suggestedSellingPrice: getEffectivePacketSellingPrice(packet, packet.product),
+          suggestedSellingPrice: undefined,
           costPricePerPacket: packet.costPricePerPacket,
           availableStock: packet.availablePackets,
           supplierName: packet.supplier?.name || packet.supplier?.company || 'Unknown Supplier'
-        }));
+        })).map((packet) => {
+          const { _price, ...rest } = packet;
+          return {
+            ...rest,
+            suggestedSellingPrice: _price,
+          };
+        });
 
         // Calculate total stock from all suppliers
         product.totalStock = packetStocks.reduce((sum, packet) => {
@@ -924,13 +985,61 @@ router.get('/:id', auth, async (req, res) => {
     // Convert images to signed URLs
     await convertProductImagesToSignedUrls(product);
 
+    const campaigns = await loadActiveCampaigns();
+    const campaignPricing = getProductCampaignPricing({
+      product,
+      basePrice: getProductMinSellingPrice(product),
+      campaigns,
+      context: {
+        inventory,
+        candidateProductIds: allProductIds,
+      },
+    });
+
+    product.activeCampaigns = campaignPricing.activeCampaigns;
+    product.bestCampaign = campaignPricing.bestCampaign;
+    product.pricing = {
+      ...(product.pricing || {}),
+      originalPrice: campaignPricing.originalPrice,
+      sellingPrice: campaignPricing.effectivePrice,
+      minSellingPrice: campaignPricing.effectivePrice,
+    };
+
+    const adjustedPackets = availablePackets.map((packet) => {
+      const packetCampaignPricing = getProductCampaignPricing({
+        product,
+        basePrice: Number(packet.suggestedSellingPrice || 0),
+        campaigns,
+        context: {
+          inventory,
+          candidateProductIds: allProductIds,
+        },
+      });
+      return {
+        ...packet,
+        suggestedSellingPrice: packetCampaignPricing.effectivePrice,
+      };
+    });
+
+    const primaryAdjustedPacket = adjustedPackets[0] || null;
+
     res.json({
       success: true,
       data: {
         ...(product.toObject ? product.toObject() : product),
         inventoryInfo: inventory,
-        packetPricing,
-        availablePackets  // NEW: All packet configurations
+        packetPricing: primaryAdjustedPacket
+          ? {
+              barcode: primaryAdjustedPacket.barcode,
+              composition: primaryAdjustedPacket.composition,
+              totalItemsPerPacket: primaryAdjustedPacket.totalItemsPerPacket,
+              isLoose: primaryAdjustedPacket.isLoose,
+              suggestedSellingPrice: primaryAdjustedPacket.suggestedSellingPrice,
+              costPricePerPacket: primaryAdjustedPacket.costPricePerPacket,
+              availablePackets: primaryAdjustedPacket.availableStock,
+            }
+          : packetPricing,
+        availablePackets: adjustedPackets  // NEW: All packet configurations
       }
     });
 

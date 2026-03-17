@@ -197,6 +197,7 @@ app.use("/api/addresses", require("./routes/addresses"));
 app.use("/api/checkout", require("./routes/checkout"));
 app.use("/api/settings", require("./routes/settings"));
 app.use("/api/edit-requests", require("./routes/editRequests"));
+app.use("/api/campaigns", require("./routes/campaigns"));
 
 // Health check endpoint
 app.get("/health", (req, res) => {

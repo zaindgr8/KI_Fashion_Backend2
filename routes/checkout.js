@@ -14,6 +14,8 @@ const auth = require('../middleware/auth');
 const { generateSaleQR } = require('../utils/qrCode');
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
 const { sendInvoiceEmails } = require('../utils/emailService');
+const { getProductMinSellingPrice, getEffectivePacketSellingPrice } = require('../utils/websitePricing');
+const { loadActiveCampaigns, getProductCampaignPricing } = require('../services/CampaignPricingService');
 
 const router = express.Router();
 
@@ -386,8 +388,110 @@ router.post('/create-session', auth, async (req, res) => {
       });
     }
 
+    // Recompute authoritative prices, including active campaign discounts.
+    const productIds = [...new Set(items.map((item) => String(item.productId)))];
+    const packetBarcodes = items
+      .filter((item) => item.inventoryType === 'packet' && item.packetBarcode)
+      .map((item) => item.packetBarcode);
+
+    const [products, packets, campaigns, inventoryRecords] = await Promise.all([
+      Product.find({ _id: { $in: productIds }, isActive: true })
+        .select('_id name sku category brand season supplier pricing.minSellingPrice pricing.sellingPrice')
+        .lean(),
+      packetBarcodes.length > 0
+        ? PacketStock.find({ barcode: { $in: packetBarcodes }, isActive: true })
+            .populate('product', 'pricing.minSellingPrice pricing.sellingPrice')
+            .select('barcode product isLoose composition totalItemsPerPacket availablePackets reservedPackets suggestedSellingPrice')
+            .lean()
+        : Promise.resolve([]),
+      loadActiveCampaigns(),
+      Inventory.find({ product: { $in: productIds } })
+        .select('product currentStock reorderLevel')
+        .lean(),
+    ]);
+
+    const productMap = new Map(products.map((product) => [String(product._id), product]));
+    const packetMap = new Map(packets.map((packet) => [packet.barcode, packet]));
+    const inventoryMap = new Map(inventoryRecords.map((inventory) => [String(inventory.product), inventory]));
+
+    const authoritativeItems = [];
+    const priceChanges = [];
+
+    for (const item of items) {
+      const product = productMap.get(String(item.productId));
+      if (!product) {
+        return res.status(400).json({
+          success: false,
+          message: `Product not found or inactive: ${item.name || item.productId}`,
+        });
+      }
+
+      let authoritativePrice = Number(item.price || 0);
+
+      if (item.inventoryType === 'packet' && item.packetBarcode) {
+        const packet = packetMap.get(item.packetBarcode);
+        if (!packet) {
+          return res.status(400).json({
+            success: false,
+            message: `Packet not available for item: ${item.name || item.productId}`,
+          });
+        }
+
+        const basePacketPrice = getEffectivePacketSellingPrice(packet, packet.product);
+        const packetCampaignPricing = getProductCampaignPricing({
+          product,
+          basePrice: basePacketPrice,
+          campaigns,
+          context: {
+            inventory: inventoryMap.get(String(product._id)),
+            candidateProductIds: [product._id],
+          },
+        });
+        authoritativePrice = packetCampaignPricing.effectivePrice;
+      } else {
+        const baseLoosePrice = getProductMinSellingPrice(product);
+        const looseCampaignPricing = getProductCampaignPricing({
+          product,
+          basePrice: baseLoosePrice,
+          campaigns,
+          context: {
+            inventory: inventoryMap.get(String(product._id)),
+            candidateProductIds: [product._id],
+          },
+        });
+        authoritativePrice = looseCampaignPricing.effectivePrice;
+      }
+
+      if (Math.abs(Number(item.price || 0) - authoritativePrice) > 0.0001) {
+        priceChanges.push({
+          itemId: item.id,
+          productId: item.productId,
+          name: item.name,
+          oldPrice: Number(item.price || 0),
+          newPrice: authoritativePrice,
+        });
+      }
+
+      authoritativeItems.push({
+        ...item,
+        price: authoritativePrice,
+      });
+    }
+
+    if (priceChanges.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Cart prices were updated due to active/expired campaigns. Please confirm with updated totals.',
+        code: 'PRICE_CHANGED',
+        data: {
+          items: authoritativeItems,
+          priceChanges,
+        },
+      });
+    }
+
     // Calculate totals (now async because it fetches VAT settings)
-    const { items: saleItems, subtotal, totalTax, totalVAT, vatRate, grandTotal } = await calculateTotals(items);
+    const { items: saleItems, subtotal, totalTax, totalVAT, vatRate, grandTotal } = await calculateTotals(authoritativeItems);
 
     // Generate sale number
     const saleNumber = await generateSaleNumber();
@@ -425,7 +529,7 @@ router.post('/create-session', auth, async (req, res) => {
     });
 
     // Reserve stock
-    const reservationResult = await reserveStock(items, sale._id, req.user._id);
+    const reservationResult = await reserveStock(authoritativeItems, sale._id, req.user._id);
     if (!reservationResult.success) {
       return res.status(400).json({
         success: false,
@@ -436,7 +540,7 @@ router.post('/create-session', auth, async (req, res) => {
     // Create Stripe Checkout session
     const frontendUrl = process.env.FRONTEND_URL || 'https://kifashion-website.vercel.app';
     
-    const lineItems = items.map(item => ({
+    const lineItems = authoritativeItems.map(item => ({
       price_data: {
         currency: 'gbp',
         product_data: {

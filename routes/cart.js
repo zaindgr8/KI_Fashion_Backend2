@@ -2,8 +2,10 @@ const express = require('express');
 const Joi = require('joi');
 const Product = require('../models/Product');
 const PacketStock = require('../models/PacketStock');
+const Inventory = require('../models/Inventory');
 const auth = require('../middleware/auth');
 const { getProductMinSellingPrice, getEffectivePacketSellingPrice } = require('../utils/websitePricing');
+const { loadActiveCampaigns, getProductCampaignPricing } = require('../services/CampaignPricingService');
 
 const router = express.Router();
 
@@ -92,6 +94,12 @@ router.post('/validate', auth, async (req, res) => {
     })
       .populate('product', 'pricing.minSellingPrice pricing.sellingPrice')
       .lean();
+
+    const campaigns = await loadActiveCampaigns();
+    const inventoryRecords = await Inventory.find({ product: { $in: productIds } })
+      .select('product currentStock reorderLevel')
+      .lean();
+    const inventoryMap = new Map(inventoryRecords.map((inventory) => [String(inventory.product), inventory]));
     
     const packetMap = new Map(packetStocks.map(p => [p.barcode, p]));
 
@@ -152,7 +160,17 @@ router.post('/validate', auth, async (req, res) => {
           hasErrors = true;
           validatedItem.isValid = false;
         } else {
-          const effectivePacketPrice = getEffectivePacketSellingPrice(packetStock, packetStock.product);
+          const basePacketPrice = getEffectivePacketSellingPrice(packetStock, packetStock.product);
+          const campaignPacketPrice = getProductCampaignPricing({
+            product,
+            basePrice: basePacketPrice,
+            campaigns,
+            context: {
+              inventory: inventoryMap.get(String(product._id)),
+              candidateProductIds: [product._id],
+            },
+          });
+          const effectivePacketPrice = campaignPacketPrice.effectivePrice;
 
           // Check price changes
           if (effectivePacketPrice !== item.price) {
@@ -206,7 +224,17 @@ router.post('/validate', auth, async (req, res) => {
         if (matchingPackets.length > 0) {
           const primaryPacket = matchingPackets[0];
           const availableStock = primaryPacket.availablePackets - primaryPacket.reservedPackets;
-          const effectiveLoosePrice = getEffectivePacketSellingPrice(primaryPacket, primaryPacket.product);
+          const baseLoosePrice = getEffectivePacketSellingPrice(primaryPacket, primaryPacket.product);
+          const campaignLoosePrice = getProductCampaignPricing({
+            product,
+            basePrice: baseLoosePrice,
+            campaigns,
+            context: {
+              inventory: inventoryMap.get(String(product._id)),
+              candidateProductIds: [product._id],
+            },
+          });
+          const effectiveLoosePrice = campaignLoosePrice.effectivePrice;
           
           // Check price changes
           if (effectiveLoosePrice !== item.price) {
@@ -325,21 +353,62 @@ router.post('/stock-check', auth, async (req, res) => {
     const { barcodes = [], productIds = [] } = req.body;
 
     const result = {};
+    const campaigns = await loadActiveCampaigns();
+    let packets = [];
 
-    // Check packet stocks by barcode
     if (barcodes.length > 0) {
-      const packets = await PacketStock.find({
+      packets = await PacketStock.find({
         barcode: { $in: barcodes },
         isActive: true
       })
         .populate('product', 'pricing.minSellingPrice pricing.sellingPrice')
         .select('barcode availablePackets reservedPackets suggestedSellingPrice totalItemsPerPacket product')
         .lean();
+    }
 
+    const packetProductIds = packets
+      .map((packet) => String(packet.product?._id || packet.product))
+      .filter(Boolean);
+    const allProductIds = [...new Set([...productIds.map(String), ...packetProductIds])];
+
+    const products = allProductIds.length > 0
+      ? await Product.find({
+          _id: { $in: allProductIds },
+          isActive: true
+        })
+          .select('_id name sku category brand season supplier pricing.minSellingPrice pricing.sellingPrice')
+          .lean()
+      : [];
+
+    const inventoryRecords = allProductIds.length > 0
+      ? await Inventory.find({ product: { $in: allProductIds } })
+          .select('product currentStock reorderLevel')
+          .lean()
+      : [];
+
+    const inventoryMap = new Map(inventoryRecords.map((inventory) => [String(inventory.product), inventory]));
+    const productsById = new Map(products.map((product) => [String(product._id), product]));
+
+    // Check packet stocks by barcode
+    if (barcodes.length > 0) {
       packets.forEach(p => {
+        const product = productsById.get(String(p.product?._id || p.product));
+        const basePacketPrice = getEffectivePacketSellingPrice(p, p.product);
+        const campaignPacketPrice = product
+          ? getProductCampaignPricing({
+              product,
+              basePrice: basePacketPrice,
+              campaigns,
+              context: {
+                inventory: inventoryMap.get(String(product._id)),
+                candidateProductIds: [product._id],
+              },
+            })
+          : { effectivePrice: basePacketPrice };
+
         result[p.barcode] = {
           available: p.availablePackets - p.reservedPackets,
-          price: getEffectivePacketSellingPrice(p, p.product)
+          price: campaignPacketPrice.effectivePrice
         };
       });
 
@@ -353,20 +422,28 @@ router.post('/stock-check', auth, async (req, res) => {
 
     // Check products exist
     if (productIds.length > 0) {
-      const products = await Product.find({
-        _id: { $in: productIds },
-        isActive: true
-      })
-        .select('_id name pricing.minSellingPrice pricing.sellingPrice')
-        .lean();
-
-      const activeProducts = new Map(products.map(p => [p._id.toString(), p]));
+      const activeProducts = new Map(
+        products
+          .filter((product) => productIds.map(String).includes(String(product._id)))
+          .map((product) => [String(product._id), product])
+      );
       
       productIds.forEach(id => {
-        const product = activeProducts.get(id);
+        const product = activeProducts.get(String(id));
+        const campaignPricing = product
+          ? getProductCampaignPricing({
+              product,
+              basePrice: getProductMinSellingPrice(product),
+              campaigns,
+              context: {
+                inventory: inventoryMap.get(String(product._id)),
+                candidateProductIds: [product._id],
+              },
+            })
+          : null;
         result[`product_${id}`] = {
           exists: Boolean(product),
-          price: product ? getProductMinSellingPrice(product) : null
+          price: campaignPricing ? campaignPricing.effectivePrice : null
         };
       });
     }
