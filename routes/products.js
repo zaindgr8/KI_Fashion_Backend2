@@ -12,6 +12,17 @@ const { loadActiveCampaigns, getProductCampaignPricing } = require('../services/
 
 const router = express.Router();
 
+// Always serve fresh product data so campaign changes are reflected immediately.
+router.use((req, res, next) => {
+  if (req.method === 'GET') {
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.set('Surrogate-Control', 'no-store');
+  }
+  next();
+});
+
 // Initialize GCS on module load
 try {
   initializeGCS();
@@ -400,6 +411,8 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
 
             return {
               _price: packetCampaignPricing.effectivePrice,
+              _activeCampaigns: packetCampaignPricing.activeCampaigns,
+              _bestCampaign: packetCampaignPricing.bestCampaign,
             };
           })(),
           barcode: packet.barcode,
@@ -411,10 +424,12 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
           availableStock: packet.availablePackets,
           supplierName: packet.supplier?.name || packet.supplier?.company || 'Unknown Supplier'
         })).map((packet) => {
-          const { _price, ...rest } = packet;
+          const { _price, _activeCampaigns, _bestCampaign, ...rest } = packet;
           return {
             ...rest,
             suggestedSellingPrice: _price,
+            activeCampaigns: _activeCampaigns,
+            bestCampaign: _bestCampaign,
           };
         });
 
@@ -1039,6 +1054,8 @@ router.get('/:id', auth, async (req, res) => {
       return {
         ...packet,
         suggestedSellingPrice: packetCampaignPricing.effectivePrice,
+        activeCampaigns: packetCampaignPricing.activeCampaigns,
+        bestCampaign: packetCampaignPricing.bestCampaign,
       };
     });
 
