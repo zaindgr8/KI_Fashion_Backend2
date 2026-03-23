@@ -4,15 +4,22 @@ function toMoney(value) {
   return Number(numberValue.toFixed(2));
 }
 
+function toFiniteNonNegative(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue) || numberValue < 0) return null;
+  return toMoney(numberValue);
+}
+
 function getProductMinSellingPrice(product) {
-  const minSellingPrice = Number(product?.pricing?.minSellingPrice);
-  if (Number.isFinite(minSellingPrice) && minSellingPrice >= 0) {
-    return toMoney(minSellingPrice);
+  const minSellingPrice = toFiniteNonNegative(product?.pricing?.minSellingPrice);
+  if (minSellingPrice !== null) {
+    return minSellingPrice;
   }
 
-  const sellingPrice = Number(product?.pricing?.sellingPrice);
-  if (Number.isFinite(sellingPrice) && sellingPrice >= 0) {
-    return toMoney(sellingPrice);
+  const sellingPrice = toFiniteNonNegative(product?.pricing?.sellingPrice);
+  if (sellingPrice !== null) {
+    return sellingPrice;
   }
 
   return 0;

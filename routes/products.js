@@ -199,9 +199,22 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
   const pipeline = [
     // Match active products with base query
     { $match: { isActive: true, ...baseQuery } },
+
+    // Prefer records with images when choosing representative SKU metadata
+    {
+      $addFields: {
+        _hasImages: {
+          $cond: [
+            { $gt: [{ $size: { $ifNull: ['$images', []] } }, 0] },
+            1,
+            0,
+          ],
+        },
+      },
+    },
     
     // Sort by creation date (newest first) before grouping
-    { $sort: { createdAt: -1 } },
+    { $sort: { _hasImages: -1, createdAt: -1 } },
     
     // Group by SKU to deduplicate
     {
@@ -226,7 +239,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         ...(includePricing && {
           avgCostPrice: { $avg: '$pricing.costPrice' },
           avgWholesalePrice: { $avg: '$pricing.wholesalePrice' },
-          minSellingPrice: { $min: '$pricing.minSellingPrice' }
+          minSellingPrices: { $push: '$pricing.minSellingPrice' }
         })
       }
     },
@@ -249,7 +262,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         ...(includePricing && {
           _avgCostPrice: '$avgCostPrice',
           _avgWholesalePrice: '$avgWholesalePrice',
-          _minSellingPrice: '$minSellingPrice'
+          _minSellingPrices: '$minSellingPrices'
         })
       }
     },
@@ -322,7 +335,15 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
           : (product._avgCostPrice || 0);
 
         // Website price source of truth is minSellingPrice when available.
-        const minSellingPrice = Number(product._minSellingPrice);
+        // Ignore null/undefined values to avoid coercing Number(null) to 0.
+        const minSellingPriceCandidates = Array.isArray(product._minSellingPrices)
+          ? product._minSellingPrices
+              .map((value) => Number(value))
+              .filter((value) => Number.isFinite(value) && value >= 0)
+          : [];
+        const minSellingPrice = minSellingPriceCandidates.length > 0
+          ? Math.min(...minSellingPriceCandidates)
+          : NaN;
         const sellingPrice = Number.isFinite(minSellingPrice) && minSellingPrice >= 0
           ? minSellingPrice
           : (avgLandedPricePerItem * 1.20);
@@ -355,7 +376,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         // Clean up temporary fields
         delete product._avgCostPrice;
         delete product._avgWholesalePrice;
-        delete product._minSellingPrice;
+        delete product._minSellingPrices;
       }
 
       if (includePackets) {

@@ -18,6 +18,23 @@ const toSlug = (value = '') =>
 
 const canManageCampaigns = (user) => ['admin', 'super-admin'].includes(user?.role);
 
+const hasCampaignScope = (payload = {}) => {
+  const explicitProductIds = Array.isArray(payload.productIds)
+    ? payload.productIds.filter(Boolean)
+    : [];
+  if (explicitProductIds.length > 0) return true;
+
+  const filters = payload.filters || {};
+  return Boolean(
+    (Array.isArray(filters.categories) && filters.categories.length > 0) ||
+    (Array.isArray(filters.brands) && filters.brands.length > 0) ||
+    (Array.isArray(filters.seasons) && filters.seasons.length > 0) ||
+    (Array.isArray(filters.supplierIds) && filters.supplierIds.length > 0) ||
+    (Array.isArray(filters.skus) && filters.skus.length > 0) ||
+    (filters.stockState && filters.stockState !== 'any')
+  );
+};
+
 const campaignSchema = Joi.object({
   name: Joi.string().min(2).max(120).required(),
   campaignType: Joi.string().valid('discount', 'clearance').default('discount'),
@@ -173,6 +190,14 @@ router.post('/', auth, async (req, res) => {
       return sendResponse.error(res, 'Percentage discount cannot exceed 100', 400);
     }
 
+    if (value.campaignType === 'clearance' && !hasCampaignScope(value)) {
+      return sendResponse.error(
+        res,
+        'Clearance campaigns must target at least one product or filter',
+        400
+      );
+    }
+
     await ensureValidReferences(value);
 
     let slug = toSlug(value.name);
@@ -218,12 +243,31 @@ router.patch('/:id', auth, async (req, res) => {
       return sendResponse.error(res, error.details[0].message, 400);
     }
 
+    const existingCampaign = await Campaign.findById(req.params.id).lean();
+    if (!existingCampaign) {
+      return sendResponse.error(res, 'Campaign not found', 404);
+    }
+
     if (value.startAt && value.endAt && new Date(value.startAt) >= new Date(value.endAt)) {
       return sendResponse.error(res, 'startAt must be before endAt', 400);
     }
 
     if (value.discountType === 'percentage' && value.discountValue > 100) {
       return sendResponse.error(res, 'Percentage discount cannot exceed 100', 400);
+    }
+
+    const mergedCampaignType = value.campaignType || existingCampaign.campaignType;
+    const mergedCampaignScope = {
+      productIds: value.productIds !== undefined ? value.productIds : existingCampaign.productIds,
+      filters: value.filters !== undefined ? value.filters : existingCampaign.filters,
+    };
+
+    if (mergedCampaignType === 'clearance' && !hasCampaignScope(mergedCampaignScope)) {
+      return sendResponse.error(
+        res,
+        'Clearance campaigns must target at least one product or filter',
+        400
+      );
     }
 
     await ensureValidReferences(value);
@@ -289,6 +333,21 @@ router.patch('/:id/status', auth, async (req, res) => {
       isActive: value.isActive !== undefined ? value.isActive : value.status === 'active',
       updatedBy: req.user._id,
     };
+
+    if (patch.status === 'active' || patch.isActive === true) {
+      const existingCampaign = await Campaign.findById(req.params.id).lean();
+      if (!existingCampaign) {
+        return sendResponse.error(res, 'Campaign not found', 404);
+      }
+
+      if (existingCampaign.campaignType === 'clearance' && !hasCampaignScope(existingCampaign)) {
+        return sendResponse.error(
+          res,
+          'Cannot activate a clearance campaign without product or filter scope',
+          400
+        );
+      }
+    }
 
     const campaign = await Campaign.findByIdAndUpdate(req.params.id, patch, {
       new: true,
