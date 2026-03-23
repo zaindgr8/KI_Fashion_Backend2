@@ -1182,8 +1182,12 @@ router.get('/', auth, async (req, res) => {
 
     if (startDate || endDate) {
       query.saleDate = {};
-      if (startDate) query.saleDate.$gte = new Date(startDate);
-      if (endDate) query.saleDate.$lte = new Date(endDate);
+      if (startDate) {
+        query.saleDate.$gte = new Date(`${startDate}T00:00:00.000Z`);
+      }
+      if (endDate) {
+        query.saleDate.$lte = new Date(`${endDate}T23:59:59.999Z`);
+      }
     }
 
     const sales = await Sale.find(query)
