@@ -493,15 +493,15 @@ const manualEntryItemSchema = Joi.object({
   landedTotal: Joi.number().min(0).required(),
   // Packet management fields
   useVariantTracking: Joi.boolean().optional(),
-  packets: Joi.array().items(packetSchema).optional()
+  packets: Joi.array().items(packetSchema).min(1).required()
 });
 
 const manualEntrySchema = Joi.object({
   supplier: Joi.string().required(),
   purchaseDate: Joi.date().optional(),
   expectedDeliveryDate: Joi.date().optional(),
-  exchangeRate: Joi.number().min(0.01).default(1.0), // Exchange rate for currency conversion
-  percentage: Joi.number().min(0).default(0), // Profit margin percentage
+  exchangeRate: Joi.number().min(0.01).required(), // Exchange rate for currency conversion
+  percentage: Joi.number().min(0).required(), // Profit margin percentage
   items: Joi.array().items(manualEntryItemSchema).min(1).required(),
   subtotal: Joi.number().min(0).optional(),
   totalDiscount: Joi.number().min(0).default(0),
@@ -773,8 +773,8 @@ router.post('/manual', auth, async (req, res) => {
       }
 
       const costPrice = item.costPrice || (product ? product.pricing?.costPrice : 0);
-      const exchangeRate = value.exchangeRate || 1.0;
-      const percentage = value.percentage || 0;
+      const exchangeRate = value.exchangeRate;
+      const percentage = value.percentage;
       const defaultMinSell = truncateToTwoDecimals((costPrice / exchangeRate) * (1 + (percentage / 100)));
       const minSellingPrice = resolveMinSellingPrice(item.minSellingPrice, defaultMinSell);
 
@@ -788,6 +788,20 @@ router.post('/manual', auth, async (req, res) => {
       // Truncate to 2 decimal places (no rounding) for database storage
       const landedPrice = truncateToTwoDecimals((costPrice / exchangeRate) * (1 + (percentage / 100)));
       const landedTotal = truncateToTwoDecimals(landedPrice * item.quantity);
+
+      // Ensure packet composition quantity exactly matches item quantity.
+      const totalPacketItems = item.packets.reduce((sum, packet) => {
+        const packetTotal = packet.composition.reduce((packetSum, comp) => packetSum + comp.quantity, 0);
+        return sum + packetTotal;
+      }, 0);
+
+      if (totalPacketItems !== item.quantity) {
+        return sendResponse.error(
+          res,
+          `Packet composition total (${totalPacketItems}) must equal item quantity (${item.quantity}) for item ${item.productName || item.productCode || 'Unknown'}`,
+          400
+        );
+      }
 
       itemsWithDetails.push({
         product: product ? product._id : undefined,
@@ -804,7 +818,9 @@ router.post('/manual', auth, async (req, res) => {
         supplierPaymentAmount: supplierPaymentAmount,
         landedPrice: landedPrice,
         landedTotal: item.landedTotal ? truncateToTwoDecimals(item.landedTotal) : landedTotal, // Use provided (truncated) or calculated
-        productImage: item.productImage || undefined
+        productImage: item.productImage || undefined,
+        useVariantTracking: true,
+        packets: item.packets
       });
     }
 
@@ -864,8 +880,8 @@ router.post('/manual', auth, async (req, res) => {
       logisticsCompany: value.logisticsCompany || null, // Optional - for tracking logistics charges
       dispatchDate: value.purchaseDate ? new Date(value.purchaseDate) : new Date(),
       expectedDeliveryDate: value.expectedDeliveryDate,
-      exchangeRate: value.exchangeRate || 1.0,
-      percentage: value.percentage || 0,
+      exchangeRate: value.exchangeRate,
+      percentage: value.percentage,
       items: itemsWithDetails,
       status: 'confirmed', // Manual entries are pre-confirmed
       confirmedAt: new Date(),
