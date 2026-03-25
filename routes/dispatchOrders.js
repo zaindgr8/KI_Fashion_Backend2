@@ -3444,7 +3444,7 @@ router.post('/:id/return', auth, async (req, res) => {
           bankPayment: 0,
           remainingBalance: newSupplierBalance
         }
-      }, { session });
+      }, session);
 
       // Update supplier balance
       await Supplier.findByIdAndUpdate(
