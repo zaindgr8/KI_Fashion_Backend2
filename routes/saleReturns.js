@@ -487,7 +487,13 @@ router.post('/', auth, async (req, res) => {
       // Commit this transaction first, then process return in its own transaction
       await session.commitTransaction();
       session.endSession();
-      await processSaleReturn(saleReturn._id, req.user._id);
+      try {
+        await processSaleReturn(saleReturn._id, req.user._id);
+      } catch (processError) {
+        // SaleReturn doc is already committed — log but don't fail the response.
+        // The return will be retried when the admin approves/re-processes it.
+        console.error('[Sale Return] processSaleReturn failed after SaleReturn commit:', processError.message);
+      }
     } else {
       // Commit the transaction for pending returns
       await session.commitTransaction();

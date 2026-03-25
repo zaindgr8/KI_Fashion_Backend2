@@ -165,7 +165,12 @@ ledgerSchema.statics.getNextEntryNumber = async function (session = null) {
       options
     );
     
-    return counter.value.seq;
+    // MongoDB driver 5.x returns document directly; driver 4.x wraps in { value: doc }
+    const seq = counter?.value?.seq ?? counter?.seq;
+    if (seq == null) {
+      throw new Error('Counter document returned without seq field');
+    }
+    return seq;
   } catch (error) {
     // Fallback: if counter collection fails, find max entryNumber
     console.warn('Counter collection access failed, falling back to max entryNumber:', error.message);
