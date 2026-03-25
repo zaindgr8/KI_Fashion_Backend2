@@ -185,7 +185,7 @@ inventorySchema.methods.addStock = function (quantity, reference, referenceId, u
     date: Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate
   });
   this.currentStock += quantity;
-  this.lastStockUpdate = new Date();
+  this.lastStockUpdate = Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate;
   return this.save();
 };
 
@@ -253,7 +253,7 @@ inventorySchema.methods.addStockWithVariants = function (quantity, variantCompos
     });
   }
 
-  this.lastStockUpdate = new Date();
+  this.lastStockUpdate = Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate;
   return this.save();
 };
 
@@ -372,7 +372,7 @@ inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, refer
   });
 
   this.currentStock += quantity;
-  this.lastStockUpdate = new Date();
+  this.lastStockUpdate = Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate;
 
   // Update average cost price using weighted average (using landedPrice for true acquisition cost)
   const totalValue = this.purchaseBatches.reduce((sum, batch) => {

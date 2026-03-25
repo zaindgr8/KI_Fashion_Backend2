@@ -2162,7 +2162,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     looseItem.quantity,
                     dispatchOrder._id,
                     batchInfo.costPrice,
-                    batchInfo.landedPrice
+                    batchInfo.landedPrice,
+                    transactionDate
                   );
                   const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
                   packetStock.suggestedSellingPrice = itemMinSell;
@@ -2187,14 +2188,14 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     barcodeImage: looseBarcodeImage ? {
                       dataUrl: looseBarcodeImage,
                       format: 'code128',
-                      generatedAt: new Date()
+                      generatedAt: transactionDate
                     } : undefined,
                     dispatchOrderHistory: [{
                       dispatchOrderId: dispatchOrder._id,
                       quantity: looseItem.quantity,
                       costPricePerPacket: batchInfo.costPrice,
                       landedPricePerPacket: batchInfo.landedPrice,
-                      addedAt: new Date()
+                      addedAt: transactionDate
                     }]
                   });
                   await packetStock.save();
@@ -2249,7 +2250,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     packetGroup.count,
                     dispatchOrder._id,
                     costPerPacket,
-                    landedPerPacket
+                    landedPerPacket,
+                    transactionDate
                   );
                   const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, landedPerPacket * 1.20);
                   packetStock.suggestedSellingPrice = truncateToTwoDecimals(itemMinSell * (packetGroup.totalItemsPerPacket || 1));
@@ -2274,14 +2276,14 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     barcodeImage: packetBarcodeImage ? {
                       dataUrl: packetBarcodeImage,
                       format: 'code128',
-                      generatedAt: new Date()
+                      generatedAt: transactionDate
                     } : undefined,
                     dispatchOrderHistory: [{
                       dispatchOrderId: dispatchOrder._id,
                       quantity: packetGroup.count,
                       costPricePerPacket: costPerPacket,
                       landedPricePerPacket: landedPerPacket,
-                      addedAt: new Date()
+                      addedAt: transactionDate
                     }]
                   });
                   await packetStock.save();
@@ -2341,7 +2343,8 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 confirmedQuantity,
                 dispatchOrder._id,
                 batchInfo.costPrice,
-                batchInfo.landedPrice
+                batchInfo.landedPrice,
+                transactionDate
               );
               const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
               packetStock.suggestedSellingPrice = itemMinSell;
@@ -2381,14 +2384,14 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 barcodeImage: looseBarcodeImageDataUrl ? {
                   dataUrl: looseBarcodeImageDataUrl,
                   format: 'code128',
-                  generatedAt: new Date()
+                  generatedAt: transactionDate
                 } : undefined,
                 dispatchOrderHistory: [{
                   dispatchOrderId: dispatchOrder._id,
                   quantity: confirmedQuantity,
                   costPricePerPacket: batchInfo.costPrice,
                   landedPricePerPacket: batchInfo.landedPrice,
-                  addedAt: new Date()
+                  addedAt: transactionDate
                 }]
               });
               await packetStock.save();
@@ -2489,7 +2492,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
 
     // Update dispatch order
     dispatchOrder.status = 'confirmed';
-    dispatchOrder.confirmedAt = new Date();
+    dispatchOrder.confirmedAt = transactionDate;
     dispatchOrder.confirmedBy = req.user._id;
     dispatchOrder.exchangeRate = finalExchangeRate;
     dispatchOrder.percentage = finalPercentage;
@@ -2704,7 +2707,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                   data: looseBarcode,
                   dataUrl: dataUrl,
                   isLoose: true,
-                  generatedAt: new Date()
+                  generatedAt: transactionDate
                 });
               }
             } else {
@@ -2738,7 +2741,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 data: packetBarcode,
                 dataUrl: dataUrl,
                 isLoose: false,
-                generatedAt: new Date()
+                generatedAt: transactionDate
               });
             }
           }
@@ -2781,14 +2784,14 @@ router.post('/:id/confirm', auth, async (req, res) => {
             data: looseBarcode,
             dataUrl: dataUrl,
             isLoose: true,
-            generatedAt: new Date()
+            generatedAt: transactionDate
           });
         }
       }
       
       // Save barcode data to dispatch order (with dataURL like QR codes)
       dispatchOrder.barcodeData = barcodeResults;
-      dispatchOrder.barcodeGeneratedAt = new Date();
+      dispatchOrder.barcodeGeneratedAt = transactionDate;
       
        
       

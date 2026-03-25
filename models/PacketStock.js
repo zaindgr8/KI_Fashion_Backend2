@@ -191,7 +191,7 @@ packetStockSchema.virtual('actualAvailable').get(function () {
 });
 
 // Method to add stock
-packetStockSchema.methods.addStock = function (quantity, dispatchOrderId, costPrice, landedPrice) {
+packetStockSchema.methods.addStock = function (quantity, dispatchOrderId, costPrice, landedPrice, movementDate = null) {
   const previousTotal = this.availablePackets;
   this.availablePackets += quantity;
 
@@ -209,13 +209,15 @@ packetStockSchema.methods.addStock = function (quantity, dispatchOrderId, costPr
   // Calculate suggested selling price (20% margin on landed)
   this.suggestedSellingPrice = this.landedPricePerPacket * 1.20;
 
+  const transactionDate = movementDate ? new Date(movementDate) : new Date();
+
   // Track history
   this.dispatchOrderHistory.push({
     dispatchOrderId,
     quantity,
     costPricePerPacket: costPrice,
     landedPricePerPacket: landedPrice,
-    addedAt: new Date()
+    addedAt: Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate
   });
 
   return this.save();
