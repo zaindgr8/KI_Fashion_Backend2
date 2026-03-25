@@ -1461,6 +1461,26 @@ router.get('/:id', auth, async (req, res) => {
   }
 });
 
+/**
+ * @route   GET /api/dispatch-orders/:id/packet-stocks
+ * @desc    Get packet stocks associated with a dispatch order
+ * @access  Private
+ */
+router.get('/:id/packet-stocks', auth, async (req, res) => {
+  try {
+    const PacketStock = require('../models/PacketStock');
+    const packetStocks = await PacketStock.find({
+      'dispatchOrderHistory.dispatchOrderId': req.params.id,
+      isActive: true
+    }).populate('product', 'name sku productCode images');
+    
+    return res.json(sendResponse.success(packetStocks));
+  } catch (error) {
+    console.error('Get dispatch order packet stocks error:', error);
+    return res.status(500).json(sendResponse.error(error.message));
+  }
+});
+
 // Update dispatch order status
 router.patch('/:id/status', auth, async (req, res) => {
   try {
@@ -3221,132 +3241,161 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
 
 // Return items from dispatch order
 router.post('/:id/return', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
   try {
     // Only admin/manager can return items
     if (!['super-admin', 'admin'].includes(req.user.role)) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Only admins and managers can return items', 403);
     }
 
-    const { returnedItems } = req.body;
+    const { returnedItems, notes } = req.body;
 
     if (!Array.isArray(returnedItems) || returnedItems.length === 0) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Returned items array is required', 400);
     }
 
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
-      .populate('supplier');
+      .populate('supplier')
+      .session(session);
 
     if (!dispatchOrder) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    // Validate return quantities
+    // Validate return quantities and process stock
     const returnItemsData = [];
-    let totalReturnValue = 0;
+    const packetAdjustments = [];
+    let totalReturnValueUnits = 0; // Total value in units * costPrice
 
     for (const returnItem of returnedItems) {
-      // Support both itemIndex (legacy) and productId (modal)
+      const { quantity, reason, returnType, packetStockId, breakItems, productId } = returnItem;
+      
+      // Find item in dispatch order
       let itemIndex = returnItem.itemIndex;
       let item;
 
       if (itemIndex !== undefined && itemIndex !== null) {
-        if (itemIndex < 0 || itemIndex >= dispatchOrder.items.length) {
-          return sendResponse.error(res, `Invalid item index: ${itemIndex}`, 400);
-        }
         item = dispatchOrder.items[itemIndex];
-      } else if (returnItem.productId) {
-        // Find item by product ID
+      } else if (productId) {
         itemIndex = dispatchOrder.items.findIndex(i =>
-          i.product && i.product.toString() === returnItem.productId
+          i.product && i.product.toString() === productId
         );
-
-        if (itemIndex === -1) {
-          return sendResponse.error(res, `Product not found in dispatch order: ${returnItem.productId}`, 404);
-        }
-        item = dispatchOrder.items[itemIndex];
-      } else {
-        return sendResponse.error(res, 'Item identifier (itemIndex or productId) is required', 400);
+        if (itemIndex !== -1) item = dispatchOrder.items[itemIndex];
       }
 
-      const { quantity, reason, batchId } = returnItem;
-      const originalQty = item.quantity;
+      if (!item) {
+        throw new Error(`Item not found in dispatch order`);
+      }
 
-      // Calculate already returned quantity for this item
+      const unitCostPrice = item.costPrice || 0;
+      let unitsReturnedInThisItem = 0;
+
+      // Handle Packet-Aware Returns
+      if (packetStockId) {
+        const packetStock = await PacketStock.findById(packetStockId).session(session);
+        if (!packetStock) throw new Error(`PacketStock ${packetStockId} not found`);
+
+        if (returnType === 'packet') {
+          // Return full packets
+          await packetStock.returnToSupplier(quantity);
+          unitsReturnedInThisItem = quantity * packetStock.totalItemsPerPacket;
+          
+          packetAdjustments.push({
+            packetStockId: packetStock._id,
+            barcode: packetStock.barcode,
+            adjustmentType: 'full-packet-return',
+            packetsReturned: quantity,
+            itemsReturned: unitsReturnedInThisItem
+          });
+        } else if (returnType === 'break') {
+          // Break one packet and return specific items
+          const breakResult = await packetStock.breakForSupplierReturn(breakItems, req.user._id, null, session);
+          unitsReturnedInThisItem = breakResult.totalItemsReturned;
+          
+          packetAdjustments.push({
+            packetStockId: packetStock._id,
+            barcode: packetStock.barcode,
+            adjustmentType: 'partial-break',
+            packetsReturned: 1,
+            itemsReturned: unitsReturnedInThisItem,
+            looseStocksCreated: breakResult.looseStocksCreated
+          });
+        } else if (returnType === 'loose') {
+          // Return loose items from a loose packet stock
+          await packetStock.returnLooseToSupplier(quantity);
+          unitsReturnedInThisItem = quantity;
+          
+          packetAdjustments.push({
+            packetStockId: packetStock._id,
+            barcode: packetStock.barcode,
+            adjustmentType: 'loose-return',
+            itemsReturned: quantity
+          });
+        }
+      } else {
+        // Fallback for legacy items or items without packet tracking
+        unitsReturnedInThisItem = quantity;
+      }
+
+      // Update Inventory Stock (FIFO or standard)
+      const inventory = await Inventory.findOne({ product: item.product }).session(session);
+      if (inventory) {
+        // We use reduceStock here because items are LEAVING our warehouse and going back to supplier
+        // This mirrors how the items were originally added to the system
+        try {
+          await inventory.reduceStock(
+            unitsReturnedInThisItem,
+            `Return - ${dispatchOrder.orderNumber}`,
+            null, // Will update with returnDoc._id reference if possible later, or use null for now
+            req.user._id,
+            `Supplier Return from DO: ${dispatchOrder.orderNumber}. Reason: ${reason || 'None'}`
+          );
+        } catch (invErr) {
+          console.warn(`[Return] Inventory reduction warning for ${item.productCode}: ${invErr.message}`);
+          // If inventory reduction fails due to "insufficient stock", we still allow the return 
+          // to maintain correct financials, but we log the discrepancy.
+        }
+      }
+
+      // Validate against order remaining quantity
       const alreadyReturned = dispatchOrder.returnedItems
         .filter(returned => returned.itemIndex === itemIndex)
         .reduce((sum, returned) => sum + returned.quantity, 0);
+      const remainingQty = item.quantity - alreadyReturned;
 
-      const remainingQty = originalQty - alreadyReturned;
-
-      if (quantity <= 0) {
-        return sendResponse.error(res, `Return quantity must be greater than 0 for item ${itemIndex}`, 400);
+      if (unitsReturnedInThisItem > remainingQty) {
+        throw new Error(`Total units returned (${unitsReturnedInThisItem}) exceeds remaining quantity (${remainingQty}) for ${item.productName}`);
       }
 
-      if (quantity > remainingQty) {
-        return sendResponse.error(res, `Return quantity (${quantity}) exceeds remaining quantity (${remainingQty}) for item ${itemIndex}`, 400);
-      }
+      // Calculate value based on order's cost price (accurate to this specific DO)
+      const returnValue = unitCostPrice * unitsReturnedInThisItem;
+      totalReturnValueUnits += returnValue;
 
-      // Handle Batch Deduction (if batchId provided)
-      let batchDeductionInfo = null;
-      if (batchId && item.product) {
-        const inventory = await Inventory.findOne({ product: item.product });
-        if (inventory) {
-          const batch = inventory.purchaseBatches.find(b => b._id.toString() === batchId);
-          if (batch) {
-            // Only deduct if batch has enough quantity (safeguard)
-            if (batch.remainingQuantity < quantity) {
-              // If the batch doesn't have enough, we allow the return but only deduct what's available
-              // This prevents blocking returns if data is slightly out of sync
-              console.warn(`[Return] Insufficient batch quantity for ${item.productCode || 'product'}. Available: ${batch.remainingQuantity}, Requested: ${quantity}`);
-            }
-
-            // Reduce batch quantity, but don't go below 0
-            const deductAmount = Math.min(batch.remainingQuantity, quantity);
-            batch.remainingQuantity -= deductAmount;
-            await inventory.save();
-
-            batchDeductionInfo = {
-              batchId: batch._id,
-              dispatchOrderId: dispatchOrder._id,
-              quantity: quantity,
-              costPrice: batch.costPrice
-            };
-          } else {
-            console.warn(`[Return] Batch ${batchId} not found in inventory for product ${item.product}`);
-          }
-        }
-      }
-
-      // Calculate return value using actual cost price paid to supplier (supplier currency)
-      // NOT landed price - we return what we paid the supplier
-      // Use costPrice directly (NO exchange rate) because that's what we paid supplier during confirmation
-      const supplierPaymentAmount = item.costPrice || 0;
-      const returnValue = supplierPaymentAmount * quantity;
-      totalReturnValue += returnValue;
-
-      // Keep landedPrice for reference
-      const landedPrice = item.landedPrice || (item.costPrice * (dispatchOrder.exchangeRate || 1) * (1 + ((dispatchOrder.percentage || 0) / 100)));
-
-      const returnItemData = {
+      // Add to returnItemsData for Return document
+      returnItemsData.push({
         itemIndex,
-        originalQuantity: originalQty,
-        returnedQuantity: quantity,
-        costPrice: item.costPrice,
-        supplierPaymentAmount, // What we actually return to supplier
-        landedPrice, // Keep for reference
-        reason: reason || ''
-      };
-
-      if (batchDeductionInfo) {
-        returnItemData.batchDeductions = [batchDeductionInfo];
-      }
-
-      returnItemsData.push(returnItemData);
+        product: item.product,
+        productName: item.productName,
+        productCode: item.productCode,
+        originalQuantity: item.quantity,
+        returnedQuantity: unitsReturnedInThisItem,
+        costPrice: unitCostPrice,
+        landedPrice: item.landedPrice || unitCostPrice,
+        reason: reason || '',
+        returnComposition: breakItems || []
+      });
 
       // Add to dispatch order's returnedItems array
       dispatchOrder.returnedItems.push({
         itemIndex,
-        quantity,
+        quantity: unitsReturnedInThisItem,
         reason: reason || '',
         returnedAt: new Date(),
         returnedBy: req.user._id
@@ -3357,23 +3406,26 @@ router.post('/:id/return', auth, async (req, res) => {
     const returnDoc = new Return({
       dispatchOrder: dispatchOrder._id,
       supplier: dispatchOrder.supplier._id,
+      returnType: 'order-level',
+      returnMode: packetAdjustments.length > 0 ? 'mixed' : 'legacy',
+      packetAdjustments,
       items: returnItemsData,
-      totalReturnValue,
+      totalReturnValue: totalReturnValueUnits,
       returnedAt: new Date(),
       returnedBy: req.user._id,
-      notes: req.body.notes || '',
-      returnType: 'order-level'
+      notes: notes || ''
     });
 
-    await returnDoc.save();
+    await returnDoc.save({ session });
 
-    // If dispatch order is already confirmed, create ledger credit entry
+    // Update Financials if order is confirmed
     if (dispatchOrder.status === 'confirmed') {
-      const totalReturnedItems = returnItemsData.reduce((sum, item) => sum + item.returnedQuantity, 0);
+      const totalUnits = returnItemsData.reduce((sum, i) => sum + i.returnedQuantity, 0);
 
-      // Get current supplier balance using BalanceService (accurate aggregation-based calculation)
+      // Create Ledger Credit entry
+      // Use BalanceService to get accurate balance
       const currentSupplierBalance = await BalanceService.getSupplierBalance(dispatchOrder.supplier._id);
-      const newSupplierBalance = currentSupplierBalance - totalReturnValue;
+      const newSupplierBalance = currentSupplierBalance - totalReturnValueUnits;
 
       await Ledger.createEntry({
         type: 'supplier',
@@ -3383,9 +3435,9 @@ router.post('/:id/return', auth, async (req, res) => {
         referenceId: returnDoc._id,
         referenceModel: 'Return',
         debit: 0,
-        credit: totalReturnValue,
+        credit: totalReturnValueUnits,
         date: new Date(),
-        description: `Return from Dispatch Order ${dispatchOrder.orderNumber} - ${totalReturnedItems} items worth €${totalReturnValue.toFixed(2)} (adjusted from balance)`,
+        description: `Return from DO ${dispatchOrder.orderNumber} - ${totalUnits} units worth ${totalReturnValueUnits.toFixed(2)}`,
         remarks: `Return ID: ${returnDoc._id}`,
         createdBy: req.user._id,
         paymentDetails: {
@@ -3393,84 +3445,48 @@ router.post('/:id/return', auth, async (req, res) => {
           bankPayment: 0,
           remainingBalance: newSupplierBalance
         }
-      });
+      }, { session });
 
-      // Update supplier balance (reduce by return amount)
+      // Update supplier balance
       await Supplier.findByIdAndUpdate(
         dispatchOrder.supplier._id,
-        { $inc: { currentBalance: -totalReturnValue } }
+        { $inc: { currentBalance: -totalReturnValueUnits } },
+        { session }
       );
 
-      // Recalculate confirmed quantities
+      // Recalculate confirmed quantities for DO
       dispatchOrder.confirmedQuantities = dispatchOrder.items.map((item, index) => {
         const totalReturned = dispatchOrder.returnedItems
           .filter(returned => returned.itemIndex === index)
           .reduce((sum, returned) => sum + returned.quantity, 0);
-
         return {
           itemIndex: index,
           quantity: item.quantity - totalReturned
         };
       });
 
-      // Update payment details - reduce per-order remaining balance by return value
+      // Update DO remaining balance
       const currentOrderRemaining = dispatchOrder.paymentDetails?.remainingBalance || 0;
-      const newOrderRemaining = Math.max(0, currentOrderRemaining - totalReturnValue);
+      const newOrderRemaining = Math.max(0, currentOrderRemaining - totalReturnValueUnits);
 
       dispatchOrder.paymentDetails = {
         ...dispatchOrder.paymentDetails,
         remainingBalance: newOrderRemaining,
-        // Update payment status if now fully paid
         paymentStatus: newOrderRemaining <= 0 ? 'paid' :
           (dispatchOrder.paymentDetails?.cashPayment || 0) +
-            (dispatchOrder.paymentDetails?.bankPayment || 0) +
-            (dispatchOrder.paymentDetails?.creditApplied || 0) > 0
-            ? 'partial' : 'pending'
+          (dispatchOrder.paymentDetails?.bankPayment || 0) +
+          (dispatchOrder.paymentDetails?.creditApplied || 0) > 0
+          ? 'partial' : 'pending'
       };
-
-      console.log(`[Return] Updated order remainingBalance: €${currentOrderRemaining.toFixed(2)} -> €${newOrderRemaining.toFixed(2)} (return value: €${totalReturnValue.toFixed(2)})`);
-       
-
-
-      // Reduce inventory for returned items
-      try {
-        for (const returnItem of returnItemsData) {
-          const item = dispatchOrder.items[returnItem.itemIndex];
-
-          // Only reduce inventory if product exists
-          if (item.product) {
-            const inventory = await Inventory.findOne({ product: item.product });
-
-            if (inventory) {
-              // Use reduceStock method (items going back to supplier)
-              await inventory.reduceStock(
-                returnItem.returnedQuantity,
-                `Return - ${dispatchOrder.orderNumber}`,
-                returnDoc._id,
-                req.user._id,
-                `Return of ${returnItem.returnedQuantity} units - Reason: ${returnItem.reason || 'Not specified'}`
-              );
-
-               
-            } else {
-              console.warn(`[Return] No inventory record found for product ${item.product}`);
-            }
-          }
-        }
-      } catch (inventoryError) {
-        console.error('[Return] Error reducing inventory:', inventoryError);
-        // Don't fail the return if inventory update fails
-      }
     }
 
-    await dispatchOrder.save();
+    await dispatchOrder.save({ session });
+    await session.commitTransaction();
+    session.endSession();
 
     // Populate for response
     await dispatchOrder.populate([
       { path: 'supplier', select: 'name company' },
-      { path: 'logisticsCompany', select: 'name code contactInfo rates' },
-      { path: 'createdBy', select: 'name' },
-      { path: 'confirmedBy', select: 'name' },
       { path: 'items.product', select: 'name sku unit images color size productCode pricing' },
       { path: 'returnedItems.returnedBy', select: 'name' }
     ]);
@@ -3481,13 +3497,15 @@ router.post('/:id/return', auth, async (req, res) => {
 
     const orderObj = dispatchOrder.toObject();
     orderObj.returns = returns;
-
-    // Convert images to signed URLs
     await convertDispatchOrderImages(orderObj);
 
     return sendResponse.success(res, orderObj, 'Items returned successfully');
 
   } catch (error) {
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+    session.endSession();
     console.error('Return items error:', error);
     return sendResponse.error(res, error.message || 'Server error', 500);
   }
