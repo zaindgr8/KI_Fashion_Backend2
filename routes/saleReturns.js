@@ -747,7 +747,7 @@ async function processSaleReturn(returnId, userId) {
       date: new Date(),
       description: `Sale Return from Sale ${saleReturn.sale.saleNumber}`,
       createdBy: userId
-    });
+    }, session);
 
     // Debit inventory value (cost price * quantity for each item)
     let totalCostValue = 0;
