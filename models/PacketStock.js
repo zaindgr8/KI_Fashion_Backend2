@@ -270,16 +270,16 @@ packetStockSchema.methods.addLooseItems = function (quantity, reason = 'SaleRetu
 };
 
 // Method to return full packets to supplier (reduces available packets)
-packetStockSchema.methods.returnToSupplier = function (quantity, returnId = null) {
+packetStockSchema.methods.returnToSupplier = function (quantity, returnId = null, session = null) {
   if (this.availablePackets < quantity) {
     throw new Error(`Insufficient packets for supplier return. Available: ${this.availablePackets}, Requested: ${quantity}`);
   }
   this.availablePackets -= quantity;
-  return this.save();
+  return session ? this.save({ session }) : this.save();
 };
 
 // Method to return loose items to supplier (for isLoose = true stocks)
-packetStockSchema.methods.returnLooseToSupplier = function (quantity, returnId = null) {
+packetStockSchema.methods.returnLooseToSupplier = function (quantity, returnId = null, session = null) {
   if (!this.isLoose) {
     throw new Error('Use returnToSupplier for full packet stock returns.');
   }
@@ -287,7 +287,7 @@ packetStockSchema.methods.returnLooseToSupplier = function (quantity, returnId =
     throw new Error(`Insufficient loose items for return. Available: ${this.availablePackets}, Requested: ${quantity}`);
   }
   this.availablePackets -= quantity;
-  return this.save();
+  return session ? this.save({ session }) : this.save();
 };
 
 // Method to break a packet for partial supplier return

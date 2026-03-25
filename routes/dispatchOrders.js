@@ -3303,7 +3303,7 @@ router.post('/:id/return', auth, async (req, res) => {
 
         if (returnType === 'packet') {
           // Return full packets
-          await packetStock.returnToSupplier(quantity);
+          await packetStock.returnToSupplier(quantity, null, session);
           unitsReturnedInThisItem = quantity * packetStock.totalItemsPerPacket;
           
           packetAdjustments.push({
@@ -3328,7 +3328,7 @@ router.post('/:id/return', auth, async (req, res) => {
           });
         } else if (returnType === 'loose') {
           // Return loose items from a loose packet stock
-          await packetStock.returnLooseToSupplier(quantity);
+          await packetStock.returnLooseToSupplier(quantity, null, session);
           unitsReturnedInThisItem = quantity;
           
           packetAdjustments.push({
@@ -3501,8 +3501,10 @@ router.post('/:id/return', auth, async (req, res) => {
     return sendResponse.success(res, orderObj, 'Items returned successfully');
 
   } catch (error) {
-    if (session.inTransaction()) {
+    try {
       await session.abortTransaction();
+    } catch (abortErr) {
+      // Transaction may already be aborted
     }
     session.endSession();
     console.error('Return items error:', error);

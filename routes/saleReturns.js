@@ -465,13 +465,14 @@ router.post('/', auth, async (req, res) => {
     return sendResponse.success(res, saleReturn, 'Sale return created successfully', 201);
 
   } catch (error) {
-    // [IMPROVED] Abort transaction on error if session is still active
     try {
-      if (session.inTransaction()) {
-        await session.abortTransaction();
-      }
+      await session.abortTransaction();
+    } catch (abortErr) {
+      // Transaction may already be aborted
+    }
+    try {
       session.endSession();
-    } catch (sessionError) {
+    } catch (sessionErr) {
       // Session may already be closed
     }
     console.error('Create sale return error:', error);
