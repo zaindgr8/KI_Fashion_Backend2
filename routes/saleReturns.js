@@ -58,6 +58,32 @@ const saleReturnSchema = Joi.object({
   notes: Joi.string().allow('', null).optional()
 });
 
+function normalizeReturnedQtyInItems(returnItem, saleItem) {
+  if (!returnItem) return 0;
+  const isPartial = returnItem.isPartialReturn || (Array.isArray(returnItem.returnComposition) && returnItem.returnComposition.length > 0);
+  if (!isPartial && saleItem?.isPacketSale && saleItem?.totalItemsPerPacket) {
+    return (returnItem.returnedQuantity || 0) * saleItem.totalItemsPerPacket;
+  }
+  return returnItem.returnedQuantity || 0;
+}
+
+function buildReturnFingerprint(items, saleItems = []) {
+  return (items || [])
+    .map((item) => {
+      const saleItem = saleItems[item.itemIndex] || null;
+      const normalizedQty = normalizeReturnedQtyInItems(item, saleItem);
+      const composition = Array.isArray(item.returnComposition)
+        ? item.returnComposition
+            .map((comp) => `${comp.size || ''}:${comp.color || ''}:${Number(comp.quantity || 0)}`)
+            .sort()
+            .join('|')
+        : '';
+      return `${item.itemIndex}:${item.product}:${Number(normalizedQty)}:${composition}`;
+    })
+    .sort()
+    .join('||');
+}
+
 // Universal search endpoint for sales and buyers
 router.get('/universal-search', auth, async (req, res) => {
   try {
@@ -300,6 +326,31 @@ router.post('/', auth, async (req, res) => {
       }
     }
 
+    // Guard against accidental duplicate submissions in a short window.
+    const duplicateWindowStart = new Date(Date.now() - 60 * 1000);
+    const incomingFingerprint = buildReturnFingerprint(value.items, sale.items || []);
+    const recentReturns = await SaleReturn.find({
+      sale: value.sale,
+      returnedBy: req.user._id,
+      status: { $in: ['pending', 'approved'] },
+      createdAt: { $gte: duplicateWindowStart }
+    }).session(session);
+
+    const duplicateReturn = recentReturns.find((ret) => {
+      const existingFingerprint = buildReturnFingerprint(ret.items || [], sale.items || []);
+      return existingFingerprint === incomingFingerprint;
+    });
+
+    if (duplicateReturn) {
+      await session.abortTransaction();
+      session.endSession();
+      return sendResponse.error(
+        res,
+        'Duplicate return request detected. Please wait a moment before trying again.',
+        409
+      );
+    }
+
     // Get existing returns for this sale to track cumulative returns (within session for atomicity)
     const existingReturns = await SaleReturn.find({
       sale: value.sale,
@@ -314,17 +365,9 @@ router.post('/', auth, async (req, res) => {
         if (!returnedQuantities[key]) {
           returnedQuantities[key] = 0;
         }
-        if (ret.status === 'approved') {
-          // Normalize: partial returns already in items; whole-packet returns in packets → convert
-          let returnedInItems = retItem.returnedQuantity;
-          if (!retItem.isPartialReturn) {
-            const saleItem = sale.items[retItem.itemIndex];
-            if (saleItem?.isPacketSale && saleItem?.totalItemsPerPacket) {
-              returnedInItems = retItem.returnedQuantity * saleItem.totalItemsPerPacket;
-            }
-          }
-          returnedQuantities[key] += returnedInItems;
-        }
+        const saleItem = sale.items[retItem.itemIndex];
+        const returnedInItems = normalizeReturnedQtyInItems(retItem, saleItem);
+        returnedQuantities[key] += returnedInItems;
       });
     });
 
