@@ -1468,16 +1468,15 @@ router.get('/:id', auth, async (req, res) => {
  */
 router.get('/:id/packet-stocks', auth, async (req, res) => {
   try {
-    const PacketStock = require('../models/PacketStock');
     const packetStocks = await PacketStock.find({
       'dispatchOrderHistory.dispatchOrderId': req.params.id,
       isActive: true
     }).populate('product', 'name sku productCode images');
     
-    return res.json(sendResponse.success(packetStocks));
+    return sendResponse.success(res, packetStocks);
   } catch (error) {
     console.error('Get dispatch order packet stocks error:', error);
-    return res.status(500).json(sendResponse.error(error.message));
+    return sendResponse.error(res, error.message, 500);
   }
 });
 

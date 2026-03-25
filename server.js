@@ -18,6 +18,9 @@ app.use(
 );
 app.use(compression());
 
+// Trust proxy for express-rate-limit (Railway environment)
+app.set("trust proxy", 1);
+
 // Rate limiting - More lenient for development
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
