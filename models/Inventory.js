@@ -189,12 +189,11 @@ inventorySchema.methods.addStock = function (quantity, reference, referenceId, u
   });
   this.currentStock += quantity;
   this.lastStockUpdate = Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate;
-  
+
   // Set firstArrivalDate if it doesn't exist (immutable)
   if (!this.firstArrivalDate) {
     this.firstArrivalDate = this.lastStockUpdate;
   }
-  this.isActive = true;
   return this.save();
 };
 
@@ -212,7 +211,7 @@ inventorySchema.methods.reduceStock = function (quantity, reference, referenceId
   });
   this.currentStock -= quantity;
   this.lastStockUpdate = new Date();
-  
+
   // Set firstArrivalDate if it doesn't exist (immutable)
   if (!this.firstArrivalDate) {
     this.firstArrivalDate = this.lastStockUpdate;
@@ -231,7 +230,7 @@ inventorySchema.methods.adjustStock = function (newQuantity, reference, user, no
   });
   this.currentStock = newQuantity;
   this.lastStockUpdate = new Date();
-  
+
   // Set firstArrivalDate if it doesn't exist (immutable)
   if (!this.firstArrivalDate) {
     this.firstArrivalDate = this.lastStockUpdate;
@@ -278,7 +277,6 @@ inventorySchema.methods.addStockWithVariants = function (quantity, variantCompos
   if (!this.firstArrivalDate) {
     this.firstArrivalDate = this.lastStockUpdate;
   }
-  this.isActive = true;
   return this.save();
 };
 
@@ -419,7 +417,6 @@ inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, refer
   }, 0);
   this.averageCostPrice = totalQuantity > 0 ? totalValue / totalQuantity : (batchInfo.landedPrice || batchInfo.costPrice);
 
-  this.isActive = true;
   return this.save();
 };
 
@@ -500,7 +497,6 @@ inventorySchema.methods.restoreWithBatch = function (quantity, variantCompositio
   }
 
   this.lastStockUpdate = new Date();
-  this.isActive = true;
   return this.save();
 };
 

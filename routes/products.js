@@ -223,10 +223,10 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         },
       },
     },
-    
+
     // Sort by creation date (newest first) before grouping
     { $sort: { _hasImages: -1, createdAt: -1 } },
-    
+
     // Group by SKU to deduplicate
     {
       $group: {
@@ -241,11 +241,11 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         season: { $first: '$season' },
         unit: { $first: '$unit' },
         createdAt: { $first: '$createdAt' },
-        
+
         // Collect all supplier IDs for this SKU
         supplierIds: { $push: '$supplier' },
         allProductIds: { $push: '$_id' },
-        
+
         // Average pricing if included
         ...(includePricing && {
           avgCostPrice: { $avg: '$pricing.costPrice' },
@@ -254,7 +254,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         })
       }
     },
-    
+
     // Rename _id back to sku
     {
       $project: {
@@ -277,7 +277,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         })
       }
     },
-    
+
     // Sort by creation date again after grouping
     { $sort: { createdAt: -1 } }
   ];
@@ -315,7 +315,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         });
       }
     }
-    
+
     await Promise.all(products.map(async (product) => {
       // Get all packet stocks for all supplier variations of this product
       const packetStocks = await PacketStock.find({
@@ -332,7 +332,7 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         // Calculate average landed price from all packets
         let totalLandedPrice = 0;
         let landedPriceCount = 0;
-        
+
         packetStocks.forEach(packet => {
           if (packet.landedPricePerPacket && packet.totalItemsPerPacket) {
             const pricePerItem = packet.landedPricePerPacket / packet.totalItemsPerPacket;
@@ -342,15 +342,15 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
         });
 
         const avgLandedPricePerItem = landedPriceCount > 0
-          ? totalLandedPrice / landedPriceCount 
+          ? totalLandedPrice / landedPriceCount
           : (product._avgCostPrice || 0);
 
         // Website price source of truth is minSellingPrice when available.
         // Ignore null/undefined values to avoid coercing Number(null) to 0.
         const minSellingPriceCandidates = Array.isArray(product._minSellingPrices)
           ? product._minSellingPrices
-              .map((value) => Number(value))
-              .filter((value) => Number.isFinite(value) && value >= 0)
+            .map((value) => Number(value))
+            .filter((value) => Number.isFinite(value) && value >= 0)
           : [];
         const minSellingPrice = minSellingPriceCandidates.length > 0
           ? Math.min(...minSellingPriceCandidates)
@@ -397,16 +397,16 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
             const basePacketPrice = getEffectivePacketSellingPrice(packet, packet.product);
             const packetCampaignPricing = includePricing
               ? getProductCampaignPricing({
-                  product,
-                  basePrice: basePacketPrice,
-                  campaigns,
-                  context: {
-                    inventory: (product._allProductIds || [])
-                      .map((id) => inventoryMap.get(String(id)))
-                      .find(Boolean),
-                    candidateProductIds: product._allProductIds,
-                  },
-                })
+                product,
+                basePrice: basePacketPrice,
+                campaigns,
+                context: {
+                  inventory: (product._allProductIds || [])
+                    .map((id) => inventoryMap.get(String(id)))
+                    .find(Boolean),
+                  candidateProductIds: product._allProductIds,
+                },
+              })
               : { effectivePrice: basePacketPrice };
 
             return {
@@ -495,38 +495,11 @@ router.post('/', auth, async (req, res) => {
       sku: req.body.sku.toUpperCase(),
       supplier: supplierId
     });
-
     if (existingProduct) {
-      if (existingProduct.isActive) {
-        return res.status(400).json({
-          success: false,
-          message: 'A product with this SKU already exists for this supplier'
-        });
-      } else {
-        // Reactivate the existing product and update its details
-        existingProduct.set({
-          ...req.body,
-          isActive: true,
-          updatedBy: req.user._id
-        });
-        await existingProduct.save();
-
-        // Ensure inventory is also active
-        await Inventory.findOneAndUpdate(
-          { product: existingProduct._id },
-          { isActive: true },
-          { upsert: true }
-        );
-
-        await populateProductDocument(existingProduct);
-        await convertProductImagesToSignedUrls(existingProduct);
-
-        return res.json({
-          success: true,
-          message: 'Product reactivated and updated successfully',
-          data: existingProduct
-        });
-      }
+      return res.status(400).json({
+        success: false,
+        message: 'A product with this SKU already exists for this supplier'
+      });
     }
 
     const product = new Product({
@@ -850,7 +823,7 @@ router.get('/', auth, async (req, res) => {
     // Fetch inventory data for each product
     const productIds = products.map(p => p._id);
     const inventories = await Inventory.find({ product: { $in: productIds } }).lean();
-    
+
     // Create a map of product ID to inventory
     const inventoryMap = {};
     inventories.forEach(inv => {
@@ -1008,10 +981,10 @@ router.get('/:id', auth, async (req, res) => {
 
     // Get all available packet configurations across all suppliers for this SKU
     const PacketStock = require('../models/PacketStock');
-    const packetStocks = await PacketStock.find({ 
-      product: { $in: allProductIds }, 
+    const packetStocks = await PacketStock.find({
+      product: { $in: allProductIds },
       isActive: true,
-      availablePackets: { $gt: 0 } 
+      availablePackets: { $gt: 0 }
     })
       .populate('product', 'pricing.minSellingPrice pricing.sellingPrice')
       .populate('supplier', 'name company')
@@ -1095,14 +1068,14 @@ router.get('/:id', auth, async (req, res) => {
         inventoryInfo: inventory,
         packetPricing: primaryAdjustedPacket
           ? {
-              barcode: primaryAdjustedPacket.barcode,
-              composition: primaryAdjustedPacket.composition,
-              totalItemsPerPacket: primaryAdjustedPacket.totalItemsPerPacket,
-              isLoose: primaryAdjustedPacket.isLoose,
-              suggestedSellingPrice: primaryAdjustedPacket.suggestedSellingPrice,
-              costPricePerPacket: primaryAdjustedPacket.costPricePerPacket,
-              availablePackets: primaryAdjustedPacket.availableStock,
-            }
+            barcode: primaryAdjustedPacket.barcode,
+            composition: primaryAdjustedPacket.composition,
+            totalItemsPerPacket: primaryAdjustedPacket.totalItemsPerPacket,
+            isLoose: primaryAdjustedPacket.isLoose,
+            suggestedSellingPrice: primaryAdjustedPacket.suggestedSellingPrice,
+            costPricePerPacket: primaryAdjustedPacket.costPricePerPacket,
+            availablePackets: primaryAdjustedPacket.availableStock,
+          }
           : packetPricing,
         availablePackets: adjustedPackets  // NEW: All packet configurations
       }

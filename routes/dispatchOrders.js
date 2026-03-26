@@ -1009,7 +1009,7 @@ router.post('/manual', auth, async (req, res) => {
           description: `Credit application for Manual Purchase ${dispatchOrder.orderNumber} from existing supplier overpayment`,
           createdBy: req.user._id
         });
-         
+
       } catch (creditError) {
         console.error(`Error creating credit application ledger entry:`, creditError);
       }
@@ -1158,7 +1158,7 @@ router.post('/manual', auth, async (req, res) => {
               // Don't fail the entire creation if product image save fails
             }
           } else {
-             
+
           }
         }
 
@@ -1243,225 +1243,15 @@ router.post('/manual', auth, async (req, res) => {
           exchangeRate: value.exchangeRate || 1.0
         };
 
-        const transactionDate = batchInfo.purchaseDate;
-
-        // Calculate variant composition from packets for inventory update
-        const variantComposition = [];
-        if (item.packets && item.packets.length > 0) {
-          item.packets.forEach(packet => {
-            packet.composition.forEach(comp => {
-              const existing = variantComposition.find(v => v.size === comp.size && v.color === comp.color);
-              if (existing) {
-                existing.quantity += comp.quantity;
-              } else {
-                variantComposition.push({
-                  size: comp.size,
-                  color: comp.color,
-                  quantity: comp.quantity
-                });
-              }
-            });
-          });
-        }
-
-        // Add stock to inventory with variant tracking if applicable
-        if (variantComposition.length > 0) {
-          // Use variants for size/color tracking
-          await inventory.addStockWithVariants(
-            quantity,
-            variantComposition,
-            'DispatchOrder',
-            dispatchOrder._id,
-            req.user._id,
-            `Manual Purchase ${dispatchOrder.orderNumber}`,
-            transactionDate
-          );
-
-          // Manually add purchase batch for FIFO tracking (since addStockWithVariants doesn't do it)
-          inventory.purchaseBatches.push({
-            dispatchOrderId: batchInfo.dispatchOrderId,
-            supplierId: batchInfo.supplierId,
-            purchaseDate: batchInfo.purchaseDate,
-            quantity: quantity,
-            remainingQuantity: quantity,
-            costPrice: batchInfo.costPrice,
-            landedPrice: batchInfo.landedPrice,
-            exchangeRate: batchInfo.exchangeRate,
-            notes: `Manual Purchase ${dispatchOrder.orderNumber} - With variants`
-          });
-          
-          inventory.recalculateAverageCost();
-          await inventory.save();
-        } else {
-          // Fallback to simple batch tracking
-          await inventory.addStockWithBatch(
-            quantity,
-            batchInfo,
-            'DispatchOrder',
-            dispatchOrder._id,
-            req.user._id,
-            `Manual Purchase ${dispatchOrder.orderNumber}`,
-            transactionDate
-          );
-        }
-
-        // ==========================================
-        // CREATE PACKET STOCK ENTRIES
-        // ==========================================
-        if (item.packets && item.packets.length > 0) {
-          const supplierId = supplier._id;
-          const productId = productExists._id;
-          const bwipjs = require('bwip-js');
-
-          // Helper function to generate barcode image
-          const generateBarcodeImage = async (barcodeText) => {
-            try {
-              const barcodeBuffer = await bwipjs.toBuffer({
-                bcid: 'code128',
-                text: barcodeText,
-                scale: 3,
-                height: 10,
-                includetext: true,
-                textxalign: 'center',
-                textsize: 8
-              });
-              return `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-            } catch (err) {
-              console.error(`[Manual Entry] Failed to generate barcode image for ${barcodeText}:`, err.message);
-              return null;
-            }
-          };
-
-          const hasLooseItems = item.packets.some(p => p.isLoose === true);
-
-          if (hasLooseItems) {
-            // LOOSE ITEMS: Group by color/size
-            const looseItemGroups = new Map();
-            for (const packet of item.packets) {
-              if (!packet.isLoose) continue;
-              for (const comp of packet.composition) {
-                const key = `${comp.color}|${comp.size}`;
-                if (looseItemGroups.has(key)) {
-                  looseItemGroups.get(key).quantity += comp.quantity;
-                } else {
-                  looseItemGroups.set(key, {
-                    color: comp.color,
-                    size: comp.size,
-                    quantity: comp.quantity
-                  });
-                }
-              }
-            }
-
-            for (const [key, looseItem] of looseItemGroups) {
-              try {
-                const singleComposition = [{
-                  size: looseItem.size,
-                  color: looseItem.color,
-                  quantity: 1
-                }];
-                const looseBarcode = generatePacketBarcode(supplierId.toString(), productId.toString(), singleComposition, true);
-                
-                let packetStock = await PacketStock.findOne({ barcode: looseBarcode });
-                if (packetStock) {
-                  await packetStock.addStock(looseItem.quantity, dispatchOrder._id, batchInfo.costPrice, batchInfo.landedPrice, transactionDate);
-                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
-                  packetStock.suggestedSellingPrice = itemMinSell;
-                  await packetStock.save();
-                } else {
-                  const looseBarcodeImage = await generateBarcodeImage(looseBarcode);
-                  packetStock = new PacketStock({
-                    barcode: looseBarcode,
-                    product: productId,
-                    supplier: supplierId,
-                    composition: singleComposition,
-                    totalItemsPerPacket: 1,
-                    availablePackets: looseItem.quantity,
-                    costPricePerPacket: batchInfo.costPrice,
-                    landedPricePerPacket: batchInfo.landedPrice,
-                    suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20),
-                    isLoose: true,
-                    barcodeImage: looseBarcodeImage ? {
-                      dataUrl: looseBarcodeImage,
-                      format: 'code128',
-                      generatedAt: transactionDate
-                    } : undefined,
-                    dispatchOrderHistory: [{
-                      dispatchOrderId: dispatchOrder._id,
-                      quantity: looseItem.quantity,
-                      costPricePerPacket: batchInfo.costPrice,
-                      landedPricePerPacket: batchInfo.landedPrice,
-                      addedAt: transactionDate
-                    }]
-                  });
-                  await packetStock.save();
-                }
-              } catch (looseStockError) {
-                console.error(`[Manual Entry] Failed to create/update loose PacketStock for ${looseItem.color}/${looseItem.size}:`, looseStockError.message);
-              }
-            }
-          } else {
-            // REGULAR PACKETS: Group by composition
-            const packetGroups = new Map();
-            for (const packet of item.packets) {
-              const barcode = generatePacketBarcode(supplierId.toString(), productId.toString(), packet.composition, false);
-              if (packetGroups.has(barcode)) {
-                packetGroups.get(barcode).count += 1;
-              } else {
-                packetGroups.set(barcode, {
-                  barcode,
-                  composition: packet.composition,
-                  totalItemsPerPacket: packet.totalItems || packet.composition.reduce((sum, c) => sum + c.quantity, 0),
-                  count: 1
-                });
-              }
-            }
-
-            for (const [barcode, packetGroup] of packetGroups) {
-              try {
-                const costPerPacket = batchInfo.costPrice * packetGroup.totalItemsPerPacket;
-                const landedPerPacket = batchInfo.landedPrice * packetGroup.totalItemsPerPacket;
-                
-                let packetStock = await PacketStock.findOne({ barcode });
-                if (packetStock) {
-                  await packetStock.addStock(packetGroup.count, dispatchOrder._id, costPerPacket, landedPerPacket, transactionDate);
-                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, unitPrice * 1.20);
-                  packetStock.suggestedSellingPrice = truncateToTwoDecimals(itemMinSell * (packetGroup.totalItemsPerPacket || 1));
-                  await packetStock.save();
-                } else {
-                  const packetBarcodeImage = await generateBarcodeImage(barcode);
-                  packetStock = new PacketStock({
-                    barcode,
-                    product: productId,
-                    supplier: supplierId,
-                    composition: packetGroup.composition,
-                    totalItemsPerPacket: packetGroup.totalItemsPerPacket,
-                    availablePackets: packetGroup.count,
-                    costPricePerPacket: costPerPacket,
-                    landedPricePerPacket: landedPerPacket,
-                    suggestedSellingPrice: truncateToTwoDecimals(resolveMinSellingPrice(item.minSellingPrice, unitPrice * 1.20) * (packetGroup.totalItemsPerPacket || 1)),
-                    isLoose: false,
-                    barcodeImage: packetBarcodeImage ? {
-                      dataUrl: packetBarcodeImage,
-                      format: 'code128',
-                      generatedAt: transactionDate
-                    } : undefined,
-                    dispatchOrderHistory: [{
-                      dispatchOrderId: dispatchOrder._id,
-                      quantity: packetGroup.count,
-                      costPricePerPacket: costPerPacket,
-                      landedPricePerPacket: landedPerPacket,
-                      addedAt: transactionDate
-                    }]
-                  });
-                  await packetStock.save();
-                }
-              } catch (packetStockError) {
-                console.error(`[Manual Entry] Failed to create/update regular PacketStock for barcode ${barcode}:`, packetStockError.message);
-              }
-            }
-          }
-        }
+        // Add stock to inventory with batch tracking
+        await inventory.addStockWithBatch(
+          quantity,
+          batchInfo,
+          'DispatchOrder',
+          dispatchOrder._id,
+          req.user._id,
+          `Manual Purchase ${dispatchOrder.orderNumber}`
+        );
       }
     } catch (inventoryError) {
       console.error(`Error updating inventory:`, inventoryError);
@@ -1680,7 +1470,7 @@ router.get('/:id/packet-stocks', auth, async (req, res) => {
   try {
     const mongoose = require('mongoose');
     const Return = require('../models/Return');
-    
+
     // Fetch packets that have this order in their history
     const packetStocks = await PacketStock.find({
       'dispatchOrderHistory.dispatchOrderId': new mongoose.Types.ObjectId(req.params.id),
@@ -1694,7 +1484,7 @@ router.get('/:id/packet-stocks', auth, async (req, res) => {
     // Calculate order-specific available quantity for each packet stock
     const refinedPacketStocks = packetStocks.map(stock => {
       const stockObj = stock.toObject();
-      
+
       // 1. Get initial qty from this order in history
       const historyEntry = stock.dispatchOrderHistory.find(
         h => h.dispatchOrderId.toString() === req.params.id
@@ -1724,10 +1514,10 @@ router.get('/:id/packet-stocks', auth, async (req, res) => {
 
       // Add totalQuantity field for the frontend
       stockObj.totalQuantity = remainingQty;
-      
+
       return stockObj;
     }).filter(stock => stock.totalQuantity > 0);
-    
+
     return sendResponse.success(res, refinedPacketStocks);
   } catch (error) {
     console.error('Get dispatch order packet stocks error:', error);
@@ -2012,7 +1802,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // This ensures atomicity - if products/inventory fail, nothing else happens
     // ==========================================
 
-     
+
 
     // Track results for each item
     const inventoryResults = [];
@@ -2076,7 +1866,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         const productCodeUpper = productCodeTrimmed.toUpperCase();
         const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
 
-         
+
 
         // First, try to find a product with matching SKU AND supplier
         let product = await Product.findOne({
@@ -2087,7 +1877,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         if (product) {
           console.log(`[Confirm Order] Found existing product for supplier: ${product.name} (SKU: ${product.sku}, Supplier: ${product.supplier}, isActive: ${product.isActive})`);
         } else {
-           
+
         }
 
         if (!product) {
@@ -2182,7 +1972,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
           if (product.pricing.costPrice !== landedPrice) {
             product.pricing.costPrice = landedPrice;
             productNeedsSave = true;
-             
+
           }
 
           if (item.minSellingPrice !== undefined) {
@@ -2256,7 +2046,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         // CRITICAL: Update item.product so barcode generation can use the correct product ID
         // This ensures barcodes match what's stored in PacketStock
         item.product = product._id;
-         
+
 
         // Find or create Inventory
         let inventory = await Inventory.findOne({ product: product._id });
@@ -2347,19 +2137,19 @@ router.post('/:id/confirm', auth, async (req, res) => {
             exchangeRate: batchInfo.exchangeRate,
             notes: `Dispatch Order ${dispatchOrder.orderNumber} - With variants`
           });
-          
+
           // Recalculate weighted average cost from all batches
           inventory.recalculateAverageCost();
           await inventory.save();
 
-           
+
 
           // ==========================================
           // CREATE PACKET STOCK ENTRIES FOR BARCODE-BASED SELLING
           // ==========================================
           const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
           const productId = product._id;
-          
+
           // Helper function to generate barcode image
           const bwipjs = require('bwip-js');
           const generateBarcodeImage = async (barcodeText) => {
@@ -2379,22 +2169,22 @@ router.post('/:id/confirm', auth, async (req, res) => {
               return null;
             }
           };
-          
+
           // Check if this is a loose item configuration (packets with isLoose: true)
           const hasLooseItems = item.packets.some(p => p.isLoose === true);
-          
+
           if (hasLooseItems) {
             // ==========================================
             // LOOSE ITEMS: Create separate barcode for each color/size combination
             // ==========================================
-             
-            
+
+
             // Merge all compositions from loose packets and group by color/size
             const looseItemGroups = new Map();
-            
+
             for (const packet of item.packets) {
               if (!packet.isLoose) continue;
-              
+
               for (const comp of packet.composition) {
                 const key = `${comp.color}|${comp.size}`;
                 if (looseItemGroups.has(key)) {
@@ -2408,7 +2198,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 }
               }
             }
-            
+
             // Create PacketStock for each color/size combination
             for (const [key, looseItem] of looseItemGroups) {
               try {
@@ -2418,7 +2208,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                   color: looseItem.color,
                   quantity: 1
                 }];
-                
+
                 // Generate unique barcode for this color/size combination
                 const looseBarcode = generatePacketBarcode(
                   supplierId.toString(),
@@ -2426,10 +2216,10 @@ router.post('/:id/confirm', auth, async (req, res) => {
                   singleComposition,
                   true // isLoose = true
                 );
-                
+
                 // Find existing packet stock or create new
                 let packetStock = await PacketStock.findOne({ barcode: looseBarcode });
-                
+
                 if (packetStock) {
                   // Add to existing stock
                   await packetStock.addStock(
@@ -2447,7 +2237,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                   // Create new packet stock for this loose item variant
                   // Generate barcode image
                   const looseBarcodeImage = await generateBarcodeImage(looseBarcode);
-                  
+
                   packetStock = new PacketStock({
                     barcode: looseBarcode,
                     product: productId,
@@ -2486,7 +2276,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             // ==========================================
             // Group packets by their composition to count duplicates
             const packetGroups = new Map();
-            
+
             for (const packet of item.packets) {
               // Generate deterministic barcode for this packet composition
               const barcode = generatePacketBarcode(
@@ -2495,7 +2285,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 packet.composition,
                 false // isLoose = false for packets
               );
-              
+
               if (packetGroups.has(barcode)) {
                 packetGroups.get(barcode).count += 1;
               } else {
@@ -2507,17 +2297,17 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 });
               }
             }
-            
+
             // Create or update PacketStock for each unique packet configuration
             for (const [barcode, packetGroup] of packetGroups) {
               try {
                 // Calculate cost per packet (landed price × items per packet)
                 const costPerPacket = batchInfo.costPrice * packetGroup.totalItemsPerPacket;
                 const landedPerPacket = batchInfo.landedPrice * packetGroup.totalItemsPerPacket;
-                
+
                 // Find existing packet stock or create new
                 let packetStock = await PacketStock.findOne({ barcode });
-                
+
                 if (packetStock) {
                   // Add to existing stock
                   await packetStock.addStock(
@@ -2530,12 +2320,12 @@ router.post('/:id/confirm', auth, async (req, res) => {
                   const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, landedPerPacket * 1.20);
                   packetStock.suggestedSellingPrice = truncateToTwoDecimals(itemMinSell * (packetGroup.totalItemsPerPacket || 1));
                   await packetStock.save();
-                   
+
                 } else {
                   // Create new packet stock
                   // Generate barcode image
                   const packetBarcodeImage = await generateBarcodeImage(barcode);
-                  
+
                   packetStock = new PacketStock({
                     barcode,
                     product: productId,
@@ -2561,7 +2351,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                     }]
                   });
                   await packetStock.save();
-                   
+
                 }
               } catch (packetStockError) {
                 console.error(`[Confirm Order] Failed to create/update PacketStock for barcode ${barcode}:`, packetStockError.message);
@@ -2579,7 +2369,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
             req.user._id,
             `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed quantity`
           );
-           
+
 
           // ==========================================
           // CREATE LOOSE ITEM PACKET STOCK ENTRIES
@@ -2587,18 +2377,18 @@ router.post('/:id/confirm', auth, async (req, res) => {
           // ==========================================
           const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
           const productId = product._id;
-          
+
           // For loose items, create a single-item composition
           // Use item's color/size if available, otherwise use defaults
           const itemColor = item.color || product.specifications?.color || 'Default';
           const itemSize = item.size || product.size || 'Default';
-          
+
           const looseComposition = [{
             size: itemSize,
             color: itemColor,
             quantity: 1
           }];
-          
+
           // Generate barcode for loose item
           const looseBarcode = generatePacketBarcode(
             supplierId.toString(),
@@ -2606,11 +2396,11 @@ router.post('/:id/confirm', auth, async (req, res) => {
             looseComposition,
             true // isLoose = true
           );
-          
+
           try {
             // Find existing packet stock or create new
             let packetStock = await PacketStock.findOne({ barcode: looseBarcode });
-            
+
             if (packetStock) {
               // Add to existing stock
               await packetStock.addStock(
@@ -2623,7 +2413,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
               const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
               packetStock.suggestedSellingPrice = itemMinSell;
               await packetStock.save();
-               
+
             } else {
               // Create new packet stock for loose items
               // Generate barcode image (need bwipjs for this block too)
@@ -2643,7 +2433,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
               } catch (imgErr) {
                 console.error(`[Confirm Order] Failed to generate barcode image for ${looseBarcode}:`, imgErr.message);
               }
-              
+
               packetStock = new PacketStock({
                 barcode: looseBarcode,
                 product: productId,
@@ -2669,7 +2459,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 }]
               });
               await packetStock.save();
-               
+
             }
           } catch (looseStockError) {
             console.error(`[Confirm Order] Failed to create/update loose PacketStock ${looseBarcode}:`, looseStockError.message);
@@ -2690,7 +2480,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         if (savedInventory && !savedInventory.isActive) {
           savedInventory.isActive = true;
           await savedInventory.save();
-           
+
         }
 
         console.log(`[Confirm Order] Inventory verification for ${product.name}:`, {
@@ -2741,7 +2531,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     const failCount = inventoryResults.filter(r => !r.success && !r.skipped).length;
     const skippedCount = inventoryResults.filter(r => r.skipped).length;
 
-     
+
 
     // If ANY items failed (excluding skipped), abort the entire confirmation
     if (failCount > 0) {
@@ -2762,7 +2552,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // STEP 2: All products/inventory succeeded - now update order status
     // ==========================================
 
-     
+
 
     // Update dispatch order
     dispatchOrder.status = 'confirmed';
@@ -2808,7 +2598,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // STEP 3: Create ledger entries
     // ==========================================
 
-     
+
 
     // Create ledger entry for purchase (debit) - use supplierPaymentTotal (what admin owes supplier)
     await Ledger.createEntry({
@@ -2855,7 +2645,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         },
         createdBy: req.user._id
       });
-       
+
     }
 
     if (bankPaymentAmount > 0) {
@@ -2878,7 +2668,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
         },
         createdBy: req.user._id
       });
-       
+
     }
 
     // Credit application entry - DISABLED (automatic credit application disabled)
@@ -2927,25 +2717,25 @@ router.post('/:id/confirm', auth, async (req, res) => {
     // ==========================================
     // STEP 5: Generate and save barcodes (AFTER inventory processing)
     // ==========================================
-     
-    
+
+
     try {
       const bwipjs = require('bwip-js');
-      
+
       // Generate barcodes with dataURL format like QR codes
       const barcodeResults = [];
-      
+
       for (const item of dispatchOrder.items) {
         const supplierId = dispatchOrder.supplier._id.toString();
         // Handle both populated product (object with _id) and direct ObjectId reference
-        const productId = item.product 
+        const productId = item.product
           ? (item.product._id ? item.product._id.toString() : item.product.toString())
           : 'manual';
-        
+
         if (item.useVariantTracking && item.packets && item.packets.length > 0) {
           // Generate barcodes for packets
           for (const packet of item.packets) {
-            
+
             // If packet is marked as loose, generate SEPARATE barcode for EACH composition entry
             if (packet.isLoose) {
               for (const comp of packet.composition) {
@@ -2956,7 +2746,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                   comp.size,
                   comp.color
                 );
-                
+
                 // Generate barcode image as dataURL (like QR codes)
                 const barcodeBuffer = await bwipjs.toBuffer({
                   bcid: 'code128',
@@ -2967,9 +2757,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
                   textxalign: 'center',
                   textsize: 8
                 });
-                
+
                 const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-                
+
                 barcodeResults.push({
                   type: 'loose',
                   productName: item.productName,
@@ -2992,7 +2782,7 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 packet.composition,
                 false
               );
-              
+
               // Generate barcode image as dataURL (like QR codes)
               const barcodeBuffer = await bwipjs.toBuffer({
                 bcid: 'code128',
@@ -3003,9 +2793,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
                 textxalign: 'center',
                 textsize: 8
               });
-              
+
               const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-              
+
               barcodeResults.push({
                 type: 'packet',
                 productName: item.productName,
@@ -3021,20 +2811,20 @@ router.post('/:id/confirm', auth, async (req, res) => {
           }
         } else {
           // Generate barcode for loose item (no packet structure)
-          const firstColor = Array.isArray(item.primaryColor) && item.primaryColor.length > 0 
-            ? item.primaryColor[0] 
+          const firstColor = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
+            ? item.primaryColor[0]
             : (typeof item.primaryColor === 'string' ? item.primaryColor : 'default');
-          const firstSize = Array.isArray(item.size) && item.size.length > 0 
-            ? item.size[0] 
+          const firstSize = Array.isArray(item.size) && item.size.length > 0
+            ? item.size[0]
             : (typeof item.size === 'string' ? item.size : 'default');
-            
+
           const looseBarcode = generateLooseItemBarcode(
             supplierId,
             productId,
             firstSize,
             firstColor
           );
-          
+
           // Generate barcode image as dataURL (like QR codes)
           const barcodeBuffer = await bwipjs.toBuffer({
             bcid: 'code128',
@@ -3045,9 +2835,9 @@ router.post('/:id/confirm', auth, async (req, res) => {
             textxalign: 'center',
             textsize: 8
           });
-          
+
           const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-          
+
           barcodeResults.push({
             type: 'loose',
             productName: item.productName,
@@ -3062,13 +2852,13 @@ router.post('/:id/confirm', auth, async (req, res) => {
           });
         }
       }
-      
+
       // Save barcode data to dispatch order (with dataURL like QR codes)
       dispatchOrder.barcodeData = barcodeResults;
       dispatchOrder.barcodeGeneratedAt = transactionDate;
-      
-       
-      
+
+
+
     } catch (barcodeError) {
       console.error('Barcode generation error:', barcodeError);
       // Don't fail confirmation if barcode generation fails
@@ -3474,12 +3264,12 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
       order: dispatchOrder,
       adjustmentEntry: adjustmentEntry
         ? {
-            _id: adjustmentEntry._id,
-            entryNumber: adjustmentEntry.entryNumber,
-            debit: adjustmentEntry.debit,
-            credit: adjustmentEntry.credit,
-            description: adjustmentEntry.description
-          }
+          _id: adjustmentEntry._id,
+          entryNumber: adjustmentEntry.entryNumber,
+          debit: adjustmentEntry.debit,
+          credit: adjustmentEntry.credit,
+          description: adjustmentEntry.description
+        }
         : null,
       ledgerDelta,
       message: adjustmentEntry
@@ -3530,7 +3320,7 @@ router.post('/:id/return', auth, async (req, res) => {
 
     for (const returnItem of returnedItems) {
       const { quantity, reason, returnType, packetStockId, breakItems, productId } = returnItem;
-      
+
       // Find item in dispatch order
       let itemIndex = returnItem.itemIndex;
       let item;
@@ -3560,7 +3350,7 @@ router.post('/:id/return', auth, async (req, res) => {
           // Return full packets
           await packetStock.returnToSupplier(quantity, null, session);
           unitsReturnedInThisItem = quantity * packetStock.totalItemsPerPacket;
-          
+
           packetAdjustments.push({
             packetStockId: packetStock._id,
             barcode: packetStock.barcode,
@@ -3572,7 +3362,7 @@ router.post('/:id/return', auth, async (req, res) => {
           // Break one packet and return specific items
           const breakResult = await packetStock.breakForSupplierReturn(breakItems, req.user._id, null, session);
           unitsReturnedInThisItem = breakResult.totalItemsReturned;
-          
+
           packetAdjustments.push({
             packetStockId: packetStock._id,
             barcode: packetStock.barcode,
@@ -3585,7 +3375,7 @@ router.post('/:id/return', auth, async (req, res) => {
           // Return loose items from a loose packet stock
           await packetStock.returnLooseToSupplier(quantity, null, session);
           unitsReturnedInThisItem = quantity;
-          
+
           packetAdjustments.push({
             packetStockId: packetStock._id,
             barcode: packetStock.barcode,
@@ -3728,9 +3518,9 @@ router.post('/:id/return', auth, async (req, res) => {
         remainingBalance: newOrderRemaining,
         paymentStatus: newOrderRemaining <= 0 ? 'paid' :
           (dispatchOrder.paymentDetails?.cashPayment || 0) +
-          (dispatchOrder.paymentDetails?.bankPayment || 0) +
-          (dispatchOrder.paymentDetails?.creditApplied || 0) > 0
-          ? 'partial' : 'pending'
+            (dispatchOrder.paymentDetails?.bankPayment || 0) +
+            (dispatchOrder.paymentDetails?.creditApplied || 0) > 0
+            ? 'partial' : 'pending'
       };
     }
 
@@ -4222,7 +4012,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
                 // Don't fail the entire confirmation if product image save fails
               }
             } else {
-               
+
             }
           }
 
@@ -4337,7 +4127,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       const failCount = inventoryResults.filter(r => !r.success && !r.skipped).length;
       const skippedCount = inventoryResults.filter(r => r.skipped).length;
 
-       
+
 
       // If all items failed (and at least one was attempted), throw error
       if (successCount === 0 && (failCount > 0 || (dispatchOrder.items.length > 0 && skippedCount < dispatchOrder.items.length))) {
@@ -4363,7 +4153,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       };
       await dispatchOrder.save();
 
-       
+
 
       return sendResponse.error(res,
         `Confirmation failed: ${inventoryError.message}. The order remains pending. Please check the error logs and fix any issues before confirming again.`,
@@ -4621,13 +4411,13 @@ router.delete('/:id', auth, async (req, res) => {
     // Actually, calculate from dispatchOrder fields
     const cashPaymentAmount = dispatchOrder.paymentDetails?.cashPayment || 0;
     const bankPaymentAmount = dispatchOrder.paymentDetails?.bankPayment || 0;
-    
+
     await Supplier.findByIdAndUpdate(
       dispatchOrder.supplier,
-      { 
-        $inc: { 
+      {
+        $inc: {
           currentBalance: -(discountedSupplierPaymentTotal - cashPaymentAmount - bankPaymentAmount)
-        } 
+        }
       },
       { session }
     );
@@ -4635,20 +4425,16 @@ router.delete('/:id', auth, async (req, res) => {
     // 3. Restore Inventory
     for (const item of dispatchOrder.items) {
       if (item.product) {
-        const productId = item.product._id || item.product;
-        const inventory = await Inventory.findOne({ product: productId }).session(session);
-        
+        const inventory = await Inventory.findOne({ product: item.product }).session(session);
         if (inventory) {
-          // Find the SPECIFIC batch for this order
           const batchIndex = inventory.purchaseBatches.findIndex(b => b.dispatchOrderId?.toString() === req.params.id);
-          
           if (batchIndex !== -1) {
             const batch = inventory.purchaseBatches[batchIndex];
-            
-            // ISOLATION: Decrease Stock ONLY by this order's batch quantity
+
+            // Decrease Stock
             inventory.currentStock = Math.max(0, inventory.currentStock - batch.quantity);
-            
-            // Handle Variant Composition reversal
+
+            // Handle Variant Composition
             if (item.useVariantTracking && item.packets) {
               item.packets.forEach(packet => {
                 packet.composition.forEach(comp => {
@@ -4660,34 +4446,17 @@ router.delete('/:id', auth, async (req, res) => {
               });
             }
 
-            // Remove only this batch
+            // Remove Batch
             inventory.purchaseBatches.splice(batchIndex, 1);
-            
-            // Recalculate Average Cost from remaining batches
+
+            // Recalculate Average Cost
             inventory.recalculateAverageCost();
-
-            // LIFECYCLE: If no stock and no batches remain, deactivate inventory
-            if (inventory.currentStock <= 0 && inventory.purchaseBatches.length === 0) {
-              inventory.isActive = false;
-            }
           }
 
-          // Clean up stock movements for this order
+          // Clean up stock movements
           inventory.stockMovements = inventory.stockMovements.filter(m => m.referenceId?.toString() !== req.params.id);
-          
+
           await inventory.save({ session });
-
-          // LIFECYCLE: Deactivate Product if it was only used in this order
-          // We check if any other confirmed/delivered orders still use this product
-          const otherUsageCount = await DispatchOrder.countDocuments({
-            'items.product': productId,
-            _id: { $ne: req.params.id },
-            status: { $in: ['confirmed', 'picked_up', 'in_transit', 'delivered'] }
-          }).session(session);
-
-          if (otherUsageCount === 0) {
-            await Product.findByIdAndUpdate(productId, { isActive: false }).session(session);
-          }
         }
       }
     }
@@ -4700,7 +4469,7 @@ router.delete('/:id', auth, async (req, res) => {
       if (historyEntry) {
         packet.availablePackets = Math.max(0, packet.availablePackets - historyEntry.quantity);
         packet.dispatchOrderHistory = packet.dispatchOrderHistory.filter(h => h.dispatchOrderId?.toString() !== req.params.id);
-        
+
         // If no packets left and no other history, we could deactivate, but let's just save for now
         if (packet.availablePackets === 0 && packet.dispatchOrderHistory.length === 0) {
           packet.isActive = false;
@@ -4716,7 +4485,7 @@ router.delete('/:id', auth, async (req, res) => {
         .flatMap((item) => {
           const imagesToDelete = Array.isArray(item.productImage) ? item.productImage : [item.productImage];
           return imagesToDelete.map(async (imageUrl) => {
-            try { await deleteImage(imageUrl); } catch (e) {}
+            try { await deleteImage(imageUrl); } catch (e) { }
           });
         });
       await Promise.allSettled(imageDeletionPromises);
@@ -4728,7 +4497,7 @@ router.delete('/:id', auth, async (req, res) => {
     await session.commitTransaction();
     session.endSession();
     console.log(`[Clean Delete] Success: Order ${dispatchOrder.orderNumber} deleted.`);
-    
+
     return sendResponse.success(res, null, 'Confirmed dispatch order and all associated records deleted successfully');
 
   } catch (error) {
@@ -4861,7 +4630,7 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
       return sendResponse.error(res, 'File not found in cloud storage. Upload may have failed.', 400);
     }
 
-     
+
 
     // Get the full GCS URL (match format returned by uploadImage function)
     const { getBucketName } = require('../config/gcs');
@@ -4883,7 +4652,7 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
       await dispatchOrder.save();
       console.log('Image URL saved to dispatch order item (appended to array)');
     } else {
-       
+
       await dispatchOrder.save();
     }
 
@@ -4902,7 +4671,7 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
           if (!product.images.includes(url)) {
             product.images.push(url);
             await product.save();
-             
+
           }
         }
       } catch (productError) {
@@ -4914,7 +4683,7 @@ router.post('/:id/items/:itemIndex/confirm-upload', auth, async (req, res) => {
     // Generate signed read URL for immediate display
     const signedImageUrl = await generateSignedUrl(url);
 
-     
+
 
     return sendResponse.success(res, {
       imageUrl: signedImageUrl,
@@ -4985,7 +4754,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
 
     // Handle base64 JSON upload (mobile app)
     if (isBase64Upload && req.body.image) {
-       
+
 
       const base64String = req.body.image;
       const providedFileName = req.body.fileName || `dispatch-order-${req.params.id}-item-${itemIndex}.jpg`;
@@ -5023,7 +4792,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
     }
     // Handle FormData upload (web app)
     else if (req.file) {
-       
+
       fileBuffer = req.file.buffer;
       fileName = req.file.originalname;
       mimeType = req.file.mimetype;
@@ -5068,14 +4837,14 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
       return sendResponse.error(res, validation.error, 400);
     }
 
-     
+
 
     // Upload to GCS - use dispatch order ID and item index for path
     let url;
     try {
       const uploadResult = await uploadImage(fileForProcessing, `dispatch-${dispatchOrder._id.toString()}-item-${itemIndex}`);
       url = uploadResult.url;
-       
+
     } catch (uploadError) {
       console.error('GCS upload error:', {
         message: uploadError.message,
@@ -5112,7 +4881,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
         return sendResponse.error(res, `Failed to save image URL: ${saveError.message}`, 500);
       }
     } else {
-       
+
       // Still save to ensure any schema changes are applied
       try {
         await dispatchOrder.save();
@@ -5151,7 +4920,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
         product.images.unshift(url);
         try {
           await product.save();
-           
+
         } catch (productSaveError) {
           console.error(`[Dispatch Order] Failed to save image to product ${product.name || product._id}:`, {
             message: productSaveError.message,
@@ -5160,7 +4929,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
           // Don't fail the request if product save fails - dispatch order is already saved
         }
       } else {
-         
+
       }
     } else {
       console.warn(`[Dispatch Order] Could not find product for item ${itemIndex}. ProductCode: ${item.productCode}, Product ID: ${item.product}`);
@@ -5170,7 +4939,7 @@ router.post('/:id/items/:itemIndex/image', auth, upload.single('image'), async (
     let signedImageUrl;
     try {
       signedImageUrl = await generateSignedUrl(url);
-       
+
     } catch (signedUrlError) {
       console.error('Failed to generate signed URL:', {
         message: signedUrlError.message,
@@ -5222,7 +4991,7 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
     if (dispatchOrder.barcodeData && dispatchOrder.barcodeData.length > 0) {
       // Validate that barcodes have proper structure (dataUrl and data fields)
       const validBarcodes = dispatchOrder.barcodeData.filter(b => b.dataUrl && b.data);
-      
+
       if (validBarcodes.length > 0) {
         return sendResponse.success(res, {
           orderNumber: dispatchOrder.orderNumber,
@@ -5233,18 +5002,18 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
         });
       }
       // If validBarcodes.length === 0, fall through to regeneration
-       
+
     }
 
     // No valid barcodes found - AUTO-REGENERATE instead of returning empty
-     
-    
+
+
     const bwipjs = require('bwip-js');
     const barcodeResults = [];
-    
+
     for (const item of dispatchOrder.items) {
       const supplierId = dispatchOrder.supplier._id.toString();
-      
+
       // Get product ID - look it up if not populated
       let productId = 'manual';
       if (item.product) {
@@ -5259,11 +5028,11 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
           productId = product._id.toString();
         }
       }
-      
+
       if (item.useVariantTracking && item.packets && item.packets.length > 0) {
         // Generate barcodes for packets
         for (const packet of item.packets) {
-          
+
           // If packet is marked as loose, generate SEPARATE barcode for EACH composition entry
           if (packet.isLoose) {
             for (const comp of packet.composition) {
@@ -5273,7 +5042,7 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
                 comp.size,
                 comp.color
               );
-              
+
               const barcodeBuffer = await bwipjs.toBuffer({
                 bcid: 'code128',
                 text: looseBarcode,
@@ -5283,9 +5052,9 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
                 textxalign: 'center',
                 textsize: 8
               });
-              
+
               const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-              
+
               barcodeResults.push({
                 type: 'loose',
                 productName: item.productName,
@@ -5308,7 +5077,7 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
               packet.composition,
               false
             );
-            
+
             const barcodeBuffer = await bwipjs.toBuffer({
               bcid: 'code128',
               text: packetBarcode,
@@ -5318,9 +5087,9 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
               textxalign: 'center',
               textsize: 8
             });
-            
+
             const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-            
+
             barcodeResults.push({
               type: 'packet',
               productName: item.productName,
@@ -5336,20 +5105,20 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
         }
       } else {
         // Generate barcode for loose item (no packet structure)
-        const firstColor = Array.isArray(item.primaryColor) && item.primaryColor.length > 0 
-          ? item.primaryColor[0] 
+        const firstColor = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
+          ? item.primaryColor[0]
           : (typeof item.primaryColor === 'string' ? item.primaryColor : 'default');
-        const firstSize = Array.isArray(item.size) && item.size.length > 0 
-          ? item.size[0] 
+        const firstSize = Array.isArray(item.size) && item.size.length > 0
+          ? item.size[0]
           : (typeof item.size === 'string' ? item.size : 'default');
-          
+
         const looseBarcode = generateLooseItemBarcode(
           supplierId,
           productId,
           firstSize,
           firstColor
         );
-        
+
         const barcodeBuffer = await bwipjs.toBuffer({
           bcid: 'code128',
           text: looseBarcode,
@@ -5359,9 +5128,9 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
           textxalign: 'center',
           textsize: 8
         });
-        
+
         const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-        
+
         barcodeResults.push({
           type: 'loose',
           productName: item.productName,
@@ -5382,7 +5151,7 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
       dispatchOrder.barcodeData = barcodeResults;
       dispatchOrder.barcodeGeneratedAt = new Date();
       await dispatchOrder.save();
-       
+
     }
 
     return sendResponse.success(res, {
@@ -5406,7 +5175,7 @@ router.get('/:id/barcodes', async (req, res) => {
   try {
     const { force } = req.query;
     const forceRegenerate = force === 'true' || force === '1';
-    
+
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
       .populate('supplier', 'name company')
       .populate('items.product', 'name sku productCode');
@@ -5430,16 +5199,16 @@ router.get('/:id/barcodes', async (req, res) => {
         message: `Retrieved ${dispatchOrder.barcodeData.length} existing barcodes`
       }, 'Barcodes already exist');
     }
-    
-     
+
+
 
     // Generate new barcodes using simplified logic like QR codes
     const bwipjs = require('bwip-js');
     const barcodeResults = [];
-    
+
     for (const item of dispatchOrder.items) {
       const supplierId = dispatchOrder.supplier._id.toString();
-      
+
       // Get product ID - look it up if not populated
       let productId = 'manual';
       if (item.product) {
@@ -5453,16 +5222,16 @@ router.get('/:id/barcodes', async (req, res) => {
         });
         if (product) {
           productId = product._id.toString();
-           
+
         } else {
-           
+
         }
       }
-      
+
       if (item.useVariantTracking && item.packets && item.packets.length > 0) {
         // Generate barcodes for packets
         for (const packet of item.packets) {
-          
+
           // If packet is marked as loose, generate SEPARATE barcode for EACH composition entry
           if (packet.isLoose) {
             for (const comp of packet.composition) {
@@ -5473,7 +5242,7 @@ router.get('/:id/barcodes', async (req, res) => {
                 comp.size,
                 comp.color
               );
-              
+
               // Generate barcode image as dataURL (like QR codes)
               const barcodeBuffer = await bwipjs.toBuffer({
                 bcid: 'code128',
@@ -5484,9 +5253,9 @@ router.get('/:id/barcodes', async (req, res) => {
                 textxalign: 'center',
                 textsize: 8
               });
-              
+
               const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-              
+
               barcodeResults.push({
                 type: 'loose',
                 productName: item.productName,
@@ -5509,7 +5278,7 @@ router.get('/:id/barcodes', async (req, res) => {
               packet.composition,
               false
             );
-            
+
             // Generate barcode image as dataURL (like QR codes)
             const barcodeBuffer = await bwipjs.toBuffer({
               bcid: 'code128',
@@ -5520,9 +5289,9 @@ router.get('/:id/barcodes', async (req, res) => {
               textxalign: 'center',
               textsize: 8
             });
-            
+
             const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-            
+
             barcodeResults.push({
               type: 'packet',
               productName: item.productName,
@@ -5538,20 +5307,20 @@ router.get('/:id/barcodes', async (req, res) => {
         }
       } else {
         // Generate barcode for loose item
-        const firstColor = Array.isArray(item.primaryColor) && item.primaryColor.length > 0 
-          ? item.primaryColor[0] 
+        const firstColor = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
+          ? item.primaryColor[0]
           : (typeof item.primaryColor === 'string' ? item.primaryColor : 'default');
-        const firstSize = Array.isArray(item.size) && item.size.length > 0 
-          ? item.size[0] 
+        const firstSize = Array.isArray(item.size) && item.size.length > 0
+          ? item.size[0]
           : (typeof item.size === 'string' ? item.size : 'default');
-          
+
         const looseBarcode = generateLooseItemBarcode(
           supplierId,
           productId,
           firstSize,
           firstColor
         );
-        
+
         // Generate barcode image as dataURL (like QR codes)
         const barcodeBuffer = await bwipjs.toBuffer({
           bcid: 'code128',
@@ -5562,9 +5331,9 @@ router.get('/:id/barcodes', async (req, res) => {
           textxalign: 'center',
           textsize: 8
         });
-        
+
         const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-        
+
         barcodeResults.push({
           type: 'loose',
           productName: item.productName,
@@ -5585,7 +5354,217 @@ router.get('/:id/barcodes', async (req, res) => {
     dispatchOrder.barcodeGeneratedAt = new Date();
     await dispatchOrder.save();
 
-     
+
+
+    // Return JSON response
+    return sendResponse.success(res, {
+      orderNumber: dispatchOrder.orderNumber,
+      supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
+      barcodes: barcodeResults,
+      generatedAt: dispatchOrder.barcodeGeneratedAt,
+      message: `Successfully generated ${barcodeResults.length} barcodes`
+    }, 'Barcodes generated and saved successfully');
+
+  } catch (error) {
+    console.error('Generate barcodes error:', error);
+    return sendResponse.error(res, error.message || 'Failed to generate barcodes', 500);
+  }
+});
+
+module.exports = router;
+  } catch (error) {
+  console.error('Get barcode data error:', error);
+  return sendResponse.error(res, error.message || 'Failed to get barcode data', 500);
+}
+});
+
+// Generate barcodes and save to database for a confirmed dispatch order
+// Note: No auth required - this allows suppliers to generate barcodes via direct link
+// Use ?force=true to regenerate existing barcodes
+router.get('/:id/barcodes', async (req, res) => {
+  try {
+    const { force } = req.query;
+    const forceRegenerate = force === 'true' || force === '1';
+
+    const dispatchOrder = await DispatchOrder.findById(req.params.id)
+      .populate('supplier', 'name company')
+      .populate('items.product', 'name sku productCode');
+
+    if (!dispatchOrder) {
+      return sendResponse.error(res, 'Dispatch order not found', 404);
+    }
+
+    // Only allow generating barcodes for confirmed orders
+    if (dispatchOrder.status !== 'confirmed') {
+      return sendResponse.error(res, 'Barcodes can only be generated for confirmed orders', 400);
+    }
+
+    // Check if barcodes already exist (unless force regenerate is requested)
+    if (!forceRegenerate && dispatchOrder.barcodeData && dispatchOrder.barcodeData.length > 0) {
+      return sendResponse.success(res, {
+        orderNumber: dispatchOrder.orderNumber,
+        supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
+        barcodes: dispatchOrder.barcodeData,
+        generatedAt: dispatchOrder.barcodeGeneratedAt,
+        message: `Retrieved ${dispatchOrder.barcodeData.length} existing barcodes`
+      }, 'Barcodes already exist');
+    }
+
+
+
+    // Generate new barcodes using simplified logic like QR codes
+    const bwipjs = require('bwip-js');
+    const barcodeResults = [];
+
+    for (const item of dispatchOrder.items) {
+      const supplierId = dispatchOrder.supplier._id.toString();
+
+      // Get product ID - look it up if not populated
+      let productId = 'manual';
+      if (item.product) {
+        // Handle both populated product (object with _id) and direct ObjectId reference
+        productId = item.product._id ? item.product._id.toString() : item.product.toString();
+      } else if (item.productCode) {
+        // Look up product by productCode + supplier for existing orders
+        const product = await Product.findOne({
+          sku: item.productCode.toUpperCase(),
+          supplier: dispatchOrder.supplier._id
+        });
+        if (product) {
+          productId = product._id.toString();
+
+        } else {
+
+        }
+      }
+
+      if (item.useVariantTracking && item.packets && item.packets.length > 0) {
+        // Generate barcodes for packets
+        for (const packet of item.packets) {
+
+          // If packet is marked as loose, generate SEPARATE barcode for EACH composition entry
+          if (packet.isLoose) {
+            for (const comp of packet.composition) {
+              // Generate unique barcode for each size/color combo
+              const looseBarcode = generateLooseItemBarcode(
+                supplierId,
+                productId,
+                comp.size,
+                comp.color
+              );
+
+              // Generate barcode image as dataURL (like QR codes)
+              const barcodeBuffer = await bwipjs.toBuffer({
+                bcid: 'code128',
+                text: looseBarcode,
+                scale: 3,
+                height: 10,
+                includetext: true,
+                textxalign: 'center',
+                textsize: 8
+              });
+
+              const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+
+              barcodeResults.push({
+                type: 'loose',
+                productName: item.productName,
+                productCode: item.productCode,
+                packetNumber: packet.packetNumber,
+                size: comp.size,
+                color: comp.color,
+                quantity: comp.quantity,
+                data: looseBarcode,
+                dataUrl: dataUrl,
+                isLoose: true,
+                generatedAt: new Date()
+              });
+            }
+          } else {
+            // Regular packet - generate one barcode for entire packet
+            const packetBarcode = generatePacketBarcode(
+              supplierId,
+              productId,
+              packet.composition,
+              false
+            );
+
+            // Generate barcode image as dataURL (like QR codes)
+            const barcodeBuffer = await bwipjs.toBuffer({
+              bcid: 'code128',
+              text: packetBarcode,
+              scale: 3,
+              height: 10,
+              includetext: true,
+              textxalign: 'center',
+              textsize: 8
+            });
+
+            const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+
+            barcodeResults.push({
+              type: 'packet',
+              productName: item.productName,
+              productCode: item.productCode,
+              packetNumber: packet.packetNumber,
+              composition: packet.composition,
+              data: packetBarcode,
+              dataUrl: dataUrl,
+              isLoose: false,
+              generatedAt: new Date()
+            });
+          }
+        }
+      } else {
+        // Generate barcode for loose item
+        const firstColor = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
+          ? item.primaryColor[0]
+          : (typeof item.primaryColor === 'string' ? item.primaryColor : 'default');
+        const firstSize = Array.isArray(item.size) && item.size.length > 0
+          ? item.size[0]
+          : (typeof item.size === 'string' ? item.size : 'default');
+
+        const looseBarcode = generateLooseItemBarcode(
+          supplierId,
+          productId,
+          firstSize,
+          firstColor
+        );
+
+        // Generate barcode image as dataURL (like QR codes)
+        const barcodeBuffer = await bwipjs.toBuffer({
+          bcid: 'code128',
+          text: looseBarcode,
+          scale: 3,
+          height: 10,
+          includetext: true,
+          textxalign: 'center',
+          textsize: 8
+        });
+
+        const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+
+        barcodeResults.push({
+          type: 'loose',
+          productName: item.productName,
+          productCode: item.productCode,
+          size: firstSize,
+          color: firstColor,
+          quantity: item.quantity,
+          data: looseBarcode,
+          dataUrl: dataUrl,
+          isLoose: true,
+          generatedAt: new Date()
+        });
+      }
+    }
+
+    // Save barcodes to database with dataURL format
+    dispatchOrder.barcodeData = barcodeResults;
+    dispatchOrder.barcodeGeneratedAt = new Date();
+    await dispatchOrder.save();
+
+
 
     // Return JSON response
     return sendResponse.success(res, {
