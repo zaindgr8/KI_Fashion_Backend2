@@ -4425,16 +4425,20 @@ router.delete('/:id', auth, async (req, res) => {
     // 3. Restore Inventory
     for (const item of dispatchOrder.items) {
       if (item.product) {
-        const inventory = await Inventory.findOne({ product: item.product }).session(session);
+        const productId = item.product._id || item.product;
+        const inventory = await Inventory.findOne({ product: productId }).session(session);
+        
         if (inventory) {
+          // Find the SPECIFIC batch for this order
           const batchIndex = inventory.purchaseBatches.findIndex(b => b.dispatchOrderId?.toString() === req.params.id);
+          
           if (batchIndex !== -1) {
             const batch = inventory.purchaseBatches[batchIndex];
             
-            // Decrease Stock
+            // ISOLATION: Decrease Stock ONLY by this order's batch quantity
             inventory.currentStock = Math.max(0, inventory.currentStock - batch.quantity);
             
-            // Handle Variant Composition
+            // Handle Variant Composition reversal
             if (item.useVariantTracking && item.packets) {
               item.packets.forEach(packet => {
                 packet.composition.forEach(comp => {
@@ -4446,17 +4450,34 @@ router.delete('/:id', auth, async (req, res) => {
               });
             }
 
-            // Remove Batch
+            // Remove only this batch
             inventory.purchaseBatches.splice(batchIndex, 1);
             
-            // Recalculate Average Cost
+            // Recalculate Average Cost from remaining batches
             inventory.recalculateAverageCost();
+
+            // LIFECYCLE: If no stock and no batches remain, deactivate inventory
+            if (inventory.currentStock <= 0 && inventory.purchaseBatches.length === 0) {
+              inventory.isActive = false;
+            }
           }
 
-          // Clean up stock movements
+          // Clean up stock movements for this order
           inventory.stockMovements = inventory.stockMovements.filter(m => m.referenceId?.toString() !== req.params.id);
           
           await inventory.save({ session });
+
+          // LIFECYCLE: Deactivate Product if it was only used in this order
+          // We check if any other confirmed/delivered orders still use this product
+          const otherUsageCount = await DispatchOrder.countDocuments({
+            'items.product': productId,
+            _id: { $ne: req.params.id },
+            status: { $in: ['confirmed', 'picked_up', 'in_transit', 'delivered'] }
+          }).session(session);
+
+          if (otherUsageCount === 0) {
+            await Product.findByIdAndUpdate(productId, { isActive: false }).session(session);
+          }
         }
       }
     }

@@ -194,6 +194,7 @@ inventorySchema.methods.addStock = function (quantity, reference, referenceId, u
   if (!this.firstArrivalDate) {
     this.firstArrivalDate = this.lastStockUpdate;
   }
+  this.isActive = true;
   return this.save();
 };
 
@@ -277,6 +278,7 @@ inventorySchema.methods.addStockWithVariants = function (quantity, variantCompos
   if (!this.firstArrivalDate) {
     this.firstArrivalDate = this.lastStockUpdate;
   }
+  this.isActive = true;
   return this.save();
 };
 
@@ -417,6 +419,7 @@ inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, refer
   }, 0);
   this.averageCostPrice = totalQuantity > 0 ? totalValue / totalQuantity : (batchInfo.landedPrice || batchInfo.costPrice);
 
+  this.isActive = true;
   return this.save();
 };
 
@@ -497,6 +500,7 @@ inventorySchema.methods.restoreWithBatch = function (quantity, variantCompositio
   }
 
   this.lastStockUpdate = new Date();
+  this.isActive = true;
   return this.save();
 };
 

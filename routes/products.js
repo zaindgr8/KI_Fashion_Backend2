@@ -495,11 +495,38 @@ router.post('/', auth, async (req, res) => {
       sku: req.body.sku.toUpperCase(),
       supplier: supplierId
     });
+
     if (existingProduct) {
-      return res.status(400).json({
-        success: false,
-        message: 'A product with this SKU already exists for this supplier'
-      });
+      if (existingProduct.isActive) {
+        return res.status(400).json({
+          success: false,
+          message: 'A product with this SKU already exists for this supplier'
+        });
+      } else {
+        // Reactivate the existing product and update its details
+        existingProduct.set({
+          ...req.body,
+          isActive: true,
+          updatedBy: req.user._id
+        });
+        await existingProduct.save();
+
+        // Ensure inventory is also active
+        await Inventory.findOneAndUpdate(
+          { product: existingProduct._id },
+          { isActive: true },
+          { upsert: true }
+        );
+
+        await populateProductDocument(existingProduct);
+        await convertProductImagesToSignedUrls(existingProduct);
+
+        return res.json({
+          success: true,
+          message: 'Product reactivated and updated successfully',
+          data: existingProduct
+        });
+      }
     }
 
     const product = new Product({
