@@ -4309,10 +4309,15 @@ router.put('/:id', auth, async (req, res) => {
 
 // Delete dispatch order (super-admin can delete any status; admin/supplier only pending)
 router.delete('/:id', auth, async (req, res) => {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
   try {
-    const dispatchOrder = await DispatchOrder.findById(req.params.id);
+    const dispatchOrder = await DispatchOrder.findById(req.params.id).session(session);
 
     if (!dispatchOrder) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
@@ -4326,58 +4331,180 @@ router.delete('/:id', auth, async (req, res) => {
       const isCreator = dispatchOrder.supplierUser?.toString() === req.user._id.toString();
 
       if (!isOrderSupplier && !isCreator) {
+        await session.abortTransaction();
+        session.endSession();
         return sendResponse.error(res, 'You do not have permission to delete this dispatch order', 403);
       }
     } else if (!isSuperAdmin && !isAdmin) {
+      await session.abortTransaction();
+      session.endSession();
       return sendResponse.error(res, 'You do not have permission to delete dispatch orders', 403);
     }
 
-    // Status guard: only super-admin can delete non-pending orders
-    if (!isSuperAdmin && dispatchOrder.status !== 'pending') {
-      return sendResponse.error(res, 'Only pending dispatch orders can be deleted', 400);
+    // CASE 1: Pending Order (Original Logic)
+    if (dispatchOrder.status === 'pending' || dispatchOrder.status === 'pending-approval') {
+      // Delete associated images from Google Cloud Storage
+      if (dispatchOrder.items && Array.isArray(dispatchOrder.items)) {
+        const imageDeletionPromises = dispatchOrder.items
+          .filter(item => item.productImage)
+          .flatMap((item) => {
+            const imagesToDelete = Array.isArray(item.productImage) ? item.productImage : [item.productImage];
+            return imagesToDelete.map(async (imageUrl) => {
+              try {
+                await deleteImage(imageUrl);
+              } catch (imageError) {
+                console.error('Error deleting image from GCS:', imageError.message);
+              }
+            });
+          });
+        await Promise.allSettled(imageDeletionPromises);
+      }
+
+      await DispatchOrder.findByIdAndDelete(req.params.id).session(session);
+      await session.commitTransaction();
+      session.endSession();
+      return sendResponse.success(res, null, 'Pending dispatch order deleted successfully');
     }
 
-    // Delete associated images from Google Cloud Storage
-    if (dispatchOrder.items && Array.isArray(dispatchOrder.items)) {
-      const imageDeletionPromises = dispatchOrder.items
-        .filter(item => item.productImage) // Only items with images
-        .flatMap((item) => {
-          // Handle both string (backward compat) and array of images
-          const imagesToDelete = Array.isArray(item.productImage)
-            ? item.productImage
-            : [item.productImage];
+    // CASE 2: Confirmed/Delivered Order (Selective Clean Delete)
+    // Strict Guard: Only super-admin can initiate clean delete for confirmed orders
+    if (!isSuperAdmin) {
+      await session.abortTransaction();
+      session.endSession();
+      return sendResponse.error(res, 'Only super-admins can delete confirmed dispatch orders', 403);
+    }
 
-          return imagesToDelete.map(async (imageUrl) => {
-            try {
-               
-              const deleted = await deleteImage(imageUrl);
-              if (deleted) {
-                 
-              } else {
-                console.warn('Image not found or already deleted:', imageUrl);
-              }
-            } catch (imageError) {
-              // Log error but don't block order deletion
-              console.error('Error deleting image from GCS:', {
-                imageUrl: imageUrl,
-                error: imageError.message,
-                stack: imageError.stack,
+    // Guard 1: Check for associated Returns
+    const existingReturn = await Return.findOne({ dispatchOrder: req.params.id }).session(session);
+    if (existingReturn) {
+      await session.abortTransaction();
+      session.endSession();
+      return sendResponse.error(res, 'Cannot delete: Associated returns exist. Please delete the returns first.', 400);
+    }
+
+    // Guard 2: Check for Sales (FIFO Batch Usage)
+    for (const item of dispatchOrder.items) {
+      if (item.product) {
+        const inventory = await Inventory.findOne({ product: item.product }).session(session);
+        if (inventory) {
+          const batch = inventory.purchaseBatches.find(b => b.dispatchOrderId?.toString() === req.params.id);
+          if (batch && batch.remainingQuantity < batch.quantity) {
+            await session.abortTransaction();
+            session.endSession();
+            return sendResponse.error(res, `Cannot delete: Some items from product "${item.productName}" have already been sold.`, 400);
+          }
+        }
+      }
+    }
+
+    console.log(`[Clean Delete] Passing guards for order ${dispatchOrder.orderNumber}. Starting reversal...`);
+
+    // REVERSAL STAGE
+    // 1. Delete all Ledger entries (purchase, logistics charges, payments)
+    await Ledger.deleteMany({ referenceId: req.params.id }).session(session);
+
+    // 2. Adjust Supplier Balance and Total Purchases
+    // We reverse the exact amount added during confirmation
+    const discountedSupplierPaymentTotal = dispatchOrder.supplierPaymentTotal || 0;
+    // We need to account for any at-confirmation payments that were recorded
+    // Find payment entries in Ledger before they were deleted or use cached values if reliable
+    // Actually, calculate from dispatchOrder fields
+    const cashPaymentAmount = dispatchOrder.paymentDetails?.cashPayment || 0;
+    const bankPaymentAmount = dispatchOrder.paymentDetails?.bankPayment || 0;
+    
+    await Supplier.findByIdAndUpdate(
+      dispatchOrder.supplier,
+      { 
+        $inc: { 
+          currentBalance: -(discountedSupplierPaymentTotal - cashPaymentAmount - bankPaymentAmount)
+        } 
+      },
+      { session }
+    );
+
+    // 3. Restore Inventory
+    for (const item of dispatchOrder.items) {
+      if (item.product) {
+        const inventory = await Inventory.findOne({ product: item.product }).session(session);
+        if (inventory) {
+          const batchIndex = inventory.purchaseBatches.findIndex(b => b.dispatchOrderId?.toString() === req.params.id);
+          if (batchIndex !== -1) {
+            const batch = inventory.purchaseBatches[batchIndex];
+            
+            // Decrease Stock
+            inventory.currentStock = Math.max(0, inventory.currentStock - batch.quantity);
+            
+            // Handle Variant Composition
+            if (item.useVariantTracking && item.packets) {
+              item.packets.forEach(packet => {
+                packet.composition.forEach(comp => {
+                  const variant = inventory.variantComposition.find(v => v.size === comp.size && v.color === comp.color);
+                  if (variant) {
+                    variant.quantity = Math.max(0, variant.quantity - comp.quantity);
+                  }
+                });
               });
             }
-          });
-        });
 
-      // Wait for all image deletions to complete (or fail)
-      await Promise.allSettled(imageDeletionPromises);
-       
+            // Remove Batch
+            inventory.purchaseBatches.splice(batchIndex, 1);
+            
+            // Recalculate Average Cost
+            inventory.recalculateAverageCost();
+          }
+
+          // Clean up stock movements
+          inventory.stockMovements = inventory.stockMovements.filter(m => m.referenceId?.toString() !== req.params.id);
+          
+          await inventory.save({ session });
+        }
+      }
     }
 
-    // Delete the dispatch order from database
-    await DispatchOrder.findByIdAndDelete(req.params.id);
+    // 4. Clean up PacketStock
+    // Find all packets that have this order in their history
+    const packetsToUpdate = await PacketStock.find({ 'dispatchOrderHistory.dispatchOrderId': req.params.id }).session(session);
+    for (const packet of packetsToUpdate) {
+      const historyEntry = packet.dispatchOrderHistory.find(h => h.dispatchOrderId?.toString() === req.params.id);
+      if (historyEntry) {
+        packet.availablePackets = Math.max(0, packet.availablePackets - historyEntry.quantity);
+        packet.dispatchOrderHistory = packet.dispatchOrderHistory.filter(h => h.dispatchOrderId?.toString() !== req.params.id);
+        
+        // If no packets left and no other history, we could deactivate, but let's just save for now
+        if (packet.availablePackets === 0 && packet.dispatchOrderHistory.length === 0) {
+          packet.isActive = false;
+        }
+        await packet.save({ session });
+      }
+    }
 
-    return sendResponse.success(res, null, 'Dispatch order deleted successfully');
+    // 5. Image Cleanup
+    if (dispatchOrder.items && Array.isArray(dispatchOrder.items)) {
+      const imageDeletionPromises = dispatchOrder.items
+        .filter(item => item.productImage)
+        .flatMap((item) => {
+          const imagesToDelete = Array.isArray(item.productImage) ? item.productImage : [item.productImage];
+          return imagesToDelete.map(async (imageUrl) => {
+            try { await deleteImage(imageUrl); } catch (e) {}
+          });
+        });
+      await Promise.allSettled(imageDeletionPromises);
+    }
+
+    // 6. Final Order Deletion
+    await DispatchOrder.findByIdAndDelete(req.params.id).session(session);
+
+    await session.commitTransaction();
+    session.endSession();
+    console.log(`[Clean Delete] Success: Order ${dispatchOrder.orderNumber} deleted.`);
+    
+    return sendResponse.success(res, null, 'Confirmed dispatch order and all associated records deleted successfully');
 
   } catch (error) {
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+    session.endSession();
     console.error('Delete dispatch order error:', error);
     return sendResponse.error(res, error.message || 'Failed to delete dispatch order', 500);
   }
