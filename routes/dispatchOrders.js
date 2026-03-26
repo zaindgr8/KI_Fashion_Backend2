@@ -1469,13 +1469,56 @@ router.get('/:id', auth, async (req, res) => {
 router.get('/:id/packet-stocks', auth, async (req, res) => {
   try {
     const mongoose = require('mongoose');
+    const Return = require('../models/Return');
+    
+    // Fetch packets that have this order in their history
     const packetStocks = await PacketStock.find({
       'dispatchOrderHistory.dispatchOrderId': new mongoose.Types.ObjectId(req.params.id),
       isActive: true,
       availablePackets: { $gt: 0 }
     }).populate('product', 'name sku productCode images');
+
+    // Fetch returns for this order to subtract already returned quantities
+    const returns = await Return.find({ dispatchOrder: req.params.id });
+
+    // Calculate order-specific available quantity for each packet stock
+    const refinedPacketStocks = packetStocks.map(stock => {
+      const stockObj = stock.toObject();
+      
+      // 1. Get initial qty from this order in history
+      const historyEntry = stock.dispatchOrderHistory.find(
+        h => h.dispatchOrderId.toString() === req.params.id
+      );
+      const initialOrderQty = historyEntry ? historyEntry.quantity : 0;
+
+      // 2. Subtract quantities already returned for this specific packet stock in this order
+      let returnedQty = 0;
+      returns.forEach(ret => {
+        const adjustment = ret.packetAdjustments?.find(
+          adj => adj.packetStockId.toString() === stock._id.toString()
+        );
+        if (adjustment) {
+          // If it's a full packet return, count packets * total
+          if (adjustment.adjustmentType === 'full-packet-return') {
+            returnedQty += (adjustment.packetsReturned || 0);
+          } else {
+            // Partial or loose returns are tracked in itemsReturned
+            returnedQty += (adjustment.itemsReturned || 0);
+          }
+        }
+      });
+
+      // For non-loose packets, initialOrderQty is in PACKETS
+      // For loose items, initialOrderQty is in ITEMS (since totalItemsPerPacket is 1)
+      const remainingQty = Math.max(0, initialOrderQty - returnedQty);
+
+      // Add totalQuantity field for the frontend
+      stockObj.totalQuantity = remainingQty;
+      
+      return stockObj;
+    }).filter(stock => stock.totalQuantity > 0);
     
-    return sendResponse.success(res, packetStocks);
+    return sendResponse.success(res, refinedPacketStocks);
   } catch (error) {
     console.error('Get dispatch order packet stocks error:', error);
     return sendResponse.error(res, error.message, 500);
