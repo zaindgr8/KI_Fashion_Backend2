@@ -1243,15 +1243,225 @@ router.post('/manual', auth, async (req, res) => {
           exchangeRate: value.exchangeRate || 1.0
         };
 
-        // Add stock to inventory with batch tracking
-        await inventory.addStockWithBatch(
-          quantity,
-          batchInfo,
-          'DispatchOrder',
-          dispatchOrder._id,
-          req.user._id,
-          `Manual Purchase ${dispatchOrder.orderNumber}`
-        );
+        const transactionDate = batchInfo.purchaseDate;
+
+        // Calculate variant composition from packets for inventory update
+        const variantComposition = [];
+        if (item.packets && item.packets.length > 0) {
+          item.packets.forEach(packet => {
+            packet.composition.forEach(comp => {
+              const existing = variantComposition.find(v => v.size === comp.size && v.color === comp.color);
+              if (existing) {
+                existing.quantity += comp.quantity;
+              } else {
+                variantComposition.push({
+                  size: comp.size,
+                  color: comp.color,
+                  quantity: comp.quantity
+                });
+              }
+            });
+          });
+        }
+
+        // Add stock to inventory with variant tracking if applicable
+        if (variantComposition.length > 0) {
+          // Use variants for size/color tracking
+          await inventory.addStockWithVariants(
+            quantity,
+            variantComposition,
+            'DispatchOrder',
+            dispatchOrder._id,
+            req.user._id,
+            `Manual Purchase ${dispatchOrder.orderNumber}`,
+            transactionDate
+          );
+
+          // Manually add purchase batch for FIFO tracking (since addStockWithVariants doesn't do it)
+          inventory.purchaseBatches.push({
+            dispatchOrderId: batchInfo.dispatchOrderId,
+            supplierId: batchInfo.supplierId,
+            purchaseDate: batchInfo.purchaseDate,
+            quantity: quantity,
+            remainingQuantity: quantity,
+            costPrice: batchInfo.costPrice,
+            landedPrice: batchInfo.landedPrice,
+            exchangeRate: batchInfo.exchangeRate,
+            notes: `Manual Purchase ${dispatchOrder.orderNumber} - With variants`
+          });
+          
+          inventory.recalculateAverageCost();
+          await inventory.save();
+        } else {
+          // Fallback to simple batch tracking
+          await inventory.addStockWithBatch(
+            quantity,
+            batchInfo,
+            'DispatchOrder',
+            dispatchOrder._id,
+            req.user._id,
+            `Manual Purchase ${dispatchOrder.orderNumber}`,
+            transactionDate
+          );
+        }
+
+        // ==========================================
+        // CREATE PACKET STOCK ENTRIES
+        // ==========================================
+        if (item.packets && item.packets.length > 0) {
+          const supplierId = supplier._id;
+          const productId = productExists._id;
+          const bwipjs = require('bwip-js');
+
+          // Helper function to generate barcode image
+          const generateBarcodeImage = async (barcodeText) => {
+            try {
+              const barcodeBuffer = await bwipjs.toBuffer({
+                bcid: 'code128',
+                text: barcodeText,
+                scale: 3,
+                height: 10,
+                includetext: true,
+                textxalign: 'center',
+                textsize: 8
+              });
+              return `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
+            } catch (err) {
+              console.error(`[Manual Entry] Failed to generate barcode image for ${barcodeText}:`, err.message);
+              return null;
+            }
+          };
+
+          const hasLooseItems = item.packets.some(p => p.isLoose === true);
+
+          if (hasLooseItems) {
+            // LOOSE ITEMS: Group by color/size
+            const looseItemGroups = new Map();
+            for (const packet of item.packets) {
+              if (!packet.isLoose) continue;
+              for (const comp of packet.composition) {
+                const key = `${comp.color}|${comp.size}`;
+                if (looseItemGroups.has(key)) {
+                  looseItemGroups.get(key).quantity += comp.quantity;
+                } else {
+                  looseItemGroups.set(key, {
+                    color: comp.color,
+                    size: comp.size,
+                    quantity: comp.quantity
+                  });
+                }
+              }
+            }
+
+            for (const [key, looseItem] of looseItemGroups) {
+              try {
+                const singleComposition = [{
+                  size: looseItem.size,
+                  color: looseItem.color,
+                  quantity: 1
+                }];
+                const looseBarcode = generatePacketBarcode(supplierId.toString(), productId.toString(), singleComposition, true);
+                
+                let packetStock = await PacketStock.findOne({ barcode: looseBarcode });
+                if (packetStock) {
+                  await packetStock.addStock(looseItem.quantity, dispatchOrder._id, batchInfo.costPrice, batchInfo.landedPrice, transactionDate);
+                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
+                  packetStock.suggestedSellingPrice = itemMinSell;
+                  await packetStock.save();
+                } else {
+                  const looseBarcodeImage = await generateBarcodeImage(looseBarcode);
+                  packetStock = new PacketStock({
+                    barcode: looseBarcode,
+                    product: productId,
+                    supplier: supplierId,
+                    composition: singleComposition,
+                    totalItemsPerPacket: 1,
+                    availablePackets: looseItem.quantity,
+                    costPricePerPacket: batchInfo.costPrice,
+                    landedPricePerPacket: batchInfo.landedPrice,
+                    suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20),
+                    isLoose: true,
+                    barcodeImage: looseBarcodeImage ? {
+                      dataUrl: looseBarcodeImage,
+                      format: 'code128',
+                      generatedAt: transactionDate
+                    } : undefined,
+                    dispatchOrderHistory: [{
+                      dispatchOrderId: dispatchOrder._id,
+                      quantity: looseItem.quantity,
+                      costPricePerPacket: batchInfo.costPrice,
+                      landedPricePerPacket: batchInfo.landedPrice,
+                      addedAt: transactionDate
+                    }]
+                  });
+                  await packetStock.save();
+                }
+              } catch (looseStockError) {
+                console.error(`[Manual Entry] Failed to create/update loose PacketStock for ${looseItem.color}/${looseItem.size}:`, looseStockError.message);
+              }
+            }
+          } else {
+            // REGULAR PACKETS: Group by composition
+            const packetGroups = new Map();
+            for (const packet of item.packets) {
+              const barcode = generatePacketBarcode(supplierId.toString(), productId.toString(), packet.composition, false);
+              if (packetGroups.has(barcode)) {
+                packetGroups.get(barcode).count += 1;
+              } else {
+                packetGroups.set(barcode, {
+                  barcode,
+                  composition: packet.composition,
+                  totalItemsPerPacket: packet.totalItems || packet.composition.reduce((sum, c) => sum + c.quantity, 0),
+                  count: 1
+                });
+              }
+            }
+
+            for (const [barcode, packetGroup] of packetGroups) {
+              try {
+                const costPerPacket = batchInfo.costPrice * packetGroup.totalItemsPerPacket;
+                const landedPerPacket = batchInfo.landedPrice * packetGroup.totalItemsPerPacket;
+                
+                let packetStock = await PacketStock.findOne({ barcode });
+                if (packetStock) {
+                  await packetStock.addStock(packetGroup.count, dispatchOrder._id, costPerPacket, landedPerPacket, transactionDate);
+                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, unitPrice * 1.20);
+                  packetStock.suggestedSellingPrice = truncateToTwoDecimals(itemMinSell * (packetGroup.totalItemsPerPacket || 1));
+                  await packetStock.save();
+                } else {
+                  const packetBarcodeImage = await generateBarcodeImage(barcode);
+                  packetStock = new PacketStock({
+                    barcode,
+                    product: productId,
+                    supplier: supplierId,
+                    composition: packetGroup.composition,
+                    totalItemsPerPacket: packetGroup.totalItemsPerPacket,
+                    availablePackets: packetGroup.count,
+                    costPricePerPacket: costPerPacket,
+                    landedPricePerPacket: landedPerPacket,
+                    suggestedSellingPrice: truncateToTwoDecimals(resolveMinSellingPrice(item.minSellingPrice, unitPrice * 1.20) * (packetGroup.totalItemsPerPacket || 1)),
+                    isLoose: false,
+                    barcodeImage: packetBarcodeImage ? {
+                      dataUrl: packetBarcodeImage,
+                      format: 'code128',
+                      generatedAt: transactionDate
+                    } : undefined,
+                    dispatchOrderHistory: [{
+                      dispatchOrderId: dispatchOrder._id,
+                      quantity: packetGroup.count,
+                      costPricePerPacket: costPerPacket,
+                      landedPricePerPacket: landedPerPacket,
+                      addedAt: transactionDate
+                    }]
+                  });
+                  await packetStock.save();
+                }
+              } catch (packetStockError) {
+                console.error(`[Manual Entry] Failed to create/update regular PacketStock for barcode ${barcode}:`, packetStockError.message);
+              }
+            }
+          }
+        }
       }
     } catch (inventoryError) {
       console.error(`Error updating inventory:`, inventoryError);
