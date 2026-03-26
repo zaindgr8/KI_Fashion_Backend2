@@ -1468,9 +1468,11 @@ router.get('/:id', auth, async (req, res) => {
  */
 router.get('/:id/packet-stocks', auth, async (req, res) => {
   try {
+    const mongoose = require('mongoose');
     const packetStocks = await PacketStock.find({
-      'dispatchOrderHistory.dispatchOrderId': req.params.id,
-      isActive: true
+      'dispatchOrderHistory.dispatchOrderId': new mongoose.Types.ObjectId(req.params.id),
+      isActive: true,
+      availablePackets: { $gt: 0 }
     }).populate('product', 'name sku productCode images');
     
     return sendResponse.success(res, packetStocks);

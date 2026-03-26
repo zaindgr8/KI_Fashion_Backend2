@@ -402,7 +402,7 @@ packetStockSchema.methods.breakForSupplierReturn = async function (itemsToReturn
           suggestedSellingPrice: perItemSuggested,
           isLoose: true,
           parentPacketStock: this._id,
-          dispatchOrderHistory: []
+          dispatchOrderHistory: JSON.parse(JSON.stringify(this.dispatchOrderHistory || []))
         });
 
         // Generate QR code
@@ -492,7 +492,7 @@ packetStockSchema.statics.findOrCreateLooseStock = async function (productId, su
     soldPackets: 0,
     isLoose: true,
     parentPacketStock: parentPacketStockId,
-    dispatchOrderHistory: []
+    dispatchOrderHistory: options.dispatchOrderHistory ? JSON.parse(JSON.stringify(options.dispatchOrderHistory)) : []
   });
 
   // Generate QR code
