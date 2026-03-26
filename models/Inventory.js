@@ -103,6 +103,9 @@ const inventorySchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
+  firstArrivalDate: {
+    type: Date
+  },
   stockMovements: [{
     type: {
       type: String,
@@ -186,6 +189,11 @@ inventorySchema.methods.addStock = function (quantity, reference, referenceId, u
   });
   this.currentStock += quantity;
   this.lastStockUpdate = Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate;
+  
+  // Set firstArrivalDate if it doesn't exist (immutable)
+  if (!this.firstArrivalDate) {
+    this.firstArrivalDate = this.lastStockUpdate;
+  }
   return this.save();
 };
 
@@ -203,6 +211,11 @@ inventorySchema.methods.reduceStock = function (quantity, reference, referenceId
   });
   this.currentStock -= quantity;
   this.lastStockUpdate = new Date();
+  
+  // Set firstArrivalDate if it doesn't exist (immutable)
+  if (!this.firstArrivalDate) {
+    this.firstArrivalDate = this.lastStockUpdate;
+  }
   return this.save();
 };
 
@@ -217,6 +230,11 @@ inventorySchema.methods.adjustStock = function (newQuantity, reference, user, no
   });
   this.currentStock = newQuantity;
   this.lastStockUpdate = new Date();
+  
+  // Set firstArrivalDate if it doesn't exist (immutable)
+  if (!this.firstArrivalDate) {
+    this.firstArrivalDate = this.lastStockUpdate;
+  }
   return this.save();
 };
 
@@ -254,6 +272,11 @@ inventorySchema.methods.addStockWithVariants = function (quantity, variantCompos
   }
 
   this.lastStockUpdate = Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate;
+
+  // Set firstArrivalDate if it doesn't exist (immutable)
+  if (!this.firstArrivalDate) {
+    this.firstArrivalDate = this.lastStockUpdate;
+  }
   return this.save();
 };
 
@@ -327,6 +350,11 @@ inventorySchema.methods.reduceVariantStock = function (size, color, quantity, re
   this.reservedStock = Math.max(0, this.reservedStock - quantity);
   this.lastStockUpdate = new Date();
 
+  // Set firstArrivalDate if it doesn't exist (immutable)
+  if (!this.firstArrivalDate) {
+    this.firstArrivalDate = this.lastStockUpdate;
+  }
+
   return this.save();
 };
 
@@ -373,6 +401,11 @@ inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, refer
 
   this.currentStock += quantity;
   this.lastStockUpdate = Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate;
+
+  // Set firstArrivalDate if it doesn't exist (immutable)
+  if (!this.firstArrivalDate) {
+    this.firstArrivalDate = this.lastStockUpdate;
+  }
 
   // Update average cost price using weighted average (using landedPrice for true acquisition cost)
   const totalValue = this.purchaseBatches.reduce((sum, batch) => {
