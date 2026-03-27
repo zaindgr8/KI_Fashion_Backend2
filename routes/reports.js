@@ -2048,18 +2048,18 @@ router.get('/cash-in-hand', auth, async (req, res) => {
     const totalExpenseCash = transactions.reduce((s, t) => s + t.expenseCash, 0);
     const totalExpenseBank = transactions.reduce((s, t) => s + t.expenseBank, 0);
 
-    // Sales + Buyer Payments are inflows, Expenses are outflows
+    // Sales + Buyer Payments are inflows (Cash only), Expenses are outflows (Cash only)
     const netCashInHand =
-      (totalSalesCash + totalSalesBank) +
-      (totalLedgerCash + totalLedgerBank) -
-      (totalExpenseCash + totalExpenseBank);
+      (totalSalesCash) +
+      (totalLedgerCash) -
+      (totalExpenseCash);
 
     // Compute running cumulative cash-in-hand per row
     let runningBalance = 0;
     transactions.forEach(t => {
-      if (t.transactionType === 'Sales') runningBalance += (t.salesCash + t.salesBank);
-      if (t.transactionType === 'Ledger') runningBalance += (t.ledgerCash + t.ledgerBank);
-      if (t.transactionType === 'Expense') runningBalance -= (t.expenseCash + t.expenseBank);
+      if (t.transactionType === 'Sales') runningBalance += t.salesCash;
+      if (t.transactionType === 'Ledger') runningBalance += t.ledgerCash;
+      if (t.transactionType === 'Expense') runningBalance -= t.expenseCash;
       t.totalCashInHand = runningBalance;
     });
 
