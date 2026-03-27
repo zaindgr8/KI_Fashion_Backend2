@@ -78,7 +78,13 @@ const productSchema = Joi.object({
   barcode: Joi.string().optional(),
   taxRate: Joi.number().min(0).max(100).default(0),
   size: Joi.string().allow('', null).optional(),
-  color: Joi.string().allow('', null).optional()
+  color: Joi.string().allow('', null).optional(),
+  useVariantTracking: Joi.boolean().optional(),
+  variantTracking: Joi.object({
+    enabled: Joi.boolean().optional(),
+    availableColors: Joi.array().items(Joi.string()).optional(),
+    availableSizes: Joi.array().items(Joi.string()).optional()
+  }).optional()
 });
 
 const PRODUCT_QR_OPTIONS = {
