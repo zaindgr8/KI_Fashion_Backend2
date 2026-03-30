@@ -6,7 +6,9 @@ const User = require('../models/User');
 const auth = require('../middleware/auth');
 const Supplier = require('../models/Supplier');
 const Buyer = require('../models/Buyer');
+const crypto = require('crypto');
 const PasswordResetRequest = require('../models/PasswordResetRequest');
+// const { sendPasswordResetEmail } = require('../utils/emailService');
 
 const router = express.Router();
 
@@ -73,7 +75,12 @@ const loginSchema = Joi.object({
 
 const forgotPasswordSchema = Joi.object({
   email: Joi.string().email().required(),
-  portalSource: Joi.string().valid('supplier-portal', 'distributor-portal', 'app-supplier').required()
+  portalSource: Joi.string().valid('admin-portal', 'supplier-portal', 'distributor-portal', 'app-supplier').required()
+});
+
+const resetPasswordSchema = Joi.object({
+  email: Joi.string().email().required(),
+  password: Joi.string().min(6).required()
 });
 
 // Register
@@ -295,6 +302,7 @@ router.post('/login', async (req, res) => {
 });
 
 // Forgot password - Create reset request
+// Forgot password - Check user existence for direct reset
 router.post('/forgot-password', async (req, res) => {
   try {
     const { error } = forgotPasswordSchema.validate(req.body);
@@ -305,47 +313,16 @@ router.post('/forgot-password', async (req, res) => {
       });
     }
 
-    const { email, portalSource } = req.body;
+    const { email } = req.body;
 
     // Check if user exists and is active
     const user = await User.findOne({ email: email.toLowerCase(), isActive: true });
     
-    // Don't reveal if email exists (security best practice)
-    // Always return success message to prevent email enumeration
-    if (!user) {
-      return res.json({
-        success: true,
-        message: 'If an account with that email exists, a password reset request has been created.'
-      });
-    }
-
-    // Check for existing pending request
-    const existingRequest = await PasswordResetRequest.findOne({
-      email: email.toLowerCase(),
-      status: 'pending'
-    });
-
-    if (existingRequest) {
-      // Request already exists, return success without creating duplicate
-      return res.json({
-        success: true,
-        message: 'If an account with that email exists, a password reset request has been created.'
-      });
-    }
-
-    // Create new password reset request
-    const resetRequest = new PasswordResetRequest({
-      userId: user._id,
-      email: email.toLowerCase(),
-      portalSource,
-      status: 'pending'
-    });
-
-    await resetRequest.save();
-
+    // We return success regardless to prevent enumeration, 
+    // but the frontend will know to proceed to reset page
     res.json({
       success: true,
-      message: 'If an account with that email exists, a password reset request has been created.'
+      message: 'User identified. Proceed to reset password.'
     });
 
   } catch (error) {
@@ -353,6 +330,51 @@ router.post('/forgot-password', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error during password reset request'
+    });
+  }
+});
+
+// Reset password - Complete reset using email directly (Insecure)
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { error } = resetPasswordSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({
+        success: false,
+        message: error.details[0].message
+      });
+    }
+
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email: email.toLowerCase(), isActive: true });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    // Update password
+    user.password = password;
+    await user.save();
+
+    // Mark any existing requests for this email as completed
+    await PasswordResetRequest.updateMany(
+      { email: email.toLowerCase(), status: 'pending' },
+      { status: 'completed', completedAt: new Date() }
+    );
+
+    res.json({
+      success: true,
+      message: 'Password reset successfully. You can now login with your new password.'
+    });
+
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error during password reset'
     });
   }
 });

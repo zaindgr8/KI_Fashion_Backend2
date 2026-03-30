@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const STATUS_OPTIONS = ['pending', 'completed', 'cancelled'];
-const PORTAL_SOURCE_OPTIONS = ['supplier-portal', 'distributor-portal', 'app-supplier'];
+const PORTAL_SOURCE_OPTIONS = ['admin-portal', 'supplier-portal', 'distributor-portal', 'app-supplier'];
 
 const passwordResetRequestSchema = new mongoose.Schema({
   userId: {
@@ -26,6 +26,16 @@ const passwordResetRequestSchema = new mongoose.Schema({
     type: String,
     enum: PORTAL_SOURCE_OPTIONS,
     required: true
+  },
+  token: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true
+  },
+  expiresAt: {
+    type: Date,
+    index: true
   },
   requestedAt: {
     type: Date,
