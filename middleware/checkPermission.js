@@ -12,6 +12,12 @@ const checkPermission = (requiredPermission) => {
       return next();
     }
 
+    // Allow employee to have certain permissions by default for now
+    const employeeAllowedPermissions = ['sales', 'buying', 'stock', 'expenses', 'reports'];
+    if (req.user.role === 'employee' && employeeAllowedPermissions.includes(requiredPermission)) {
+      return next();
+    }
+
     // Check if user has the specific permission
     const hasPermission = req.user.permissions && req.user.permissions.includes(requiredPermission);
 
