@@ -250,7 +250,7 @@ async function getDailyBreakdown(startDate, endDate) {
     const openingBalance = prevSummary.closingBalance;
 
     dailyData.push({
-      date: currentDate.toISOString().split('T')[0],
+      date: currentDate.toLocaleDateString('en-CA'),
       openingBalance,
       cashIn: summary.cashIn,
       cashOut: summary.cashOut,
