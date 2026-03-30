@@ -3,6 +3,8 @@ const Joi = require('joi');
 const Expense = require('../models/Expense');
 const CostType = require('../models/CostType');
 const auth = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
+
 
 const router = express.Router();
 
@@ -47,7 +49,8 @@ const generateExpenseNumber = async () => {
 };
 
 // Create expense
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkPermission('expenses'), async (req, res) => {
+
   try {
     const { error } = expenseSchema.validate(req.body);
     if (error) {
@@ -117,7 +120,8 @@ router.post('/', auth, async (req, res) => {
 });
 
 // Get all expenses
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkPermission('expenses'), async (req, res) => {
+
   try {
     const {
       page = 1,
@@ -197,7 +201,8 @@ router.get('/', auth, async (req, res) => {
 });
 
 // Get expense by ID
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, checkPermission('expenses'), async (req, res) => {
+
   try {
     const expense = await Expense.findById(req.params.id)
       .populate('costType', 'id name category description')
@@ -226,7 +231,8 @@ router.get('/:id', auth, async (req, res) => {
 });
 
 // Update expense
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth, checkPermission('expenses'), async (req, res) => {
+
   try {
     const { error } = expenseSchema.validate(req.body);
     if (error) {
@@ -289,7 +295,8 @@ router.put('/:id', auth, async (req, res) => {
 });
 
 // Delete expense
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, checkPermission('expenses'), async (req, res) => {
+
   try {
     const expense = await Expense.findByIdAndDelete(req.params.id);
 

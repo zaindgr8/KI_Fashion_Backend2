@@ -25,7 +25,7 @@ const registerSchema = Joi.object({
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
-permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery')).optional(),
+permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery', 'dashboard', 'dispatch_orders', 'stock', 'buying', 'selling', 'buyer_ledger', 'supplier_ledger', 'logistics', 'cost_config', 'campaigns', 'approvals', 'setup')).optional(),
   portalAccess: Joi.array().items(Joi.string().valid(...PORTAL_ACCESS_OPTIONS)).optional(),
   supplierId: Joi.string().length(24).hex().optional(),
   buyerId: Joi.string().length(24).hex().optional(),

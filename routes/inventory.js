@@ -4,7 +4,9 @@ const Inventory = require('../models/Inventory');
 const Product = require('../models/Product');
 const Buyer = require('../models/Buyer');
 const auth = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
 const { generateSignedUrls } = require('../utils/imageUpload');
+
 const { generateCatalogQR } = require('../utils/qrCode');
 const { sendResponse } = require('../utils/helpers');
 
@@ -83,7 +85,8 @@ async function convertInventoryProductImages(inventoryItems, usePublicUrls = fal
 }
 
 // Get all inventory
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const {
       page = 1,
@@ -252,7 +255,8 @@ router.get('/', auth, async (req, res) => {
 });
 
 // Get inventory by product ID
-router.get('/product/:productId', auth, async (req, res) => {
+router.get('/product/:productId', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const inventory = await Inventory.findOne({ product: req.params.productId })
       .populate('product', 'name sku category brand unit pricing images')
@@ -288,7 +292,8 @@ router.get('/product/:productId', auth, async (req, res) => {
 });
 
 // Add stock
-router.post('/add-stock', auth, async (req, res) => {
+router.post('/add-stock', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const { error } = stockAdjustmentSchema.validate(req.body);
     if (error) {
@@ -336,7 +341,8 @@ router.post('/add-stock', auth, async (req, res) => {
 });
 
 // Reduce stock
-router.post('/reduce-stock', auth, async (req, res) => {
+router.post('/reduce-stock', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const { error } = stockAdjustmentSchema.validate(req.body);
     if (error) {
@@ -384,7 +390,8 @@ router.post('/reduce-stock', auth, async (req, res) => {
 });
 
 // Adjust stock
-router.post('/adjust-stock', auth, async (req, res) => {
+router.post('/adjust-stock', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const adjustSchema = Joi.object({
       product: Joi.string().required(),
@@ -432,7 +439,8 @@ router.post('/adjust-stock', auth, async (req, res) => {
 });
 
 // Transfer stock between products (if applicable)
-router.post('/transfer-stock', auth, async (req, res) => {
+router.post('/transfer-stock', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const { error } = stockTransferSchema.validate(req.body);
     if (error) {
@@ -498,7 +506,8 @@ router.post('/transfer-stock', auth, async (req, res) => {
 });
 
 // Get stock movements for a product
-router.get('/movements/:productId', auth, async (req, res) => {
+router.get('/movements/:productId', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const { page = 1, limit = 50, type, startDate, endDate } = req.query;
 
@@ -562,7 +571,8 @@ router.get('/movements/:productId', auth, async (req, res) => {
 });
 
 // Get low stock report
-router.get('/reports/low-stock', auth, async (req, res) => {
+router.get('/reports/low-stock', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const lowStockItems = await Inventory.aggregate([
       {
@@ -615,7 +625,8 @@ router.get('/reports/low-stock', auth, async (req, res) => {
 });
 
 // Get inventory valuation report
-router.get('/reports/valuation', auth, async (req, res) => {
+router.get('/reports/valuation', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const valuation = await Inventory.aggregate([
       {
@@ -694,7 +705,8 @@ router.get('/reports/valuation', auth, async (req, res) => {
 });
 
 // Update inventory settings
-router.put('/:inventoryId/settings', auth, async (req, res) => {
+router.put('/:inventoryId/settings', auth, checkPermission('inventory'), async (req, res) => {
+
   try {
     const settingsSchema = Joi.object({
       minStockLevel: Joi.number().min(0).optional(),

@@ -5,7 +5,9 @@ const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
 const QRCode = require('qrcode');
 const auth = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
 const { validateImageFile, uploadImage, deleteImage, generateSignedUrls } = require('../utils/imageUpload');
+
 const { initializeGCS } = require('../config/gcs');
 const { getProductMinSellingPrice, getEffectivePacketSellingPrice, toMoney } = require('../utils/websitePricing');
 const { loadActiveCampaigns, getProductCampaignPricing } = require('../services/CampaignPricingService');
@@ -469,7 +471,8 @@ async function aggregateProductsBySKU(baseQuery, options = {}) {
 }
 
 // Create product
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkPermission('products'), async (req, res) => {
+
   try {
     const { error } = productSchema.validate(req.body);
     if (error) {
@@ -706,7 +709,8 @@ router.get('/deduplicated/public', async (req, res) => {
 
 // Get deduplicated authenticated products (with pricing and packet info)
 // Returns products aggregated by SKU with average pricing and all packet options
-router.get('/deduplicated/authenticated', auth, async (req, res) => {
+router.get('/deduplicated/authenticated', auth, checkPermission('products'), async (req, res) => {
+
   try {
     const {
       page = 1,
@@ -766,7 +770,8 @@ router.get('/deduplicated/authenticated', auth, async (req, res) => {
 });
 
 // Get all products
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkPermission('products'), async (req, res) => {
+
   try {
     const {
       page = 1,

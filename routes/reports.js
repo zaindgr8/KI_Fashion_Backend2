@@ -8,11 +8,14 @@ const Supplier = require('../models/Supplier');
 const Buyer = require('../models/Buyer');
 const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
+
 
 const router = express.Router();
 
 // Sales Report
-router.get('/sales', auth, async (req, res) => {
+router.get('/sales', auth, checkPermission('reports'), async (req, res) => {
+
   try {
     const { startDate, endDate, groupBy = 'day', saleType, buyer } = req.query;
 
@@ -133,7 +136,8 @@ router.get('/sales', auth, async (req, res) => {
 });
 
 // Purchase Report
-router.get('/purchases', auth, async (req, res) => {
+router.get('/purchases', auth, checkPermission('reports'), async (req, res) => {
+
   try {
     const { startDate, endDate, supplier, deliveryStatus } = req.query;
 
@@ -239,7 +243,8 @@ router.get('/purchases', auth, async (req, res) => {
 });
 
 // Financial Report
-router.get('/financial', auth, async (req, res) => {
+router.get('/financial', auth, checkPermission('reports'), async (req, res) => {
+
   try {
     const { startDate, endDate } = req.query;
 
@@ -387,7 +392,8 @@ router.get('/financial', auth, async (req, res) => {
 });
 
 // Inventory Report
-router.get('/inventory', auth, async (req, res) => {
+router.get('/inventory', auth, checkPermission('reports'), async (req, res) => {
+
   try {
     // Current stock levels
     const stockLevels = await Inventory.aggregate([
@@ -524,7 +530,8 @@ router.get('/inventory', auth, async (req, res) => {
 });
 
 // Supplier Performance Report
-router.get('/suppliers', auth, async (req, res) => {
+router.get('/suppliers', auth, checkPermission('reports'), async (req, res) => {
+
   try {
     const { startDate, endDate } = req.query;
 
@@ -610,7 +617,8 @@ router.get('/suppliers', auth, async (req, res) => {
 });
 
 // Customer Analysis Report
-router.get('/customers', auth, async (req, res) => {
+router.get('/customers', auth, checkPermission('reports'), async (req, res) => {
+
   try {
     const { startDate, endDate } = req.query;
 
@@ -719,7 +727,8 @@ router.get('/customers', auth, async (req, res) => {
 });
 
 // Dashboard Summary
-router.get('/dashboard', auth, async (req, res) => {
+router.get('/dashboard', auth, checkPermission('reports'), async (req, res) => {
+
   try {
     const today = new Date();
     const startOfWeek = new Date(today.getFullYear(), today.getMonth(), today.getDate() - today.getDay());

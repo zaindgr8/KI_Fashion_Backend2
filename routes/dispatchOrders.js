@@ -11,7 +11,9 @@ const Product = require('../models/Product');
 const Inventory = require('../models/Inventory');
 const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
 const { sendResponse } = require('../utils/helpers');
+
 const { generateDispatchOrderQR, buildDispatchOrderQrPayload } = require('../utils/qrCode');
 const { validateImageFile, uploadImage, generateSignedUrl, generateSignedUrls, generateSignedUploadUrl, verifyFileExists, deleteImage } = require('../utils/imageUpload');
 const BalanceService = require('../services/BalanceService');
@@ -520,7 +522,8 @@ const manualEntrySchema = Joi.object({
 });
 
 // Create dispatch order (Suppliers only)
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkPermission('dispatch_orders'), async (req, res) => {
+
   try {
     if (req.user.role !== 'supplier') {
       return sendResponse.error(res, 'Only suppliers can create dispatch orders', 403);

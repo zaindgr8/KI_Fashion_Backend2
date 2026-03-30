@@ -44,8 +44,8 @@ const updateUserSchema = Joi.object({
   isActive: Joi.boolean().optional()
 });
 
-// Create user (super-admin only)
-router.post('/', auth, requireSuperAdmin, async (req, res) => {
+// Create user (admin or super-admin)
+router.post('/', auth, requireAdmin, async (req, res) => {
   try {
     const { error } = userSchema.validate(req.body, { allowUnknown: true });
     if (error) {
@@ -55,7 +55,8 @@ router.post('/', auth, requireSuperAdmin, async (req, res) => {
     const { name, email, password, role, phone, phoneAreaCode, address, permissions } = req.body;
 
     // Only super-admin can create super-admin or admin accounts
-    if ((role === 'super-admin' || role === 'admin') && req.user.role !== 'super-admin') {
+    const targetRole = role || 'employee';
+    if ((targetRole === 'super-admin' || targetRole === 'admin') && req.user.role !== 'super-admin') {
       return res.status(403).json({ success: false, message: 'Only super-admin can create admin accounts' });
     }
 
@@ -68,7 +69,7 @@ router.post('/', auth, requireSuperAdmin, async (req, res) => {
       name,
       email,
       password,
-      role: role || 'employee',
+      role: targetRole,
       phone,
       phoneAreaCode,
       address,
@@ -189,13 +190,17 @@ router.put('/:id', auth, requireAdmin, async (req, res) => {
       return res.status(400).json({ success: false, message: error.details[0].message });
     }
 
-    // Only super-admin can change roles
-    if (req.body.role && req.user.role !== 'super-admin') {
-      return res.status(403).json({ success: false, message: 'Only super-admin can change user roles' });
+    // Only super-admin can change roles to admin or super-admin
+    const newRole = req.body.role;
+    if (newRole && (newRole === 'super-admin' || newRole === 'admin') && req.user.role !== 'super-admin') {
+      return res.status(403).json({ success: false, message: 'Only super-admin can assign admin roles' });
     }
 
     const allowedFields = ['name', 'email', 'phone', 'phoneAreaCode', 'address', 'permissions', 'isActive'];
-    if (req.user.role === 'super-admin') allowedFields.push('role');
+    if (req.user.role === 'super-admin' || (newRole && newRole !== 'admin' && newRole !== 'super-admin')) {
+      allowedFields.push('role');
+    }
+
     const updates = {};
     for (const key of allowedFields) {
       if (req.body[key] !== undefined) updates[key] = req.body[key];

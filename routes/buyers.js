@@ -3,7 +3,9 @@ const Joi = require('joi');
 const Buyer = require('../models/Buyer');
 const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
 const BalanceService = require('../services/BalanceService');
+
 
 const router = express.Router();
 
@@ -32,7 +34,8 @@ const buyerSchema = Joi.object({
 });
 
 // Create buyer
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkPermission('buyers'), async (req, res) => {
+
   try {
     const { error } = buyerSchema.validate(req.body);
     if (error) {
@@ -65,7 +68,8 @@ router.post('/', auth, async (req, res) => {
 });
 
 // Get all buyers
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkPermission('buyers'), async (req, res) => {
+
   try {
     const Ledger = require('../models/Ledger');
     const { page = 1, limit = 10, search, customerType, paymentTerms, isActive } = req.query;
@@ -143,7 +147,8 @@ router.get('/', auth, async (req, res) => {
 });
 
 // Get buyer by ID
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, checkPermission('buyers'), async (req, res) => {
+
   try {
     const Ledger = require('../models/Ledger');
     const buyer = await Buyer.findById(req.params.id)
@@ -204,7 +209,8 @@ router.get('/:id', auth, async (req, res) => {
 });
 
 // Update buyer
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth, checkPermission('buyers'), async (req, res) => {
+
   try {
     const { error } = buyerSchema.validate(req.body);
     if (error) {
@@ -292,7 +298,8 @@ router.patch('/:id/balance', auth, async (req, res) => {
 });
 
 // Delete buyer
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, checkPermission('buyers'), async (req, res) => {
+
   try {
     const buyer = await Buyer.findByIdAndUpdate(
       req.params.id,

@@ -13,7 +13,9 @@ const User = require('../models/User');
 const PacketStock = require('../models/PacketStock');
 const LogisticsCompany = require('../models/LogisticsCompany');
 const auth = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
 const { generateSaleQR } = require('../utils/qrCode');
+
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
 const { sendInvoiceEmails } = require('../utils/emailService');
 const { generateSignedUrls } = require('../utils/imageUpload');
@@ -364,7 +366,8 @@ const processDeliveryWithTransaction = async (sale, productMap, inventoryMap, us
  * @desc    Lookup packet by barcode for adding to sale cart
  * @access  Private
  */
-router.post('/lookup-barcode', auth, async (req, res) => {
+router.post('/lookup-barcode', auth, checkPermission('sales'), async (req, res) => {
+
   try {
     const { barcode } = req.body;
 
@@ -463,7 +466,8 @@ router.post('/lookup-barcode', auth, async (req, res) => {
 });
 
 // Create sale
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkPermission('sales'), async (req, res) => {
+
   try {
     // Auto-detect buyer ID for distributors BEFORE validation
     if (!req.body.buyer && !req.body.manualCustomer) {

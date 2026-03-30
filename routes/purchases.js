@@ -6,7 +6,9 @@ const Supplier = require('../models/Supplier');
 const Product = require('../models/Product');
 const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
 const { generateSignedUrl, generateSignedUrls, generateSignedUrlsBatch } = require('../utils/imageUpload');
+
 
 const router = express.Router();
 
@@ -160,7 +162,8 @@ const calculateTotals = (items, totalDiscount = 0, shippingCost = 0) => {
 };
 
 // Create purchase (uses DispatchOrder manual entry internally)
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkPermission('purchases'), async (req, res) => {
+
   try {
     // Reuse the manual entry logic from dispatchOrders route
     // Import the manual entry handler or call it directly
@@ -427,7 +430,8 @@ function transformDispatchOrderToPurchase(dispatchOrder) {
 }
 
 // Get all purchases (manual entries and confirmed dispatch orders) - OPTIMIZED
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkPermission('purchases'), async (req, res) => {
+
   try {
     const {
       page = 1,

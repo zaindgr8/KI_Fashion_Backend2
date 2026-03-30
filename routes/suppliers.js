@@ -4,6 +4,8 @@ const Supplier = require('../models/Supplier');
 const User = require('../models/User');
 const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
+const checkPermission = require('../middleware/checkPermission');
+
 const BalanceService = require('../services/BalanceService');
 const SupplierDeletionService = require('../services/SupplierDeletionService');
 
@@ -44,7 +46,8 @@ function requireSuperAdmin(req, res) {
 }
 
 // Create supplier
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, checkPermission('suppliers'), async (req, res) => {
+
   try {
     const { error } = supplierSchema.validate(req.body);
     if (error) {
@@ -88,7 +91,8 @@ router.post('/', auth, async (req, res) => {
 });
 
 // Get all suppliers
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, checkPermission('suppliers'), async (req, res) => {
+
   try {
     const { page = 1, limit = 10, search, paymentTerms, isActive, hasUser } = req.query;
 
@@ -189,7 +193,8 @@ router.get('/', auth, async (req, res) => {
 });
 
 // Get supplier by ID
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, checkPermission('suppliers'), async (req, res) => {
+
   try {
     const supplier = await Supplier.findById(req.params.id)
       .populate('createdBy', 'name');
@@ -238,7 +243,8 @@ router.get('/:id/delete-summary', auth, async (req, res) => {
 });
 
 // Update supplier
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth, checkPermission('suppliers'), async (req, res) => {
+
   try {
     // Use a more flexible schema for updates (all fields optional)
     const updateSupplierSchema = Joi.object({
@@ -372,7 +378,8 @@ router.delete('/:id/hard', auth, async (req, res) => {
 });
 
 // Delete supplier
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, checkPermission('suppliers'), async (req, res) => {
+
   try {
     const supplier = await Supplier.findByIdAndUpdate(
       req.params.id,
