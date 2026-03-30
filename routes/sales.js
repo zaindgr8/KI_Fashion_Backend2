@@ -17,7 +17,7 @@ const checkPermission = require('../middleware/checkPermission');
 const { generateSaleQR } = require('../utils/qrCode');
 
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
-const { sendInvoiceEmails } = require('../utils/emailService');
+
 const { generateSignedUrls } = require('../utils/imageUpload');
 const BalanceService = require('../services/BalanceService');
 const EditRequestService = require('../services/EditRequestService');
@@ -998,13 +998,7 @@ router.post('/', auth, checkPermission('sales'), async (req, res) => {
 
         // Send emails if we have at least one recipient
         if (distributorEmail || adminEmail) {
-          const emailResults = await sendInvoiceEmails(
-            populatedSale,
-            invoicePath,
-            distributorEmail,
-            adminEmail
-          );
-
+          // Email functionality removed
         } else {
           console.warn('No email addresses found for invoice delivery');
         }

@@ -13,7 +13,7 @@ const Settings = require('../models/Settings');
 const auth = require('../middleware/auth');
 const { generateSaleQR } = require('../utils/qrCode');
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
-const { sendInvoiceEmails } = require('../utils/emailService');
+
 const { getProductMinSellingPrice, getEffectivePacketSellingPrice } = require('../utils/websitePricing');
 const { loadActiveCampaigns, getProductCampaignPricing } = require('../services/CampaignPricingService');
 
@@ -781,9 +781,6 @@ async function handleSuccessfulPayment(session) {
       console.error('Error generating QR code:', qrError);
     }
 
-    // Generate invoice and send emails (async)
-    generateInvoiceAndSendEmail(sale, userId);
-
      
   } catch (error) {
     console.error('Error handling successful payment:', error);
@@ -862,6 +859,8 @@ async function handleRefund(charge) {
  * Generate invoice PDF and send email (async helper)
  */
 async function generateInvoiceAndSendEmail(sale, userId) {
+  // Email and Invoice PDF generation disabled as per user request to remove email service
+  /*
   const fs = require('fs');
   const path = require('path');
 
@@ -895,11 +894,11 @@ async function generateInvoiceAndSendEmail(sale, userId) {
 
     if (distributorEmail || adminEmail) {
       await sendInvoiceEmails(sale, invoicePath, distributorEmail, adminEmail);
-       
     }
   } catch (error) {
     console.error('Error generating invoice/sending email:', error);
   }
+  */
 }
 
 /**
