@@ -77,7 +77,7 @@ const userSchema = new mongoose.Schema({
   },
   permissions: [{
     type: String,
-    enum: ['users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery']
+    enum: ['users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery', 'dashboard', 'dispatch_orders', 'stock', 'buying', 'selling', 'buyer_ledger', 'supplier_ledger', 'logistics', 'cost_config', 'campaigns', 'approvals', 'setup']
   }]
 }, {
   timestamps: true

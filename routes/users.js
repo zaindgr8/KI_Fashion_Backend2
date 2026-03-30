@@ -29,7 +29,7 @@ const userSchema = Joi.object({
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
-  permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery')).optional(),
+  permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery', 'dashboard', 'dispatch_orders', 'stock', 'buying', 'selling', 'buyer_ledger', 'supplier_ledger', 'logistics', 'cost_config', 'campaigns', 'approvals', 'setup')).optional(),
   isActive: Joi.boolean().default(true)
 });
 
@@ -40,7 +40,7 @@ const updateUserSchema = Joi.object({
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
-  permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery')).optional(),
+  permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery', 'dashboard', 'dispatch_orders', 'stock', 'buying', 'selling', 'buyer_ledger', 'supplier_ledger', 'logistics', 'cost_config', 'campaigns', 'approvals', 'setup')).optional(),
   isActive: Joi.boolean().optional()
 });
 

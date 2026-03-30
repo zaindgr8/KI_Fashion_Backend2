@@ -17,7 +17,19 @@ const PERMISSIONS = {
   INVENTORY: 'inventory',
   REPORTS: 'reports',
   EXPENSES: 'expenses',
-  DELIVERY: 'delivery'
+  DELIVERY: 'delivery',
+  DASHBOARD: 'dashboard',
+  DISPATCH_ORDERS: 'dispatch_orders',
+  STOCK: 'stock',
+  BUYING: 'buying',
+  SELLING: 'selling',
+  BUYER_LEDGER: 'buyer_ledger',
+  SUPPLIER_LEDGER: 'supplier_ledger',
+  LOGISTICS: 'logistics',
+  COST_CONFIG: 'cost_config',
+  CAMPAIGNS: 'campaigns',
+  APPROVALS: 'approvals',
+  SETUP: 'setup'
 };
 
 const PAYMENT_TERMS = {
