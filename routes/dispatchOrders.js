@@ -12,6 +12,7 @@ const Inventory = require('../models/Inventory');
 const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
+const dateControl = require('../middleware/dateControl');
 const { sendResponse } = require('../utils/helpers');
 const { logActivity } = require('../utils/auditLogger');
 
@@ -523,7 +524,7 @@ const manualEntrySchema = Joi.object({
 });
 
 // Create dispatch order (Suppliers only)
-router.post('/', auth, checkPermission('dispatch_orders'), async (req, res) => {
+router.post('/', auth, checkPermission('dispatch_orders'), dateControl({ entityType: 'dispatch-order', dateField: 'date', requestType: 'create' }), async (req, res) => {
 
   try {
     if (req.user.role !== 'supplier') {
@@ -714,7 +715,7 @@ router.post('/', auth, checkPermission('dispatch_orders'), async (req, res) => {
 });
 
 // Create manual entry (CRM Admin only - replaces Purchase)
-router.post('/manual', auth, async (req, res) => {
+router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateField: 'purchaseDate', requestType: 'create' }), async (req, res) => {
   // Helper to normalize size/color arrays - handles strings, comma-separated strings, and arrays
   const normalizeToArray = (value) => {
     if (!value) return [];
@@ -1956,12 +1957,12 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
   }
 });
 
-// Confirm dispatch order (Super-admin only)
-router.post('/:id/confirm', auth, async (req, res) => {
+// Confirm dispatch order (Super-admin/Admin)
+router.post('/:id/confirm', auth, dateControl({ entityType: 'dispatch-order', dateField: 'dispatchDate', requestType: 'update' }), async (req, res) => {
   try {
-    // Only super-admin can confirm dispatch orders
-    if (req.user.role !== 'super-admin') {
-      return sendResponse.error(res, 'Only super-admin can confirm dispatch orders', 403);
+    // Only super-admin or admin can confirm dispatch orders
+    if (req.user.role !== 'super-admin' && req.user.role !== 'admin') {
+      return sendResponse.error(res, 'Only super-admin or admin can confirm dispatch orders', 403);
     }
 
     const {

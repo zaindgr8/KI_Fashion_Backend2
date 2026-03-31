@@ -14,6 +14,7 @@ const PacketStock = require('../models/PacketStock');
 const LogisticsCompany = require('../models/LogisticsCompany');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
+const dateControl = require('../middleware/dateControl');
 const { generateSaleQR } = require('../utils/qrCode');
 const { logActivity } = require('../utils/auditLogger');
 
@@ -467,7 +468,7 @@ router.post('/lookup-barcode', auth, checkPermission('sales'), async (req, res) 
 });
 
 // Create sale
-router.post('/', auth, checkPermission('sales'), async (req, res) => {
+router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale', dateField: 'saleDate', requestType: 'create' }), async (req, res) => {
 
   try {
     // Auto-detect buyer ID for distributors BEFORE validation

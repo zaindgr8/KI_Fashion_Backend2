@@ -11,6 +11,7 @@ const { sendResponse } = require('../utils/helpers');
 const BalanceService = require('../services/BalanceService');
 const PacketReturnService = require('../services/PacketReturnService');
 const { logActivity } = require('../utils/auditLogger');
+const dateControl = require('../middleware/dateControl');
 
 const router = express.Router();
 
@@ -490,7 +491,7 @@ router.get('/packet-stocks-for-return', auth, async (req, res) => {
 // Create a packet-level supplier return (returns full packets or loose items)
 // Updates both PacketStock AND Inventory
 // [IMPROVED] Now uses MongoDB transaction for atomic operations
-router.post('/packet-return', auth, async (req, res) => {
+router.post('/packet-return', auth, dateControl('returnDate'), async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -688,7 +689,7 @@ router.post('/packet-return', auth, async (req, res) => {
         reason: reason
       }],
       totalReturnValue: returnValue,
-      returnedAt: new Date(),
+      returnedAt: req.body.returnDate || new Date(),
       returnedBy: req.user._id,
       notes: `${notes}${breakResult ? ` | Packet broken, remaining items moved to loose stock` : ''}`
     });
@@ -777,7 +778,7 @@ router.post('/packet-return', auth, async (req, res) => {
 // Create product-level supplier return (batch-aware)
 // Uses specific batch data for accurate cost tracking and FIFO inventory management
 // [ENHANCED] Now includes packet stock adjustments for proper sync between Inventory and PacketStock
-router.post('/product-return', auth, async (req, res) => {
+router.post('/product-return', auth, dateControl('returnDate'), async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 

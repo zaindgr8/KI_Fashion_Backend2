@@ -13,6 +13,7 @@ const { sendResponse } = require('../utils/helpers');
 const { generateSignedUrls } = require('../utils/imageUpload');
 const { generatePacketBarcode } = require('../utils/barcodeGenerator');
 const { logActivity } = require('../utils/auditLogger');
+const dateControl = require('../middleware/dateControl');
 
 const router = express.Router();
 
@@ -56,7 +57,8 @@ const saleReturnItemSchema = Joi.object({
 const saleReturnSchema = Joi.object({
   sale: Joi.string().required(),
   items: Joi.array().items(saleReturnItemSchema).min(1).required(),
-  notes: Joi.string().allow('', null).optional()
+  notes: Joi.string().allow('', null).optional(),
+  returnDate: Joi.date().iso().optional()
 });
 
 function normalizeReturnedQtyInItems(returnItem, saleItem) {
@@ -288,7 +290,7 @@ async function convertSaleReturnImages(saleReturns) {
 
 // Create sale return
 // [IMPROVED] Uses MongoDB transaction for atomic over-return prevention
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, dateControl('returnDate'), async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -475,6 +477,7 @@ router.post('/', auth, async (req, res) => {
       items: value.items,
       totalReturnValue,
       status,
+      returnedAt: value.returnDate || new Date(),
       returnedBy: req.user._id,
       processedBy: isAdmin ? req.user._id : undefined,
       processedAt: isAdmin ? new Date() : undefined,
@@ -760,7 +763,7 @@ async function processSaleReturn(returnId, userId) {
       referenceModel: 'SaleReturn',
       debit: 0,
       credit: saleReturn.totalReturnValue,
-      date: new Date(),
+      date: saleReturn.returnedAt || new Date(),
       description: `Sale Return from Sale ${saleReturn.sale.saleNumber}`,
       createdBy: userId
     }, session);

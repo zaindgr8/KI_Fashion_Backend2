@@ -7,6 +7,7 @@ const Sale = require('../models/Sale');
 const auth = require('../middleware/auth');
 const BalanceService = require('../services/BalanceService');
 const { logActivity } = require('../utils/auditLogger');
+const dateControl = require('../middleware/dateControl');
 
 const router = express.Router();
 
@@ -26,7 +27,7 @@ const router = express.Router();
  *   description: string (optional)
  * }
  */
-router.post('/customer', auth, async (req, res) => {
+router.post('/customer', auth, dateControl({ entityType: 'payment', dateField: 'date', requestType: 'create' }), async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction({
     readConcern: { level: 'snapshot' },

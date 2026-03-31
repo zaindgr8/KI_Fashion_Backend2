@@ -5,6 +5,7 @@ const CostType = require('../models/CostType');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { logActivity } = require('../utils/auditLogger');
+const dateControl = require('../middleware/dateControl');
 
 
 const router = express.Router();
@@ -50,7 +51,7 @@ const generateExpenseNumber = async () => {
 };
 
 // Create expense
-router.post('/', auth, checkPermission('expenses'), async (req, res) => {
+router.post('/', auth, checkPermission('expenses'), dateControl({ entityType: 'expense', dateField: 'expenseDate', requestType: 'create' }), async (req, res) => {
 
   try {
     const { error } = expenseSchema.validate(req.body);

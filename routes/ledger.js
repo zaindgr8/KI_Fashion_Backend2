@@ -11,6 +11,7 @@ const LogisticsCompany = require("../models/LogisticsCompany");
 const auth = require("../middleware/auth");
 const BalanceService = require("../services/BalanceService");
 const { logActivity } = require("../utils/auditLogger");
+const dateControl = require("../middleware/dateControl");
 
 const router = express.Router()
 
@@ -599,7 +600,7 @@ router.get("/buyers", auth, async (req, res) => {
   }
 });
 
-router.post("/entry", auth, async (req, res) => {
+router.post("/entry", auth, dateControl({ entityType: 'ledger', dateField: 'date', requestType: 'create' }), async (req, res) => {
   try {
     const entryData = {
       ...req.body,
@@ -1529,7 +1530,7 @@ router.get("/logistics", auth, async (req, res) => {
  * POST /ledger/supplier/:id/distribute-payment
  * Distribute a bulk payment across pending orders for a supplier (FIFO)
  */
-router.post("/supplier/:id/distribute-payment", auth, async (req, res) => {
+router.post("/supplier/:id/distribute-payment", auth, dateControl({ entityType: 'payment', dateField: 'date', requestType: 'create' }), async (req, res) => {
   try {
     const { amount, paymentMethod, date, description } = req.body;
     const parsedAmount = parseFloat(amount);
@@ -1735,7 +1736,7 @@ router.post("/supplier/:id/debit-adjustment", auth, async (req, res) => {
  * POST /ledger/logistics/:id/distribute-payment
  * Distribute a bulk payment across pending charges for a logistics company
  */
-router.post("/logistics/:id/distribute-payment", auth, async (req, res) => {
+router.post("/logistics/:id/distribute-payment", auth, dateControl({ entityType: 'payment', dateField: 'date', requestType: 'create' }), async (req, res) => {
   try {
     const { amount, paymentMethod, date, description } = req.body;
 
@@ -1862,7 +1863,7 @@ router.post("/logistics/:id/debit-adjustment", auth, async (req, res) => {
  * POST /ledger/buyer/:id/distribute-payment
  * Distribute a bulk payment across pending sales for a buyer (FIFO - oldest first)
  */
-router.post("/buyer/:id/distribute-payment", auth, async (req, res) => {
+router.post("/buyer/:id/distribute-payment", auth, dateControl({ entityType: 'payment', dateField: 'date', requestType: 'create' }), async (req, res) => {
   try {
     const { amount, paymentMethod, date, description } = req.body;
 

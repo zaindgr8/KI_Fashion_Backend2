@@ -9,27 +9,27 @@ const editRequestSchema = new mongoose.Schema({
     required: true
   },
 
-  // Entity being edited/deleted
+  // Entity being edited/deleted/created
   entityType: {
     type: String,
-    enum: ['dispatch-order', 'sale', 'payment', 'supplier-payment'],
+    enum: ['dispatch-order', 'sale', 'payment', 'supplier-payment', 'expense', 'return', 'sale-return'],
     required: true
   },
   entityId: {
     type: mongoose.Schema.Types.ObjectId,
-    required: true,
+    required: false, // Optional for 'create'
     refPath: 'entityModel'
   },
   entityModel: {
     type: String,
-    enum: ['DispatchOrder', 'Sale', 'Payment', 'SupplierPaymentReceipt'],
+    enum: ['DispatchOrder', 'Sale', 'Payment', 'SupplierPaymentReceipt', 'Expense', 'Return', 'SaleReturn'],
     required: true
   },
 
   // Request type
   requestType: {
     type: String,
-    enum: ['edit', 'delete'],
+    enum: ['edit', 'delete', 'create'],
     required: true
   },
 
@@ -42,13 +42,13 @@ const editRequestSchema = new mongoose.Schema({
   },
 
   // For edits: { fieldPath: { from: oldValue, to: newValue } }
-  // For deletes: null
+  // For deletes/creates: null
   requestedChanges: {
     type: mongoose.Schema.Types.Mixed,
     default: null
   },
 
-  // The exact payload to pass to the existing mutation endpoint on approval
+  // The exact payload to pass to the existing creation/mutation logic on approval
   rawPayload: {
     type: mongoose.Schema.Types.Mixed,
     default: null
@@ -62,9 +62,10 @@ const editRequestSchema = new mongoose.Schema({
   },
 
   // Full snapshot of entity at request time (for conflict detection)
+  // Null for creation requests
   entitySnapshot: {
     type: mongoose.Schema.Types.Mixed,
-    required: true
+    required: false
   },
 
   // Who submitted the request

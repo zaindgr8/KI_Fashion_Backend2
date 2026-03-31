@@ -8,13 +8,25 @@ const Ledger = require('../models/Ledger');
 const Buyer = require('../models/Buyer');
 const PacketStock = require('../models/PacketStock');
 const Inventory = require('../models/Inventory');
+const Expense = require('../models/Expense');
+const Return = require('../models/Return');
+const SaleReturn = require('../models/SaleReturn');
+const { generateSaleNumber } = require('../utils/sale-number');
+const Supplier = require('../models/Supplier');
+const Product = require('../models/Product');
+const LogisticsCompany = require('../models/LogisticsCompany');
+const { generatePacketBarcode, generateLooseItemBarcode } = require('../utils/barcodeGenerator');
+const { generateDispatchOrderQR } = require('../utils/qrCode');
 
 // Map entityType → Mongoose Model
 const ENTITY_MODELS = {
   'dispatch-order': DispatchOrder,
   'sale': Sale,
   'payment': Payment,
-  'supplier-payment': SupplierPaymentReceipt
+  'supplier-payment': SupplierPaymentReceipt,
+  'expense': Expense,
+  'return': Return,
+  'sale-return': SaleReturn
 };
 
 // Map entityType → entityModel string (for polymorphic ref)
@@ -22,34 +34,40 @@ const ENTITY_MODEL_NAMES = {
   'dispatch-order': 'DispatchOrder',
   'sale': 'Sale',
   'payment': 'Payment',
-  'supplier-payment': 'SupplierPaymentReceipt'
+  'supplier-payment': 'SupplierPaymentReceipt',
+  'expense': 'Expense',
+  'return': 'Return',
+  'sale-return': 'SaleReturn'
 };
 
 class EditRequestService {
 
   /**
-   * Submit a new edit/delete request
+   * Submit a new edit/delete/create request
    */
   static async submitRequest({ entityType, entityId, requestType, requestedChanges, rawPayload, reason, requestedBy, entityRef }) {
     const Model = ENTITY_MODELS[entityType];
     if (!Model) throw new Error(`Unknown entity type: ${entityType}`);
 
-    // Validate entity exists
-    const entity = await Model.findById(entityId).lean();
-    if (!entity) throw new Error(`${entityType} not found`);
+    let entity = null;
+    if (requestType !== 'create') {
+      // Validate entity exists for edit/delete
+      entity = await Model.findById(entityId).lean();
+      if (!entity) throw new Error(`${entityType} not found`);
 
-    // Check for duplicate pending request on same entity (v1: one at a time)
-    const existing = await EditRequest.findOne({
-      entityType,
-      entityId,
-      status: 'pending'
-    });
+      // Check for duplicate pending request on same entity
+      const existing = await EditRequest.findOne({
+        entityType,
+        entityId,
+        status: 'pending'
+      });
 
-    if (existing) {
-      throw Object.assign(
-        new Error('A pending request already exists for this record'),
-        { status: 409, existingRequestNumber: existing.requestNumber }
-      );
+      if (existing) {
+        throw Object.assign(
+          new Error('A pending request already exists for this record'),
+          { status: 409, existingRequestNumber: existing.requestNumber }
+        );
+      }
     }
 
     const requestNumber = await EditRequest.getNextRequestNumber();
@@ -61,11 +79,11 @@ class EditRequestService {
       entityModel: ENTITY_MODEL_NAMES[entityType],
       requestType,
       requestedChanges: requestType === 'edit' ? requestedChanges : null,
-      rawPayload: requestType === 'edit' ? rawPayload : null,
+      rawPayload: (requestType === 'edit' || requestType === 'create') ? rawPayload : null,
       reason,
       entitySnapshot: entity,
       requestedBy,
-      entityRef: entityRef || EditRequestService.getEntityRef(entityType, entity)
+      entityRef: entityRef || (entity ? EditRequestService.getEntityRef(entityType, entity) : 'New Record')
     });
 
     await editRequest.save();
@@ -100,64 +118,70 @@ class EditRequestService {
         return { success: false, message: 'Request not found or already processed' };
       }
 
-      // Conflict check: compare snapshot version with current entity
-      const Model = ENTITY_MODELS[editRequest.entityType];
-      const currentEntity = await Model.findById(editRequest.entityId).session(session).lean();
-
-      if (!currentEntity) {
-        // Entity was deleted since request was submitted
-        await EditRequest.findByIdAndUpdate(requestId, {
-          status: 'rejected',
-          reviewedBy: reviewerId,
-          reviewedAt: new Date(),
-          reviewNote: 'Entity no longer exists'
-        }, { session });
-        await session.commitTransaction();
-        return { success: false, message: 'Entity no longer exists. Request auto-rejected.' };
-      }
-
-      // Version conflict check
-      if (!forceApprove && editRequest.entitySnapshot.__v !== currentEntity.__v) {
-        // Revert to pending so super-admin can decide
-        await EditRequest.findByIdAndUpdate(requestId, {
-          status: 'pending',
-          reviewedBy: undefined,
-          reviewedAt: undefined,
-          reviewNote: undefined
-        }, { session });
-        await session.commitTransaction();
-        return {
-          success: false,
-          conflict: true,
-          message: 'Record was modified after this request was submitted. Review the current state and force-approve or reject.',
-          currentEntity,
-          snapshotEntity: editRequest.entitySnapshot
-        };
-      }
-
       let result;
-      if (editRequest.requestType === 'edit') {
-        result = await EditRequestService.applyEdit(editRequest, currentEntity, reviewerId, session);
+      
+      if (editRequest.requestType === 'create') {
+        // Creation doesn't need conflict check
+        result = await EditRequestService.applyCreate(editRequest, reviewerId, session);
       } else {
-        result = await EditRequestService.applyDelete(editRequest, currentEntity, reviewerId, session);
-      }
+        // Conflict check: compare snapshot version with current entity for edits/deletes
+        const Model = ENTITY_MODELS[editRequest.entityType];
+        const currentEntity = await Model.findById(editRequest.entityId).session(session).lean();
 
-      // Auto-reject any other pending requests on the same entity
-      await EditRequest.updateMany(
-        {
-          entityType: editRequest.entityType,
-          entityId: editRequest.entityId,
-          status: 'pending',
-          _id: { $ne: editRequest._id }
-        },
-        {
-          status: 'rejected',
-          reviewedBy: reviewerId,
-          reviewedAt: new Date(),
-          reviewNote: 'Auto-rejected: another request on this record was approved'
-        },
-        { session }
-      );
+        if (!currentEntity) {
+          // Entity was deleted since request was submitted
+          await EditRequest.findByIdAndUpdate(requestId, {
+            status: 'rejected',
+            reviewedBy: reviewerId,
+            reviewedAt: new Date(),
+            reviewNote: 'Entity no longer exists'
+          }, { session });
+          await session.commitTransaction();
+          return { success: false, message: 'Entity no longer exists. Request auto-rejected.' };
+        }
+
+        // Version conflict check
+        if (!forceApprove && editRequest.entitySnapshot.__v !== currentEntity.__v) {
+          // Revert to pending so super-admin can decide
+          await EditRequest.findByIdAndUpdate(requestId, {
+            status: 'pending',
+            reviewedBy: undefined,
+            reviewedAt: undefined,
+            reviewNote: undefined
+          }, { session });
+          await session.commitTransaction();
+          return {
+            success: false,
+            conflict: true,
+            message: 'Record was modified after this request was submitted. Review the current state and force-approve or reject.',
+            currentEntity,
+            snapshotEntity: editRequest.entitySnapshot
+          };
+        }
+
+        if (editRequest.requestType === 'edit') {
+          result = await EditRequestService.applyEdit(editRequest, currentEntity, reviewerId, session);
+        } else {
+          result = await EditRequestService.applyDelete(editRequest, currentEntity, reviewerId, session);
+        }
+
+        // Auto-reject any other pending requests on the same entity
+        await EditRequest.updateMany(
+          {
+            entityType: editRequest.entityType,
+            entityId: editRequest.entityId,
+            status: 'pending',
+            _id: { $ne: editRequest._id }
+          },
+          {
+            status: 'rejected',
+            reviewedBy: reviewerId,
+            reviewedAt: new Date(),
+            reviewNote: 'Auto-rejected: another request on this record was approved'
+          },
+          { session }
+        );
+      }
 
       await session.commitTransaction();
       return { success: true, data: result, editRequest };
@@ -253,6 +277,313 @@ class EditRequestService {
     return impact;
   }
 
+  /**
+   * Apply a create request — creates the entity and handles side effects
+   */
+  static async applyCreate(editRequest, reviewerId, session) {
+    const { entityType, rawPayload, requestedBy } = editRequest;
+
+    if (entityType === 'sale') {
+      return EditRequestService.applySaleCreate(rawPayload, requestedBy._id || requestedBy, session);
+    } else if (entityType === 'payment') {
+      return EditRequestService.applyPaymentCreate(rawPayload, requestedBy._id || requestedBy, session);
+    } else if (entityType === 'supplier-payment') {
+      return EditRequestService.applySupplierPaymentCreate(rawPayload, requestedBy._id || requestedBy, session);
+    } else if (entityType === 'dispatch-order') {
+      return EditRequestService.applyDispatchOrderCreate(rawPayload, requestedBy._id || requestedBy, session);
+    } else if (entityType === 'expense') {
+      return EditRequestService.applyExpenseCreate(rawPayload, requestedBy._id || requestedBy, session);
+    }
+
+    throw new Error(`Creation not implemented for entity type: ${entityType}`);
+  }
+
+  /**
+   * Sale creation logic — extracted from routes/sales.js
+   */
+  static async applySaleCreate(payload, userId, session) {
+    const { buyer, manualCustomer, items, totalDiscount, shippingCost, cashPayment, bankPayment, saleDate, saleType, notes } = payload;
+
+    // 1. Generate Sale Number
+    const saleNumber = await generateSaleNumber();
+
+    // 2. Calculate Totals
+    let subtotal = 0;
+    let totalTax = 0;
+    const processedItems = items.map(item => {
+      const itemTotal = (item.quantity * item.unitPrice) - (item.discount || 0);
+      const itemTax = itemTotal * ((item.taxRate || 0) / 100);
+      subtotal += itemTotal;
+      totalTax += itemTax;
+      return {
+        ...item,
+        totalPrice: itemTotal + itemTax
+      };
+    });
+
+    const grandTotal = Math.max(0, subtotal + totalTax - (totalDiscount || 0) + (shippingCost || 0));
+
+    // 3. Process Stock (Atomic)
+    for (const item of processedItems) {
+      const product = await mongoose.model('Product').findById(item.product).session(session);
+      const inventory = await Inventory.findOne({ product: item.product }).session(session);
+
+      if (!inventory) throw new Error(`Inventory not found for product ${item.product}`);
+
+      // Basic stock check (even for backdates, we check current stock unless we want to allow negative)
+      // Usually, for backdates, we assume stock was there or we allow it to go negative if configured.
+      // Here we just update.
+      inventory.currentStock -= item.quantity;
+      inventory.stockMovements.push({
+        type: 'out',
+        quantity: item.quantity,
+        reference: 'Sale',
+        referenceId: null, // Will update after save
+        user: userId,
+        notes: `Sale ${saleNumber} (Backdated Approval)`,
+        date: saleDate || new Date()
+      });
+
+      if (product.variantTracking?.enabled && item.variant) {
+        const variant = inventory.variantComposition.find(
+          v => v.size === item.variant.size && v.color === item.variant.color
+        );
+        if (variant) {
+          variant.quantity -= item.quantity;
+        } else {
+          // If variant wasn't in inventory, we might want to error or just subtract
+          inventory.variantComposition.push({
+            ...item.variant,
+            quantity: -item.quantity,
+            reservedQuantity: 0
+          });
+        }
+      }
+      await inventory.save({ session });
+
+      if (item.isPacketSale && item.packetStock) {
+        const packetStock = await PacketStock.findById(item.packetStock).session(session);
+        if (packetStock) {
+          packetStock.availablePackets -= (item.packetQuantity || 1);
+          packetStock.soldPackets += (item.packetQuantity || 1);
+          await packetStock.save({ session });
+        }
+      }
+    }
+
+    // 4. Create Sale Record
+    const sale = new Sale({
+      saleNumber,
+      buyer,
+      manualCustomer,
+      items: processedItems,
+      subtotal,
+      totalTax,
+      totalDiscount,
+      shippingCost,
+      grandTotal,
+      cashPayment,
+      bankPayment,
+      saleDate: saleDate || new Date(),
+      saleType: saleType || 'retail',
+      notes,
+      createdBy: userId,
+      paymentStatus: (cashPayment + bankPayment) >= grandTotal ? 'paid' : (cashPayment + bankPayment > 0 ? 'partial' : 'pending')
+    });
+    await sale.save({ session });
+
+    // 5. Update stock movement references
+    for (const item of processedItems) {
+      await Inventory.updateOne(
+        { product: item.product, 'stockMovements.notes': `Sale ${saleNumber} (Backdated Approval)` },
+        { $set: { 'stockMovements.$.referenceId': sale._id } },
+        { session }
+      );
+    }
+
+    // 6. Ledger entry & Buyer balance
+    if (buyer) {
+      // Debit buyer for sale
+      const debitEntry = new Ledger({
+        type: 'buyer',
+        entityId: buyer,
+        entityModel: 'Buyer',
+        transactionType: 'sale',
+        referenceId: sale._id,
+        referenceModel: 'Sale',
+        debit: grandTotal,
+        credit: 0,
+        date: sale.saleDate,
+        description: `Sale ${saleNumber}`,
+        createdBy: userId
+      });
+      await debitEntry.save({ session });
+
+      // Credit buyer for payments
+      if (cashPayment > 0) {
+        await new Ledger({
+          type: 'buyer',
+          entityId: buyer,
+          entityModel: 'Buyer',
+          transactionType: 'receipt',
+          referenceId: sale._id,
+          referenceModel: 'Sale',
+          debit: 0,
+          credit: cashPayment,
+          date: sale.saleDate,
+          description: `Cash payment for Sale ${saleNumber}`,
+          paymentMethod: 'cash',
+          isSaleTimePayment: true,
+          createdBy: userId
+        }).save({ session });
+      }
+
+      if (bankPayment > 0) {
+        await new Ledger({
+          type: 'buyer',
+          entityId: buyer,
+          entityModel: 'Buyer',
+          transactionType: 'receipt',
+          referenceId: sale._id,
+          referenceModel: 'Sale',
+          debit: 0,
+          credit: bankPayment,
+          date: sale.saleDate,
+          description: `Bank payment for Sale ${saleNumber}`,
+          paymentMethod: 'bank',
+          isSaleTimePayment: true,
+          createdBy: userId
+        }).save({ session });
+      }
+
+      // Update buyer balance
+      const balanceImpact = grandTotal - (cashPayment + bankPayment);
+      await Buyer.findByIdAndUpdate(buyer, {
+        $inc: {
+          currentBalance: balanceImpact,
+          totalSales: grandTotal
+        }
+      }, { session });
+    }
+
+    return sale;
+  }
+
+  /**
+   * Customer Payment creation logic
+   */
+  static async applyPaymentCreate(payload, userId, session) {
+    const { customerId, amount, paymentMethod, date, description, paymentDirection = 'credit', debitReason } = payload;
+    const BalanceService = require('./BalanceService');
+
+    const paymentNumber = await Payment.getNextPaymentNumber(session);
+    const paymentDate = date ? new Date(date) : new Date();
+    const balanceBefore = await BalanceService.getBuyerBalance(customerId);
+
+    let distributions = [];
+    let advanceAmount = 0;
+    let balanceAfter = balanceBefore;
+
+    if (paymentDirection === 'debit') {
+      // Handle Debit (Refund/Adjustment)
+      const debitReasonLabels = {
+        'refund': 'Refund',
+        'credit_note': 'Credit Note',
+        'price_adjustment': 'Price Adjustment',
+        'goodwill': 'Goodwill Credit',
+        'other': 'Adjustment'
+      };
+
+      const debitLedgerEntry = await Ledger.createEntry({
+        type: 'buyer',
+        entityId: customerId,
+        entityModel: 'Buyer',
+        transactionType: 'adjustment',
+        debit: parseFloat(amount),
+        credit: 0,
+        paymentMethod,
+        date: paymentDate,
+        description: description || `${debitReasonLabels[debitReason] || 'Adjustment'} - ${paymentNumber}`,
+        createdBy: userId,
+        paymentDetails: {
+          cashPayment: paymentMethod === 'cash' ? parseFloat(amount) : 0,
+          bankPayment: paymentMethod === 'bank' ? parseFloat(amount) : 0,
+          remainingBalance: 0
+        }
+      }, session);
+
+      distributions.push({
+        saleId: null,
+        saleNumber: (debitReasonLabels[debitReason] || 'ADJUSTMENT').toUpperCase(),
+        amountApplied: parseFloat(amount),
+        previousBalance: 0,
+        newBalance: parseFloat(amount),
+        ledgerEntryId: debitLedgerEntry._id,
+        isAdvance: false
+      });
+
+      balanceAfter = balanceBefore + parseFloat(amount);
+    } else {
+      // Handle Credit (Normal Payment)
+      const result = await BalanceService.distributeBuyerPayment({
+        buyerId: customerId,
+        amount: parseFloat(amount),
+        paymentMethod,
+        createdBy: userId,
+        description,
+        date: paymentDate,
+        session
+      });
+
+      distributions = result.distributions;
+      advanceAmount = result.remainingCredit || 0;
+      balanceAfter = balanceBefore - parseFloat(amount);
+    }
+
+    const payment = new Payment({
+      paymentNumber,
+      paymentType: 'customer',
+      paymentDirection,
+      debitReason: paymentDirection === 'debit' ? debitReason : undefined,
+      customerId,
+      totalAmount: parseFloat(amount),
+      cashAmount: paymentMethod === 'cash' ? parseFloat(amount) : 0,
+      bankAmount: paymentMethod === 'bank' ? parseFloat(amount) : 0,
+      paymentMethod,
+      paymentDate,
+      description,
+      distributions,
+      advanceAmount,
+      balanceBefore,
+      balanceAfter,
+      status: 'active',
+      createdBy: userId
+    });
+
+    await payment.save({ session });
+    return payment;
+  }
+
+  /**
+   * Supplier Payment creation logic
+   */
+  static async applySupplierPaymentCreate(payload, userId, session) {
+    const { supplierId, amount, paymentMethod, date, description } = payload;
+    const BalanceService = require('./BalanceService');
+
+    const result = await BalanceService.distributeUniversalPayment({
+      supplierId,
+      amount: parseFloat(amount),
+      paymentMethod,
+      createdBy: userId,
+      description,
+      date: date ? new Date(date) : new Date(),
+      session
+    });
+
+    return await mongoose.model('SupplierPaymentReceipt').findById(result.receiptId).session(session);
+  }
+
   // ===================== PRIVATE HELPERS =====================
 
   /**
@@ -270,7 +601,25 @@ class EditRequestService {
       return { message: 'Payment edit applied via reversal flow' };
     } else if (entityType === 'supplier-payment') {
       return { message: 'Supplier payment edit applied' };
+    } else if (entityType === 'expense') {
+      return { message: 'Expense edit applied' };
     }
+  }
+
+  /**
+   * Expense creation logic
+   */
+  static async applyExpenseCreate(payload, userId, session) {
+    const expense = new Expense({
+      ...payload,
+      expenseNumber: `EXP-B-${Date.now()}`, // B prefix for backdated approval
+      status: 'approved',
+      approvedBy: userId,
+      createdBy: userId
+    });
+
+    await expense.save({ session });
+    return expense;
   }
 
   /**
@@ -281,6 +630,10 @@ class EditRequestService {
 
     const dispatchOrder = await DispatchOrder.findById(orderId).populate('supplier').session(session);
     if (!dispatchOrder) throw new Error('Dispatch order not found');
+
+    if (dispatchOrder.status === 'pending' && payload.status === 'confirmed') {
+      return EditRequestService.applyDispatchOrderConfirm(orderId, payload, reviewerId, session);
+    }
 
     const editableStatuses = ['confirmed', 'picked_up', 'in_transit', 'delivered'];
     if (!editableStatuses.includes(dispatchOrder.status)) {
@@ -721,6 +1074,360 @@ class EditRequestService {
         reviewNote: 'Auto-rejected: entity was deleted'
       }
     );
+  }
+
+  // ===================== DISPATCH ORDER (BUYING) LOGIC =====================
+
+  /**
+   * Dispatch Order (Manual Purchase) creation logic
+   */
+  static async applyDispatchOrderCreate(payload, userId, session) {
+    const {
+      supplierId,
+      items,
+      exchangeRate,
+      percentage,
+      discount = 0,
+      cashPayment = 0,
+      bankPayment = 0,
+      totalBoxes = 0,
+      logisticsCompanyId,
+      dispatchDate
+    } = payload;
+
+    const supplier = await Supplier.findById(supplierId).session(session);
+    if (!supplier) throw new Error('Supplier not found');
+
+    const orderDate = dispatchDate ? new Date(dispatchDate) : new Date();
+
+    // 1. Create DispatchOrder (already confirmed)
+    const orderNumber = `PUR-${Date.now()}`; // Simplified for service
+    const dispatchOrder = new DispatchOrder({
+      orderNumber,
+      supplier: supplierId,
+      status: 'confirmed',
+      items: items.map(item => ({
+        ...item,
+        supplierPaymentAmount: item.costPrice || 0,
+        supplierPaymentTotal: (item.costPrice || 0) * (item.quantity || 0),
+        landedPrice: EditRequestService.truncateToTwoDecimals((item.costPrice || 0) / (exchangeRate || 1) * (1 + (percentage || 0) / 100)),
+        landedTotal: EditRequestService.truncateToTwoDecimals(((item.costPrice || 0) / (exchangeRate || 1) * (1 + (percentage || 0) / 100)) * (item.quantity || 0))
+      })),
+      totalQuantity: items.reduce((sum, item) => sum + (item.quantity || 0), 0),
+      totalBoxes,
+      logisticsCompany: logisticsCompanyId,
+      dispatchDate: orderDate,
+      exchangeRate,
+      percentage,
+      totalDiscount: discount,
+      paymentDetails: {
+        cashPayment,
+        bankPayment,
+        remainingBalance: 0, // Will be calculated
+        paymentStatus: 'pending'
+      },
+      createdBy: userId,
+      confirmedBy: userId,
+      confirmedAt: new Date()
+    });
+
+    // Re-calculate totals
+    let supplierPaymentTotal = dispatchOrder.items.reduce((sum, item) => sum + (item.supplierPaymentTotal || 0), 0);
+    const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - discount);
+    const paidAmount = cashPayment + bankPayment;
+    dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
+    dispatchOrder.paymentDetails.remainingBalance = Math.max(0, discountedSupplierPaymentTotal - paidAmount);
+    dispatchOrder.paymentDetails.paymentStatus = dispatchOrder.paymentDetails.remainingBalance <= 0 ? 'paid' : (paidAmount > 0 ? 'partial' : 'pending');
+
+    await dispatchOrder.save({ session });
+
+    // 2. Ledger Entries
+    // Purchase Entry
+    await Ledger.createEntry({
+      type: 'supplier',
+      entityId: supplierId,
+      entityModel: 'Supplier',
+      transactionType: 'purchase',
+      referenceId: dispatchOrder._id,
+      referenceModel: 'DispatchOrder',
+      debit: discountedSupplierPaymentTotal,
+      credit: 0,
+      date: orderDate,
+      description: `Manual Purchase ${dispatchOrder.orderNumber}`,
+      createdBy: userId
+    }, session);
+
+    // Payment Entries
+    if (cashPayment > 0) {
+      await Ledger.createEntry({
+        type: 'supplier',
+        entityId: supplierId,
+        entityModel: 'Supplier',
+        transactionType: 'payment',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: 0,
+        credit: cashPayment,
+        paymentMethod: 'cash',
+        date: orderDate,
+        description: `Cash payment for Manual Purchase ${dispatchOrder.orderNumber}`,
+        createdBy: userId
+      }, session);
+    }
+    if (bankPayment > 0) {
+      await Ledger.createEntry({
+        type: 'supplier',
+        entityId: supplierId,
+        entityModel: 'Supplier',
+        transactionType: 'payment',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: 0,
+        credit: bankPayment,
+        paymentMethod: 'bank',
+        date: orderDate,
+        description: `Bank payment for Manual Purchase ${dispatchOrder.orderNumber}`,
+        createdBy: userId
+      }, session);
+    }
+
+    // 3. Inventory & Products
+    for (const item of dispatchOrder.items) {
+      let product = await Product.findOne({ sku: item.productCode.toUpperCase(), supplier: supplierId }).session(session);
+      if (!product) {
+        product = new Product({
+          name: item.productName,
+          sku: item.productCode.toUpperCase(),
+          supplier: supplierId,
+          productCode: item.productCode,
+          season: item.season,
+          category: 'General',
+          unit: 'piece',
+          pricing: {
+            costPrice: item.landedPrice,
+            sellingPrice: item.landedPrice * 1.2
+          },
+          size: EditRequestService.normalizeToArray(item.size),
+          color: EditRequestService.normalizeToArray(item.primaryColor),
+          isActive: true,
+          createdBy: userId
+        });
+        await product.save({ session });
+      }
+
+      // Update Inventory
+      let inventory = await Inventory.findOne({ product: product._id }).session(session);
+      if (!inventory) {
+        inventory = new Inventory({ product: product._id, currentStock: 0 });
+      }
+
+      const batchInfo = {
+        dispatchOrderId: dispatchOrder._id,
+        supplierId,
+        purchaseDate: orderDate,
+        costPrice: item.costPrice,
+        landedPrice: item.landedPrice,
+        exchangeRate
+      };
+
+      if (item.useVariantTracking && item.packets?.length > 0) {
+        const variantComposition = [];
+        item.packets.forEach(p => {
+          p.composition.forEach(c => {
+            const existing = variantComposition.find(v => v.size === c.size && v.color === c.color);
+            if (existing) existing.quantity += c.quantity;
+            else variantComposition.push({ size: c.size, color: c.color, quantity: c.quantity });
+          });
+        });
+        await inventory.addStockWithVariants(item.quantity, variantComposition, 'DispatchOrder', dispatchOrder._id, userId, `Manual Purchase ${dispatchOrder.orderNumber}`, orderDate, session);
+      } else {
+        await inventory.addStockWithBatch(item.quantity, batchInfo, 'DispatchOrder', dispatchOrder._id, userId, `Manual Purchase ${dispatchOrder.orderNumber}`, orderDate, session);
+      }
+      await inventory.save({ session });
+    }
+
+    // 4. Supplier Balance
+    await Supplier.findByIdAndUpdate(supplierId, {
+      $inc: {
+        totalPurchases: discountedSupplierPaymentTotal,
+        currentBalance: discountedSupplierPaymentTotal - paidAmount
+      }
+    }, { session });
+
+    return dispatchOrder;
+  }
+
+  /**
+   * Dispatch Order Confirmation logic (Update)
+   */
+  static async applyDispatchOrderConfirm(orderId, payload, userId, session) {
+    const dispatchOrder = await DispatchOrder.findById(orderId).populate('supplier').session(session);
+    if (!dispatchOrder) throw new Error('Order not found');
+
+    const {
+      cashPayment = 0,
+      bankPayment = 0,
+      exchangeRate,
+      percentage,
+      discount = 0,
+      items,
+      dispatchDate
+    } = payload;
+
+    const orderDate = dispatchDate ? new Date(dispatchDate) : dispatchOrder.dispatchDate;
+
+    // 1. Update Order Fields
+    dispatchOrder.status = 'confirmed';
+    dispatchOrder.confirmedBy = userId;
+    dispatchOrder.confirmedAt = new Date();
+    dispatchOrder.exchangeRate = exchangeRate || dispatchOrder.exchangeRate;
+    dispatchOrder.percentage = percentage || dispatchOrder.percentage;
+    dispatchOrder.totalDiscount = discount;
+    dispatchOrder.dispatchDate = orderDate;
+
+    if (items) {
+      dispatchOrder.items = items;
+      dispatchOrder.markModified('items');
+    }
+
+    // Calculate Prices & Totals (Mirroring route logic)
+    let supplierPaymentTotal = 0;
+    for (const item of dispatchOrder.items) {
+      item.supplierPaymentAmount = item.costPrice || 0;
+      item.supplierPaymentTotal = item.supplierPaymentAmount * (item.quantity || 0);
+      item.landedPrice = EditRequestService.truncateToTwoDecimals((item.costPrice || 0) / (dispatchOrder.exchangeRate || 1) * (1 + (dispatchOrder.percentage || 0) / 100));
+      item.landedTotal = EditRequestService.truncateToTwoDecimals(item.landedPrice * (item.quantity || 0));
+      supplierPaymentTotal += item.supplierPaymentTotal;
+    }
+
+    const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - discount);
+    const paidAmount = cashPayment + bankPayment;
+    dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
+    dispatchOrder.paymentDetails = {
+      cashPayment,
+      bankPayment,
+      remainingBalance: Math.max(0, discountedSupplierPaymentTotal - paidAmount),
+      paymentStatus: (discountedSupplierPaymentTotal - paidAmount) <= 0 ? 'paid' : (paidAmount > 0 ? 'partial' : 'pending')
+    };
+
+    await dispatchOrder.save({ session });
+
+    // 2. Ledger Entries (Purchase + Payments)
+    await Ledger.createEntry({
+      type: 'supplier',
+      entityId: dispatchOrder.supplier._id,
+      entityModel: 'Supplier',
+      transactionType: 'purchase',
+      referenceId: dispatchOrder._id,
+      referenceModel: 'DispatchOrder',
+      debit: discountedSupplierPaymentTotal,
+      credit: 0,
+      date: orderDate,
+      description: `Confirmed Purchase ${dispatchOrder.orderNumber}`,
+      createdBy: userId
+    }, session);
+
+    if (cashPayment > 0) {
+      await Ledger.createEntry({
+        type: 'supplier',
+        entityId: dispatchOrder.supplier._id,
+        entityModel: 'Supplier',
+        transactionType: 'payment',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: 0,
+        credit: cashPayment,
+        paymentMethod: 'cash',
+        date: orderDate,
+        description: `Cash payment for Order ${dispatchOrder.orderNumber}`,
+        createdBy: userId
+      }, session);
+    }
+    if (bankPayment > 0) {
+      await Ledger.createEntry({
+        type: 'supplier',
+        entityId: dispatchOrder.supplier._id,
+        entityModel: 'Supplier',
+        transactionType: 'payment',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: 0,
+        credit: bankPayment,
+        paymentMethod: 'bank',
+        date: orderDate,
+        description: `Bank payment for Order ${dispatchOrder.orderNumber}`,
+        createdBy: userId
+      }, session);
+    }
+
+    // 3. Inventory Updates
+    for (const item of dispatchOrder.items) {
+      let product = await Product.findOne({ sku: item.productCode.toUpperCase(), supplier: dispatchOrder.supplier._id }).session(session);
+      if (!product) {
+        product = new Product({
+          name: item.productName,
+          sku: item.productCode.toUpperCase(),
+          supplier: dispatchOrder.supplier._id,
+          productCode: item.productCode,
+          season: item.season,
+          pricing: { costPrice: item.landedPrice, sellingPrice: item.landedPrice * 1.2 },
+          isActive: true,
+          createdBy: userId
+        });
+        await product.save({ session });
+      }
+
+      let inventory = await Inventory.findOne({ product: product._id }).session(session);
+      if (!inventory) inventory = new Inventory({ product: product._id, currentStock: 0 });
+
+      const batchInfo = {
+        dispatchOrderId: dispatchOrder._id,
+        supplierId: dispatchOrder.supplier._id,
+        purchaseDate: orderDate,
+        costPrice: item.costPrice,
+        landedPrice: item.landedPrice,
+        exchangeRate: dispatchOrder.exchangeRate
+      };
+
+      if (item.useVariantTracking && item.packets?.length > 0) {
+        const variantComposition = [];
+        item.packets.forEach(p => {
+          p.composition.forEach(c => {
+            const existing = variantComposition.find(v => v.size === c.size && v.color === c.color);
+            if (existing) existing.quantity += c.quantity;
+            else variantComposition.push({ size: c.size, color: c.color, quantity: c.quantity });
+          });
+        });
+        await inventory.addStockWithVariants(item.quantity, variantComposition, 'DispatchOrder', dispatchOrder._id, userId, `Confirmed Order ${dispatchOrder.orderNumber}`, orderDate, session);
+      } else {
+        await inventory.addStockWithBatch(item.quantity, batchInfo, 'DispatchOrder', dispatchOrder._id, userId, `Confirmed Order ${dispatchOrder.orderNumber}`, orderDate, session);
+      }
+      await inventory.save({ session });
+    }
+
+    // 4. Update Supplier Balance
+    await Supplier.findByIdAndUpdate(dispatchOrder.supplier._id, {
+      $inc: {
+        totalPurchases: discountedSupplierPaymentTotal,
+        currentBalance: discountedSupplierPaymentTotal - paidAmount
+      }
+    }, { session });
+
+    return dispatchOrder;
+  }
+
+  // ===================== PRIVATE HELPERS =====================
+
+  static truncateToTwoDecimals(value) {
+    if (typeof value !== 'number' || isNaN(value)) return 0;
+    return Math.floor(value * 100) / 100;
+  }
+
+  static normalizeToArray(val) {
+    if (!val) return [];
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'string') return val.split(',').map(s => s.trim()).filter(Boolean);
+    return [val];
   }
 }
 
