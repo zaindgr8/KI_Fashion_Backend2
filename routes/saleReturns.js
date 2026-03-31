@@ -74,9 +74,9 @@ function buildReturnFingerprint(items, saleItems = []) {
       const normalizedQty = normalizeReturnedQtyInItems(item, saleItem);
       const composition = Array.isArray(item.returnComposition)
         ? item.returnComposition
-            .map((comp) => `${comp.size || ''}:${comp.color || ''}:${Number(comp.quantity || 0)}`)
-            .sort()
-            .join('|')
+          .map((comp) => `${comp.size || ''}:${comp.color || ''}:${Number(comp.quantity || 0)}`)
+          .sort()
+          .join('|')
         : '';
       return `${item.itemIndex}:${item.product}:${Number(normalizedQty)}:${composition}`;
     })
@@ -416,8 +416,8 @@ router.post('/', auth, async (req, res) => {
           await session.abortTransaction();
           session.endSession();
           return sendResponse.error(
-            res, 
-            `The return item quantities don't add up to the expected total for item at index ${returnItem.itemIndex}. Please review your selection.`, 
+            res,
+            `The return item quantities don't add up to the expected total for item at index ${returnItem.itemIndex}. Please review your selection.`,
             400
           );
         }
@@ -641,7 +641,7 @@ async function processSaleReturn(returnId, userId) {
           if (packetStock) {
             // Priority: Usage of explicit return composition
             if (item.returnComposition && item.returnComposition.length > 0) {
-               
+
 
               for (const comp of item.returnComposition) {
                 const singleVariantComp = [{
@@ -661,7 +661,7 @@ async function processSaleReturn(returnId, userId) {
                 if (looseStock) {
                   looseStock.availablePackets += comp.quantity;
                   await looseStock.save({ session });
-                   
+
                 }
               }
 
@@ -767,7 +767,7 @@ async function processSaleReturn(returnId, userId) {
 
     await session.commitTransaction();
     session.endSession();
-     
+
 
   } catch (error) {
     await session.abortTransaction();
@@ -954,7 +954,7 @@ router.get('/sale/:id', auth, async (req, res) => {
 router.patch('/:id/approve', auth, async (req, res) => {
   try {
     // Only admin/manager can approve returns
-    if (!['super-admin', 'admin'].includes(req.user.role)) {
+    if (!['super-admin', 'admin', 'employee'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can approve returns', 403);
     }
 
@@ -1002,7 +1002,7 @@ router.patch('/:id/approve', auth, async (req, res) => {
 router.patch('/:id/reject', auth, async (req, res) => {
   try {
     // Only admin/manager can reject returns
-    if (!['super-admin', 'admin'].includes(req.user.role)) {
+    if (!['super-admin', 'admin', 'employee'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can reject returns', 403);
     }
 

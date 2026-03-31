@@ -720,7 +720,7 @@ router.post('/manual', auth, async (req, res) => {
 
   try {
     // Only admin/manager can create manual entries
-    if (!['super-admin', 'admin'].includes(req.user.role)) {
+    if (!['super-admin', 'admin', 'employee'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can create manual entries', 403);
     }
 
@@ -1564,7 +1564,7 @@ router.post('/manual', auth, async (req, res) => {
               await packetStock.save();
             }
           } catch (looseError) {
-             console.error(`[Manual Entry] Failed loose packet stock for ${looseBarcode}:`, looseError.message);
+            console.error(`[Manual Entry] Failed loose packet stock for ${looseBarcode}:`, looseError.message);
           }
         }
       }

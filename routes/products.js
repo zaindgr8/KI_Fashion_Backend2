@@ -1189,7 +1189,7 @@ router.put('/:id', auth, async (req, res) => {
 // Update product min selling price (targeted admin/super-admin update)
 router.patch('/:id/min-selling-price', auth, async (req, res) => {
   try {
-    if (!['super-admin', 'admin'].includes(req.user?.role)) {
+    if (!['super-admin', 'admin', 'employee'].includes(req.user?.role)) {
       return res.status(403).json({
         success: false,
         message: 'Only admin or super-admin can update minimum selling price'
