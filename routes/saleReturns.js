@@ -784,7 +784,7 @@ async function processSaleReturn(returnId, userId) {
 // Get all sale returns with filters
 router.get('/', auth, async (req, res) => {
   try {
-    const {
+    let {
       buyer,
       sale,
       status,
@@ -793,6 +793,12 @@ router.get('/', auth, async (req, res) => {
       limit = 50,
       skip = 0
     } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     // Build query
     const query = {};

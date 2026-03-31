@@ -134,6 +134,12 @@ router.get('/', auth, checkPermission('expenses'), async (req, res) => {
       endDate
     } = req.query;
 
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
+
     const query = {};
 
     if (search) {

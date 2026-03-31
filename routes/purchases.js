@@ -433,7 +433,7 @@ function transformDispatchOrderToPurchase(dispatchOrder) {
 router.get('/', auth, checkPermission('purchases'), async (req, res) => {
 
   try {
-    const {
+    let {
       page = 1,
       limit = 20,
       search,
@@ -445,6 +445,13 @@ router.get('/', auth, checkPermission('purchases'), async (req, res) => {
       endDate,
       source // 'manual' or 'dispatch_order'
     } = req.query;
+
+    // Default to today if no date range is provided
+    if (!startDate && !endDate && !search && !supplier) {
+      const today = new Date().toISOString().split('T')[0];
+      startDate = today;
+      endDate = today;
+    }
 
     const limitNum = Math.min(parseInt(limit) || 20, 100); // Safety cap
     const pageNum = parseInt(page) || 1;

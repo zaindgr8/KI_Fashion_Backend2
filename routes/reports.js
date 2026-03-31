@@ -17,7 +17,13 @@ const router = express.Router();
 router.get('/sales', auth, checkPermission('reports'), async (req, res) => {
 
   try {
-    const { startDate, endDate, groupBy = 'day', saleType, buyer } = req.query;
+    let { startDate, endDate, groupBy = 'day', saleType, buyer } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = { deliveryStatus: 'delivered' };
 
@@ -139,7 +145,13 @@ router.get('/sales', auth, checkPermission('reports'), async (req, res) => {
 router.get('/purchases', auth, checkPermission('reports'), async (req, res) => {
 
   try {
-    const { startDate, endDate, supplier, deliveryStatus } = req.query;
+    let { startDate, endDate, supplier, deliveryStatus } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = { supplierUser: null, status: 'confirmed' }; // Manual entries only
 
@@ -246,7 +258,13 @@ router.get('/purchases', auth, checkPermission('reports'), async (req, res) => {
 router.get('/financial', auth, checkPermission('reports'), async (req, res) => {
 
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const dateCondition = {};
     if (startDate || endDate) {
@@ -533,8 +551,14 @@ router.get('/inventory', auth, checkPermission('reports'), async (req, res) => {
 router.get('/suppliers', auth, checkPermission('reports'), async (req, res) => {
 
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
 
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
+    
     const matchConditions = { supplierUser: null, status: 'confirmed' }; // Manual entries only
     if (startDate || endDate) {
       matchConditions.dispatchDate = {};
@@ -620,7 +644,13 @@ router.get('/suppliers', auth, checkPermission('reports'), async (req, res) => {
 router.get('/customers', auth, checkPermission('reports'), async (req, res) => {
 
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = { deliveryStatus: 'delivered' };
     if (startDate || endDate) {
@@ -1030,7 +1060,13 @@ const Payment = require('../models/Payment');
 // Daily Sales Report
 router.get('/daily-sales', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = {};
     if (startDate || endDate) {
@@ -1080,7 +1116,13 @@ router.get('/daily-sales', auth, async (req, res) => {
 // Daily Buying Report
 router.get('/daily-buying', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = {};
     if (startDate || endDate) {
@@ -1138,7 +1180,13 @@ router.get('/daily-buying', auth, async (req, res) => {
 // Sales Product-wise Report
 router.get('/sales-product-wise', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = {};
     if (startDate || endDate) {
@@ -1184,7 +1232,13 @@ router.get('/sales-product-wise', auth, async (req, res) => {
 // Buying Product-wise Report
 router.get('/buying-product-wise', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = { status: 'confirmed' };
     if (startDate || endDate) {
@@ -1347,7 +1401,13 @@ router.get('/stock-in-hand', auth, async (req, res) => {
 // Receivables Report
 router.get('/receivables', auth, async (req, res) => {
   try {
-    const { asOfDate, startDate } = req.query;
+    let { asOfDate, startDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!asOfDate && !startDate) {
+      asOfDate = today;
+      startDate = today;
+    }
 
     // Step 1: Match conditions for sale Ledger entries (debit = what customers owe us).
     // Filter by date range when provided — mirrors how payables filters DispatchOrders.
@@ -1476,7 +1536,13 @@ router.get('/receivables', auth, async (req, res) => {
 // Payables Report
 router.get('/payables', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     // Step 1: Build match for confirmed dispatch orders, filtered by dispatch date if provided.
     const orderMatch = { status: 'confirmed' };
@@ -1653,7 +1719,13 @@ router.get('/activity-log', auth, async (req, res) => {
 // Sales Returns Report
 router.get('/sales-returns', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = {};
     if (startDate || endDate) {
@@ -1692,7 +1764,13 @@ router.get('/sales-returns', auth, async (req, res) => {
 // Buying Returns Report
 router.get('/buying-returns', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = {};
     if (startDate || endDate) {
@@ -1731,7 +1809,13 @@ router.get('/buying-returns', auth, async (req, res) => {
 // Sales Returns Product-wise Report
 router.get('/sales-returns-product-wise', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = {};
     if (startDate || endDate) {
@@ -1774,7 +1858,13 @@ router.get('/sales-returns-product-wise', auth, async (req, res) => {
 // Buying Returns Product-wise Report
 router.get('/buying-returns-product-wise', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = {};
     if (startDate || endDate) {
@@ -1815,7 +1905,13 @@ router.get('/buying-returns-product-wise', auth, async (req, res) => {
 // Profit & Loss Report
 router.get('/profit-loss', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     const matchConditions = {};
     if (startDate || endDate) {
@@ -1925,7 +2021,13 @@ router.get('/profit-loss', auth, async (req, res) => {
 // =============================================
 router.get('/cash-in-hand', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     // --- Build date conditions ---
     const saleDateCondition = {};
@@ -2096,7 +2198,13 @@ router.get('/cash-in-hand', auth, async (req, res) => {
 // Product Summary Report
 router.get('/product-summary', auth, async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
+    let { startDate, endDate } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     // Build optional date filters for dispatch orders and sales
     const dispatchDateFilter = {};

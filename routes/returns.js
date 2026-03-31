@@ -1163,7 +1163,7 @@ router.post('/product-return', auth, async (req, res) => {
 // Get all returns with optional filters
 router.get('/', auth, async (req, res) => {
   try {
-    const {
+    let {
       supplier,
       dispatchOrder,
       startDate,
@@ -1171,6 +1171,12 @@ router.get('/', auth, async (req, res) => {
       limit = 50,
       skip = 0
     } = req.query;
+
+    const today = new Date().toISOString().split('T')[0];
+    if (!startDate && !endDate) {
+      startDate = today;
+      endDate = today;
+    }
 
     // Build query
     const query = {};

@@ -1130,7 +1130,7 @@ router.post('/bulk', auth, async (req, res) => {
 // Get all sales
 router.get('/', auth, async (req, res) => {
   try {
-    const {
+    let {
       page = 1,
       limit = 20,
       search,
@@ -1141,6 +1141,13 @@ router.get('/', auth, async (req, res) => {
       startDate,
       endDate
     } = req.query;
+
+    // Default to today if no date range is provided
+    if (!startDate && !endDate && !search && !buyer) {
+      const today = new Date().toISOString().split('T')[0];
+      startDate = today;
+      endDate = today;
+    }
 
     const query = {};
 
