@@ -19,14 +19,14 @@ const checkPermission = (requiredPermission) => {
     // }
 
     // Check if user has the specific permission
-    const hasPermission = req.user.permissions && req.user.permissions.includes(requiredPermission);
+    // const hasPermission = req.user.permissions && req.user.permissions.includes(requiredPermission);
 
-    if (!hasPermission) {
-      return res.status(403).json({
-        success: false,
-        message: `Permission denied: ${requiredPermission} access required`
-      });
-    }
+    // if (!hasPermission) {
+    //   return res.status(403).json({
+    //     success: false,
+    //     message: `Permission denied: ${requiredPermission} access required`
+    //   });
+    // }
 
     next();
   };
