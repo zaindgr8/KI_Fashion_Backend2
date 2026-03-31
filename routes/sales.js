@@ -1160,6 +1160,14 @@ router.get('/', auth, async (req, res) => {
       endDate = today;
     }
 
+    // Role-based restriction: Employee search results should only show current day
+    if (req.user.role === 'employee' && search) {
+      const today = new Date().toISOString().split('T')[0];
+      startDate = today;
+      endDate = today;
+    }
+
+
     const query = {};
 
     // Role-based filtering: Distributors can only see their own sales

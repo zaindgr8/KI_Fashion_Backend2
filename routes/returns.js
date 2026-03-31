@@ -1193,13 +1193,31 @@ router.get('/', auth, async (req, res) => {
     } = req.query;
 
     const today = new Date().toISOString().split('T')[0];
-    if (!startDate && !endDate) {
+
+    // Role-based logic for employees
+    if (req.user.role === 'employee') {
+      // Employee cannot see return data of current day on buying page
+      const todayStart = new Date(`${today}T00:00:00.000Z`);
+      if (query) {
+        // We'll apply this to the query object later
+      }
+      
+      if (!startDate && !endDate) {
+        startDate = today;
+        endDate = today;
+      }
+    } else if (!startDate && !endDate) {
       startDate = today;
       endDate = today;
     }
 
+
     // Build query
     const query = {};
+    if (req.user.role === 'employee') {
+      const todayStart = new Date(`${today}T00:00:00.000Z`);
+      query.returnedAt = { $lt: todayStart };
+    }
 
     if (supplier) {
       query.supplier = supplier;
@@ -1208,6 +1226,7 @@ router.get('/', auth, async (req, res) => {
     if (dispatchOrder) {
       query.dispatchOrder = dispatchOrder;
     }
+
 
     if (startDate || endDate) {
       query.returnedAt = {};

@@ -446,12 +446,27 @@ router.get('/', auth, checkPermission('purchases'), async (req, res) => {
       source // 'manual' or 'dispatch_order'
     } = req.query;
 
+    // Role-based logic for employees
+    const todayStr = new Date().toISOString().split('T')[0];
+    if (req.user.role === 'employee') {
+      // 1. Employee cannot see any data of current day on buying page
+      andConditions.push({ 
+        dispatchDate: { $lt: new Date(`${todayStr}T00:00:00.000Z`) } 
+      });
+
+      // 2. Search restricted to current day
+      if (search) {
+        startDate = todayStr;
+        endDate = todayStr;
+      }
+    }
+
     // Default to today if no date range is provided
     if (!startDate && !endDate && !search && !supplier) {
-      const today = new Date().toISOString().split('T')[0];
-      startDate = today;
-      endDate = today;
+      startDate = todayStr;
+      endDate = todayStr;
     }
+
 
     const limitNum = Math.min(parseInt(limit) || 20, 100); // Safety cap
     const pageNum = parseInt(page) || 1;

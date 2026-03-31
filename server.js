@@ -58,7 +58,7 @@ const productionOrigins = [
   "http://127.0.0.1:3001",
   "http://127.0.0.1:3002",
   "http://127.0.0.1:3003",
-  
+
 ];
 
 // Development/localhost origins (always allowed for local testing)
@@ -96,7 +96,7 @@ app.use(
 
       // Check if origin is in allowed list
       if (uniqueOrigins.indexOf(origin) !== -1) {
-         
+
         return callback(null, true);
       } else {
         console.error("CORS blocked origin:", origin);
@@ -226,17 +226,17 @@ app.use("*", (req, res) => {
   });
 });
 
-const BASE_PORT = parseInt(process.env.PORT, 10) || 5000;
+const BASE_PORT = parseInt(process.env.PORT, 10) || 8080;
 const MAX_PORT_ATTEMPTS = 5;
 const { startReservationCleanup } = require('./utils/reservation-cleanup');
 
 // Try the requested port, but fall back to the next one if it's already in use.
 const startServer = (port, attemptsLeft) => {
   const server = app.listen(port, () => {
-     
-     
-     
-     
+
+
+
+
     // Start periodic stock reservation cleanup
     startReservationCleanup();
   });

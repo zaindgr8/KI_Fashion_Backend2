@@ -808,10 +808,22 @@ router.get('/', auth, async (req, res) => {
     } = req.query;
 
     const today = new Date().toISOString().split('T')[0];
-    if (!startDate && !endDate) {
+    
+    // Role-based restriction: Employee search results/listing
+    if (req.user.role === 'employee') {
+      // If no date range provided or if they are searching (implicit via filters)
+      // Actually, let's just force today if they haven't explicitly picked a different date
+      // AND restrict search to today if we add a search param later.
+      // For now, let's keep it consistent with sales.
+      if (!startDate && !endDate) {
+        startDate = today;
+        endDate = today;
+      }
+    } else if (!startDate && !endDate) {
       startDate = today;
       endDate = today;
     }
+
 
     // Build query
     const query = {};
