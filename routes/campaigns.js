@@ -6,6 +6,7 @@ const Product = require('../models/Product');
 const Supplier = require('../models/Supplier');
 const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
+const { logActivity } = require('../utils/auditLogger');
 
 const router = express.Router();
 
@@ -225,6 +226,15 @@ router.post('/', auth, async (req, res) => {
       updatedBy: req.user._id,
     });
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'Campaign',
+      resourceId: campaign._id,
+      description: `Created campaign: ${campaign.name} (${campaign.campaignType})`,
+      changes: { old: null, new: campaign.toObject() }
+    });
+
     return sendResponse.success(res, campaign, 'Campaign created successfully', 201);
   } catch (error) {
     console.error('Create campaign error:', error);
@@ -305,6 +315,15 @@ router.patch('/:id', auth, async (req, res) => {
       return sendResponse.error(res, 'Campaign not found', 404);
     }
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Campaign',
+      resourceId: campaign._id,
+      description: `Updated campaign: ${campaign.name}`,
+      changes: { old: existingCampaign, new: campaign.toObject() }
+    });
+
     return sendResponse.success(res, campaign, 'Campaign updated successfully');
   } catch (error) {
     console.error('Update campaign error:', error);
@@ -358,6 +377,15 @@ router.patch('/:id/status', auth, async (req, res) => {
       return sendResponse.error(res, 'Campaign not found', 404);
     }
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'Campaign',
+      resourceId: campaign._id,
+      description: `Updated campaign status to ${campaign.status}: ${campaign.name}`,
+      changes: { old: { status: '?' }, new: { status: campaign.status, isActive: campaign.isActive } }
+    });
+
     return sendResponse.success(res, campaign, 'Campaign status updated successfully');
   } catch (error) {
     console.error('Update campaign status error:', error);
@@ -384,6 +412,15 @@ router.delete('/:id', auth, async (req, res) => {
     if (!campaign) {
       return sendResponse.error(res, 'Campaign not found', 404);
     }
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DELETE',
+      resource: 'Campaign',
+      resourceId: campaign._id,
+      description: `Archived campaign: ${campaign.name}`,
+      changes: { old: { status: '?' }, new: { status: 'archived', isActive: false } }
+    });
 
     return sendResponse.success(res, campaign, 'Campaign archived successfully');
   } catch (error) {

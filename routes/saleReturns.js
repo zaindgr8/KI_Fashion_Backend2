@@ -12,6 +12,7 @@ const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 const { generateSignedUrls } = require('../utils/imageUpload');
 const { generatePacketBarcode } = require('../utils/barcodeGenerator');
+const { logActivity } = require('../utils/auditLogger');
 
 const router = express.Router();
 
@@ -511,6 +512,15 @@ router.post('/', auth, async (req, res) => {
     // Convert images to signed URLs
     await convertSaleReturnImages(saleReturn);
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'SaleReturn',
+      resourceId: saleReturn._id,
+      description: `Created sale return: ${saleReturn._id} (Sale: ${sale.saleNumber})`,
+      changes: { old: null, new: saleReturn.toObject() }
+    });
+
     return sendResponse.success(res, saleReturn, 'Sale return created successfully', 201);
 
   } catch (error) {
@@ -990,6 +1000,15 @@ router.patch('/:id/approve', auth, async (req, res) => {
     // Convert images to signed URLs
     await convertSaleReturnImages(saleReturn);
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'SaleReturn',
+      resourceId: saleReturn._id,
+      description: `Approved sale return: ${saleReturn._id} (Sale: ${saleReturn.sale.saleNumber})`,
+      changes: { old: 'pending', new: 'approved' }
+    });
+
     return sendResponse.success(res, saleReturn, 'Sale return approved successfully');
 
   } catch (error) {
@@ -1035,6 +1054,15 @@ router.patch('/:id/reject', auth, async (req, res) => {
 
     // Convert images to signed URLs
     await convertSaleReturnImages(saleReturn);
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'SaleReturn',
+      resourceId: saleReturn._id,
+      description: `Rejected sale return: ${saleReturn._id} (Sale: ${saleReturn.sale.saleNumber})`,
+      changes: { old: 'pending', new: 'rejected' }
+    });
 
     return sendResponse.success(res, saleReturn, 'Sale return rejected successfully');
 

@@ -13,6 +13,7 @@ const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { sendResponse } = require('../utils/helpers');
+const { logActivity } = require('../utils/auditLogger');
 
 const { generateDispatchOrderQR, buildDispatchOrderQrPayload } = require('../utils/qrCode');
 const { validateImageFile, uploadImage, generateSignedUrl, generateSignedUrls, generateSignedUploadUrl, verifyFileExists, deleteImage } = require('../utils/imageUpload');
@@ -692,6 +693,17 @@ router.post('/', auth, checkPermission('dispatch_orders'), async (req, res) => {
 
     // Convert images to signed URLs
     await convertDispatchOrderImages(dispatchOrder);
+
+    await dispatchOrder.save();
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'DispatchOrder',
+      resourceId: dispatchOrder._id,
+      description: `Created dispatch order: ${dispatchOrder.orderNumber} (Supplier: ${supplier.company})`,
+      changes: { old: null, new: dispatchOrder.toObject() }
+    });
 
     return sendResponse.success(res, dispatchOrder, 'Dispatch order created successfully', 201);
 
@@ -1582,6 +1594,17 @@ router.post('/manual', auth, async (req, res) => {
 
     // Convert images to signed URLs
     await convertDispatchOrderImages(dispatchOrder);
+
+    await dispatchOrder.save();
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'Purchase',
+      resourceId: dispatchOrder._id,
+      description: `Created manual purchase/dispatch order: ${dispatchOrder.orderNumber} (Supplier: ${supplier.company})`,
+      changes: { old: null, new: dispatchOrder.toObject() }
+    });
 
     return sendResponse.success(res, dispatchOrder, 'Manual entry created successfully', 201);
 
@@ -3604,7 +3627,7 @@ router.post('/:id/return', auth, async (req, res) => {
   session.startTransaction();
   try {
     // Only admin/manager can return items
-    if (!['super-admin', 'admin'].includes(req.user.role)) {
+    if (!['super-admin', 'admin', 'employee'].includes(req.user.role)) {
       await session.abortTransaction();
       session.endSession();
       return sendResponse.error(res, 'Only admins and managers can return items', 403);
@@ -3956,7 +3979,7 @@ router.get('/qr/:qrData', async (req, res) => {
 router.post('/qr/:qrData/confirm', auth, async (req, res) => {
   try {
     // Only admin/manager can confirm via QR scan
-    if (!['super-admin', 'admin'].includes(req.user.role)) {
+    if (!['super-admin', 'admin', 'employee'].includes(req.user.role)) {
       return sendResponse.error(res, 'Only admins and managers can confirm dispatch orders', 403);
     }
 
@@ -4103,6 +4126,15 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
     });
 
     await dispatchOrder.save();
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'DispatchOrder',
+      resourceId: dispatchOrder._id,
+      description: `Confirmed dispatch order ${dispatchOrder.orderNumber} via QR scan`,
+      changes: { old: 'pending/pending-approval', new: 'confirmed' }
+    });
 
     // Create ledger entry for purchase (debit) - use supplierPaymentTotal (what admin owes supplier)
     await Ledger.createEntry({
@@ -4613,6 +4645,17 @@ router.put('/:id', auth, async (req, res) => {
 
     // Convert images to signed URLs
     await convertDispatchOrderImages(dispatchOrder);
+
+    await dispatchOrder.save();
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'DispatchOrder',
+      resourceId: dispatchOrder._id,
+      description: `Updated dispatch order: ${dispatchOrder.orderNumber}`,
+      changes: { old: 'Previous state', new: req.body }
+    });
 
     return sendResponse.success(res, dispatchOrder, 'Dispatch order updated successfully');
 

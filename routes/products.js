@@ -7,6 +7,7 @@ const QRCode = require('qrcode');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { validateImageFile, uploadImage, deleteImage, generateSignedUrls } = require('../utils/imageUpload');
+const { logActivity } = require('../utils/auditLogger');
 
 const { initializeGCS } = require('../config/gcs');
 const { getProductMinSellingPrice, getEffectivePacketSellingPrice, toMoney } = require('../utils/websitePricing');
@@ -545,6 +546,15 @@ router.post('/', auth, checkPermission('products'), async (req, res) => {
       success: true,
       message: 'Product created successfully',
       data: product
+    });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'Product',
+      resourceId: product._id,
+      description: `Created new product: ${product.name} (SKU: ${product.sku})`,
+      changes: { old: null, new: product.toObject() }
     });
 
   } catch (error) {
@@ -1177,6 +1187,15 @@ router.put('/:id', auth, async (req, res) => {
       data: product
     });
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Product',
+      resourceId: product._id,
+      description: `Updated product: ${product.name} (SKU: ${product.sku})`,
+      changes: { old: 'Previous state', new: req.body }
+    });
+
   } catch (error) {
     console.error('Update product error:', error);
     res.status(500).json({
@@ -1233,6 +1252,15 @@ router.patch('/:id/min-selling-price', auth, async (req, res) => {
       message: 'Minimum selling price updated successfully',
       data: product
     });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Product',
+      resourceId: product._id,
+      description: `Updated minimum selling price for ${product.name} to ${minSellingPrice}`,
+      changes: { old: 'Previous pricing', new: product.pricing }
+    });
   } catch (error) {
     console.error('Update min selling price error:', error);
     res.status(500).json({
@@ -1267,6 +1295,14 @@ router.delete('/:id', auth, async (req, res) => {
     res.json({
       success: true,
       message: 'Product deactivated successfully'
+    });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DELETE',
+      resource: 'Product',
+      resourceId: product._id,
+      description: `Deactivated product: ${product.name} (SKU: ${product.sku})`
     });
 
   } catch (error) {

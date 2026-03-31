@@ -6,6 +6,7 @@ const Buyer = require('../models/Buyer');
 const Sale = require('../models/Sale');
 const auth = require('../middleware/auth');
 const BalanceService = require('../services/BalanceService');
+const { logActivity } = require('../utils/auditLogger');
 
 const router = express.Router();
 
@@ -195,6 +196,15 @@ router.post('/customer', auth, async (req, res) => {
         .populate('customerId', 'name company email phone')
         .populate('createdBy', 'name')
         .lean();
+
+      // Log the activity
+      await logActivity(req, {
+        action: 'CREATE',
+        resource: 'CustomerPayment',
+        resourceId: payment._id,
+        description: `Created customer debit payment (refund/adjustment): ${paymentNumber}`,
+        changes: { old: null, new: payment.toObject() }
+      });
 
       return res.status(201).json({
         success: true,
@@ -417,6 +427,15 @@ router.post('/customer', auth, async (req, res) => {
       .populate('customerId', 'name company email phone')
       .populate('createdBy', 'name')
       .lean();
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'CustomerPayment',
+      resourceId: payment._id,
+      description: `Created customer payment: ${paymentNumber}`,
+      changes: { old: null, new: payment.toObject() }
+    });
 
     res.status(201).json({
       success: true,
@@ -718,6 +737,14 @@ router.post('/:paymentNumber/reverse', auth, async (req, res) => {
     } catch (balanceError) {
       console.error('Balance sync error after payment deletion:', balanceError);
     }
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DELETE',
+      resource: 'CustomerPayment',
+      resourceId: payment._id,
+      description: `Reversed/Deleted customer payment: ${paymentNumber}. Reason: ${reason}`
+    });
 
     res.json({
       success: true,

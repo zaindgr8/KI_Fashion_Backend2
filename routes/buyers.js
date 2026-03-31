@@ -4,6 +4,7 @@ const Buyer = require('../models/Buyer');
 const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
+const { logActivity } = require('../utils/auditLogger');
 const BalanceService = require('../services/BalanceService');
 
 
@@ -51,6 +52,15 @@ router.post('/', auth, checkPermission('buyers'), async (req, res) => {
     });
 
     await buyer.save();
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'Buyer',
+      resourceId: buyer._id,
+      description: `Created buyer: ${buyer.name} (${buyer.company || 'Individual'})`,
+      changes: { old: null, new: buyer.toObject() }
+    });
 
     res.status(201).json({
       success: true,
@@ -233,6 +243,15 @@ router.put('/:id', auth, checkPermission('buyers'), async (req, res) => {
       });
     }
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Buyer',
+      resourceId: buyer._id,
+      description: `Updated buyer details: ${buyer.name}`,
+      changes: { old: '?', new: buyer.toObject() }
+    });
+
     res.json({
       success: true,
       message: 'Buyer updated successfully',
@@ -282,6 +301,15 @@ router.patch('/:id/balance', auth, async (req, res) => {
 
     await buyer.save();
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE_BALANCE',
+      resource: 'Buyer',
+      resourceId: buyer._id,
+      description: `Updated buyer balance (${operation}): ${buyer.name} by £${amount}`,
+      changes: { old: '?', new: { currentBalance: buyer.currentBalance } }
+    });
+
     res.json({
       success: true,
       message: 'Buyer balance updated successfully',
@@ -313,6 +341,15 @@ router.delete('/:id', auth, checkPermission('buyers'), async (req, res) => {
         message: 'Buyer not found'
       });
     }
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DEACTIVATE',
+      resource: 'Buyer',
+      resourceId: buyer._id,
+      description: `Deactivated buyer: ${buyer.name}`,
+      changes: { old: { isActive: true }, new: { isActive: false } }
+    });
 
     res.json({
       success: true,

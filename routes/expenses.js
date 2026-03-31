@@ -4,6 +4,7 @@ const Expense = require('../models/Expense');
 const CostType = require('../models/CostType');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
+const { logActivity } = require('../utils/auditLogger');
 
 
 const router = express.Router();
@@ -103,6 +104,15 @@ router.post('/', auth, checkPermission('expenses'), async (req, res) => {
         }
       })
       .populate('createdBy', 'name');
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'Expense',
+      resourceId: populatedExpense._id,
+      description: `Created expense ${populatedExpense.expenseNumber}: ${populatedExpense.description} (£${populatedExpense.amount})`,
+      changes: { old: null, new: populatedExpense.toObject() }
+    });
 
     res.status(201).json({
       success: true,
@@ -285,6 +295,15 @@ router.put('/:id', auth, checkPermission('expenses'), async (req, res) => {
       });
     }
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Expense',
+      resourceId: expense._id,
+      description: `Updated expense ${expense.expenseNumber}: ${expense.description}`,
+      changes: { old: '?', new: expense.toObject() }
+    });
+
     res.json({
       success: true,
       message: 'Expense updated successfully',
@@ -312,6 +331,15 @@ router.delete('/:id', auth, checkPermission('expenses'), async (req, res) => {
         message: 'Expense not found'
       });
     }
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DELETE',
+      resource: 'Expense',
+      resourceId: expense._id,
+      description: `Deleted expense: ${expense.description}`,
+      changes: { old: expense.toObject(), new: null }
+    });
 
     res.json({
       success: true,

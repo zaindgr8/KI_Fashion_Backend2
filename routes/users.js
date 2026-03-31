@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const User = require('../models/User');
 const auth = require('../middleware/auth');
+const { logActivity } = require('../utils/auditLogger');
 
 const router = express.Router();
 
@@ -78,6 +79,17 @@ router.post('/', auth, requireAdmin, async (req, res) => {
     });
 
     await user.save();
+
+    // Log the activity
+    const auditData = user.toObject();
+    delete auditData.password;
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'User',
+      resourceId: user._id,
+      description: `Created new user: ${user.name} (${user.email}) with role ${user.role}`,
+      changes: { old: null, new: auditData }
+    });
 
     const userResponse = user.toObject();
     delete userResponse.password;
@@ -219,6 +231,15 @@ router.put('/:id', auth, requireAdmin, async (req, res) => {
       });
     }
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'User',
+      resourceId: user._id,
+      description: `Updated user profile: ${user.name} (${user.email})`,
+      changes: { old: req.body.role ? 'Role update attempted' : 'Metadata update', new: updates }
+    });
+
     res.json({
       success: true,
       message: 'User updated successfully',
@@ -253,6 +274,14 @@ router.patch('/:id/deactivate', auth, requireAdmin, async (req, res) => {
     res.json({
       success: true,
       message: 'User deactivated successfully'
+    });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DEACTIVATE',
+      resource: 'User',
+      resourceId: user._id,
+      description: `Deactivated user account: ${user.name} (${user.email})`
     });
 
   } catch (error) {
@@ -305,6 +334,14 @@ router.patch('/:id/regenerate-password', auth, async (req, res) => {
       success: true,
       message: 'Password regenerated successfully',
       password: newPassword
+    });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'PASSWORD_RESET',
+      resource: 'User',
+      resourceId: user._id,
+      description: `Regenerated password for user: ${user.name} (${user.email})`
     });
 
   } catch (error) {

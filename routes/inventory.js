@@ -6,6 +6,7 @@ const Buyer = require('../models/Buyer');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { generateSignedUrls } = require('../utils/imageUpload');
+const { logActivity } = require('../utils/auditLogger');
 
 const { generateCatalogQR } = require('../utils/qrCode');
 const { sendResponse } = require('../utils/helpers');
@@ -60,21 +61,21 @@ async function convertInventoryProductImages(inventoryItems, usePublicUrls = fal
           // Use public URLs directly (bucket is public)
           // URLs are already in public format: https://storage.googleapis.com/bucket/path
           // No conversion needed - images are already public URLs
-           
+
         } else {
           // Generate signed URLs (more secure, but slower)
           const signedUrls = await generateSignedUrls(item.product.images);
           // If signed URL generation fails, fall back to public URLs
           if (signedUrls.length === item.product.images.length) {
             item.product.images = signedUrls;
-             
+
           } else {
             // Some signed URLs failed, use original public URLs
             console.warn(`[Inventory] Some signed URLs failed for product ${item.product.name || item.product._id}, using public URLs as fallback`);
           }
         }
       } else {
-         
+
       }
     } else {
       console.warn(`[Inventory] Item missing product:`, item?._id || 'unknown');
@@ -135,7 +136,7 @@ router.get('/', auth, checkPermission('inventory'), async (req, res) => {
 
     // 3. Unwind Product (ensure it exists and is active)
     // Use preserveNullAndEmptyArrays: false to filter out inventory without products
-    pipeline.push({ 
+    pipeline.push({
       $unwind: {
         path: '$product',
         preserveNullAndEmptyArrays: false // Filter out inventory without products
@@ -331,6 +332,15 @@ router.post('/add-stock', auth, checkPermission('inventory'), async (req, res) =
       data: updatedInventory
     });
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Inventory',
+      resourceId: inventory._id,
+      description: `Added ${quantity} stock to ${updatedInventory.product.name} (Ref: ${reference})`,
+      changes: { old: inventory.currentStock, new: updatedInventory.currentStock }
+    });
+
   } catch (error) {
     console.error('Add stock error:', error);
     res.status(500).json({
@@ -380,6 +390,15 @@ router.post('/reduce-stock', auth, checkPermission('inventory'), async (req, res
       data: updatedInventory
     });
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Inventory',
+      resourceId: inventory._id,
+      description: `Reduced ${quantity} stock from ${updatedInventory.product.name} (Ref: ${reference})`,
+      changes: { old: inventory.currentStock, new: updatedInventory.currentStock }
+    });
+
   } catch (error) {
     console.error('Reduce stock error:', error);
     res.status(500).json({
@@ -427,6 +446,15 @@ router.post('/adjust-stock', auth, checkPermission('inventory'), async (req, res
       success: true,
       message: 'Stock adjusted successfully',
       data: updatedInventory
+    });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Inventory',
+      resourceId: inventory._id,
+      description: `Adjusted stock for ${updatedInventory.product.name} from ${inventory.currentStock} to ${newQuantity} (Ref: ${reference})`,
+      changes: { old: inventory.currentStock, new: newQuantity }
     });
 
   } catch (error) {
@@ -494,6 +522,15 @@ router.post('/transfer-stock', auth, checkPermission('inventory'), async (req, r
         from: await Inventory.findById(fromInventory._id).populate('product', 'name sku'),
         to: await Inventory.findById(toInventory._id).populate('product', 'name sku')
       }
+    });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Inventory',
+      resourceId: fromInventory._id,
+      description: `Transferred ${quantity} units from ${fromInventory.product} to ${toInventory.product}`,
+      changes: { old: `From: ${fromInventory.currentStock}, To: ${toInventory.currentStock}`, new: `Transferred ${quantity}` }
     });
 
   } catch (error) {
@@ -740,7 +777,7 @@ router.put('/:inventoryId/settings', auth, checkPermission('inventory'), async (
     }
 
     if (req.body.minSellingPrice !== undefined) {
-      if (!['super-admin', 'admin'].includes(req.user?.role)) {
+      if (!['super-admin', 'admin', 'employee'].includes(req.user?.role)) {
         return res.status(403).json({
           success: false,
           message: 'Only admin or super-admin can update minimum selling price'
@@ -769,6 +806,15 @@ router.put('/:inventoryId/settings', auth, checkPermission('inventory'), async (
       success: true,
       message: 'Inventory settings updated successfully',
       data: inventory
+    });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Inventory',
+      resourceId: inventory._id,
+      description: `Updated inventory settings for ${inventory.product.name}`,
+      changes: { old: 'Previous settings', new: req.body }
     });
 
   } catch (error) {

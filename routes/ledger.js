@@ -10,6 +10,7 @@ const Buyer = require("../models/Buyer");
 const LogisticsCompany = require("../models/LogisticsCompany");
 const auth = require("../middleware/auth");
 const BalanceService = require("../services/BalanceService");
+const { logActivity } = require("../utils/auditLogger");
 
 const router = express.Router()
 
@@ -641,6 +642,15 @@ router.post("/entry", auth, async (req, res) => {
           date: entryData.date || new Date(),
         });
 
+        // Log the activity
+        await logActivity(req, {
+          action: 'CREATE',
+          resource: 'UniversalPayment',
+          resourceId: result.ledgerEntries?.[0]?._id,
+          description: `Created universal payment distribution for supplier: ${entityId} (Amount: €${credit})`,
+          changes: { old: null, new: result }
+        });
+
         return res.status(201).json({
           success: true,
           message: "Payment distributed successfully",
@@ -1238,6 +1248,15 @@ router.post("/entry", auth, async (req, res) => {
       console.log(
         "[Payment Transaction] Successfully committed regular payment"
       );
+
+      // Log the activity
+      await logActivity(req, {
+        action: 'CREATE',
+        resource: 'LedgerEntry',
+        resourceId: entry._id,
+        description: `Created ledger entry: ${entryData.description || 'Manual entry'} (Type: ${entryData.transactionType})`,
+        changes: { old: null, new: entry.toObject() }
+      });
 
       res.status(201).json({
         success: true,

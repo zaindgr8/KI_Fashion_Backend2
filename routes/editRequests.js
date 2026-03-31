@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const EditRequest = require('../models/EditRequest');
 const auth = require('../middleware/auth');
 const EditRequestService = require('../services/EditRequestService');
+const { logActivity } = require('../utils/auditLogger');
 
 const router = express.Router();
 
@@ -42,6 +43,15 @@ router.post('/', auth, async (req, res) => {
       reason,
       requestedBy: req.user._id,
       entityRef
+    });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'EditRequest',
+      resourceId: editRequest._id,
+      description: `Submitted ${requestType} request ${editRequest.requestNumber} for ${entityType} (${entityRef || entityId})`,
+      changes: { old: null, new: editRequest.toObject() }
     });
 
     res.status(201).json({
@@ -219,6 +229,15 @@ router.patch('/:id/approve', auth, async (req, res) => {
       return res.status(status).json(result);
     }
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'EditRequest',
+      resourceId: req.params.id,
+      description: `Approved request ${result.editRequest.requestNumber} for ${result.editRequest.entityType}`,
+      changes: { old: 'pending', new: 'approved', reviewNote }
+    });
+
     res.json({
       success: true,
       message: `Request ${result.editRequest.requestNumber} approved and applied`,
@@ -258,6 +277,15 @@ router.patch('/:id/reject', auth, async (req, res) => {
     if (!result.success) {
       return res.status(400).json(result);
     }
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'EditRequest',
+      resourceId: req.params.id,
+      description: `Rejected request ${result.editRequest.requestNumber} for ${result.editRequest.entityType}`,
+      changes: { old: 'pending', new: 'rejected', reviewNote }
+    });
 
     res.json({
       success: true,
@@ -313,6 +341,15 @@ router.delete('/:id', auth, async (req, res) => {
     }
 
     await EditRequest.findByIdAndDelete(req.params.id);
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DELETE',
+      resource: 'EditRequest',
+      resourceId: editRequest._id,
+      description: `Cancelled request ${editRequest.requestNumber}`,
+      changes: { old: editRequest.toObject(), new: null }
+    });
 
     res.json({
       success: true,

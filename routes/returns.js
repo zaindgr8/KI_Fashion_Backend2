@@ -10,6 +10,7 @@ const auth = require('../middleware/auth');
 const { sendResponse } = require('../utils/helpers');
 const BalanceService = require('../services/BalanceService');
 const PacketReturnService = require('../services/PacketReturnService');
+const { logActivity } = require('../utils/auditLogger');
 
 const router = express.Router();
 
@@ -108,7 +109,7 @@ router.get('/universal-search', auth, async (req, res) => {
       availablePackets: ps.availablePackets,
       costPricePerPacket: ps.costPricePerPacket,
       landedPricePerPacket: ps.landedPricePerPacket,
-      pricePerItem: ps.isLoose 
+      pricePerItem: ps.isLoose
         ? (ps.landedPricePerPacket || ps.costPricePerPacket || 0)
         : ((ps.landedPricePerPacket || ps.costPricePerPacket || 0) / (ps.totalItemsPerPacket || 1))
     }));
@@ -125,14 +126,14 @@ router.get('/universal-search', auth, async (req, res) => {
 
     // Transform products (group by product-supplier combination)
     const productResults = [];
-    
+
     for (const inventory of inventories) {
       const supplierBatches = new Map();
-      
+
       for (const batch of inventory.purchaseBatches) {
         if (batch.remainingQuantity > 0) {
           const supplierId = batch.supplierId?.toString() || batch.supplierId;
-          
+
           if (!supplierBatches.has(supplierId)) {
             supplierBatches.set(supplierId, {
               supplierId,
@@ -141,23 +142,23 @@ router.get('/universal-search', auth, async (req, res) => {
               batches: []
             });
           }
-          
+
           const supplierData = supplierBatches.get(supplierId);
           supplierData.stock += batch.remainingQuantity;
           supplierData.costPriceSum += batch.remainingQuantity * batch.costPrice;
           supplierData.batches.push(batch);
         }
       }
-      
+
       // Create entries for each supplier
       for (const [supplierId, data] of supplierBatches) {
         let supplier = null;
         try {
           supplier = await Supplier.findById(supplierId).select('name company').lean();
         } catch (err) {
-           
+
         }
-        
+
         productResults.push({
           _id: `${inventory.product._id}_${supplierId}`,
           type: 'product',
@@ -186,7 +187,7 @@ router.get('/universal-search', auth, async (req, res) => {
         b.productCode?.toLowerCase() === searchTerm.toLowerCase() ||
         b.productName?.toLowerCase() === searchTerm.toLowerCase()
       );
-      
+
       if (aExact && !bExact) return -1;
       if (!aExact && bExact) return 1;
       return 0;
@@ -195,7 +196,7 @@ router.get('/universal-search', auth, async (req, res) => {
     packetResults.sort(sortByRelevance);
     productResults.sort(sortByRelevance);
 
-     
+
 
     return sendResponse.success(res, {
       packets: packetResults,
@@ -406,7 +407,7 @@ router.get('/products-for-return', auth, async (req, res) => {
         isActive: true,
         'purchaseBatches.0': { $exists: true }
       });
-       
+
     }
 
     return sendResponse.success(res, result);
@@ -477,7 +478,7 @@ router.get('/packet-stocks-for-return', auth, async (req, res) => {
         : ps.availablePackets * ps.totalItemsPerPacket
     }));
 
-     
+
     return sendResponse.success(res, result);
 
   } catch (error) {
@@ -744,6 +745,15 @@ router.post('/packet-return', auth, async (req, res) => {
     await session.commitTransaction();
     session.endSession();
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'SupplierReturn',
+      resourceId: returnDoc._id,
+      description: `Created packet-level supplier return: ${returnDoc._id} (Supplier: ${supplier.company})`,
+      changes: { old: null, new: returnDoc.toObject() }
+    });
+
     return sendResponse.success(res, {
       return: returnDoc,
       packetDetails: {
@@ -772,7 +782,7 @@ router.post('/product-return', auth, async (req, res) => {
   session.startTransaction();
 
   try {
-    if (!['super-admin', 'admin'].includes(req.user.role)) {
+    if (!['super-admin', 'admin', 'employee'].includes(req.user.role)) {
       await session.abortTransaction();
       session.endSession();
       return sendResponse.error(res, 'Only admins and managers can create returns', 403);
@@ -959,8 +969,8 @@ router.post('/product-return', auth, async (req, res) => {
           reason: reason || '',
           returnComposition,
           packetAdjustments: [],
-          packetWarnings: skipPacketAdjustment 
-            ? ['Packet adjustment skipped per request'] 
+          packetWarnings: skipPacketAdjustment
+            ? ['Packet adjustment skipped per request']
             : ['No variant composition provided - packet stock not adjusted']
         });
 
@@ -1133,6 +1143,15 @@ router.post('/product-return', auth, async (req, res) => {
       { path: 'returnedBy', select: 'name' },
       { path: 'items.product', select: 'name sku productCode' }
     ]);
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'SupplierReturn',
+      resourceId: returnDoc._id,
+      description: `Created product-level supplier return: ${returnDoc._id} (Supplier: ${supplier.company})`,
+      changes: { old: null, new: returnDoc.toObject() }
+    });
 
     return sendResponse.success(res, {
       return: returnDoc,

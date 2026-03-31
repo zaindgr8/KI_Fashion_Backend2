@@ -5,6 +5,7 @@ const User = require('../models/User');
 const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
+const { logActivity } = require('../utils/auditLogger');
 
 const BalanceService = require('../services/BalanceService');
 const SupplierDeletionService = require('../services/SupplierDeletionService');
@@ -74,6 +75,15 @@ router.post('/', auth, checkPermission('suppliers'), async (req, res) => {
         { new: true }
       );
     }
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'Supplier',
+      resourceId: supplier._id,
+      description: `Created supplier: ${supplier.name} (${supplier.company})`,
+      changes: { old: null, new: supplier.toObject() }
+    });
 
     res.status(201).json({
       success: true,
@@ -290,6 +300,15 @@ router.put('/:id', auth, checkPermission('suppliers'), async (req, res) => {
       });
     }
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Supplier',
+      resourceId: supplier._id,
+      description: `Updated supplier details: ${supplier.name}`,
+      changes: { old: '?', new: supplier.toObject() }
+    });
+
     res.json({
       success: true,
       message: 'Supplier updated successfully',
@@ -339,6 +358,15 @@ router.patch('/:id/balance', auth, async (req, res) => {
 
     await supplier.save();
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE_BALANCE',
+      resource: 'Supplier',
+      resourceId: supplier._id,
+      description: `Updated supplier balance (${operation}): ${supplier.name} by £${amount}`,
+      changes: { old: '?', new: { currentBalance: supplier.currentBalance } }
+    });
+
     res.json({
       success: true,
       message: 'Supplier balance updated successfully',
@@ -362,6 +390,15 @@ router.delete('/:id/hard', auth, async (req, res) => {
     }
 
     const deletionResult = await SupplierDeletionService.hardDeleteSupplier(req.params.id);
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DELETE_PERMANENT',
+      resource: 'Supplier',
+      resourceId: req.params.id,
+      description: `Permanently deleted supplier and all related records: ${deletionResult.supplier.name}`,
+      changes: { old: deletionResult, new: null }
+    });
 
     res.json({
       success: true,
@@ -393,6 +430,15 @@ router.delete('/:id', auth, checkPermission('suppliers'), async (req, res) => {
         message: 'Supplier not found'
       });
     }
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DEACTIVATE',
+      resource: 'Supplier',
+      resourceId: supplier._id,
+      description: `Deactivated supplier: ${supplier.name}`,
+      changes: { old: { isActive: true }, new: { isActive: false } }
+    });
 
     res.json({
       success: true,

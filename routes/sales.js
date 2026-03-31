@@ -15,6 +15,7 @@ const LogisticsCompany = require('../models/LogisticsCompany');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { generateSaleQR } = require('../utils/qrCode');
+const { logActivity } = require('../utils/auditLogger');
 
 const { generateInvoicePDF } = require('../utils/invoiceGenerator');
 
@@ -674,6 +675,15 @@ router.post('/', auth, checkPermission('sales'), async (req, res) => {
 
     await sale.save();
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'Sale',
+      resourceId: sale._id,
+      description: `Created new sale: ${sale.saleNumber} - Total: ${sale.grandTotal.toFixed(2)}`,
+      changes: { old: null, new: sale.toObject() }
+    });
+
     // Deduct stock for each item immediately (auto-delivered sales)
     if (!isManualSale) {
       const stockSession = await mongoose.startSession();
@@ -1326,11 +1336,16 @@ router.put('/:id', auth, async (req, res) => {
       },
       { new: true, runValidators: true }
     )
-      .populate('buyer', 'name company')
-      .populate('items.product', 'name sku')
-      .populate('logisticsCompany', 'name code rates.boxRate')
-      .populate('deliveryPersonnel', 'name phone')
       .populate('createdBy', 'name');
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'UPDATE',
+      resource: 'Sale',
+      resourceId: sale._id,
+      description: `Updated sale: ${sale.saleNumber}`,
+      changes: { old: 'Previous state', new: req.body }
+    });
 
     // Re-sync ledger entries for the updated sale
     try {
@@ -1662,6 +1677,14 @@ router.patch('/:id/payment', auth, async (req, res) => {
       data: sale
     });
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'Sale',
+      resourceId: sale._id,
+      description: `Updated payment status for sale ${sale.saleNumber} to ${paymentStatus}`
+    });
+
   } catch (error) {
     console.error('Update payment status error:', error);
     res.status(500).json({
@@ -1698,6 +1721,14 @@ router.delete('/:id', auth, async (req, res) => {
     }
 
     res.json({ success: true, message: `Sale ${deletedSale.saleNumber} deleted successfully` });
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DELETE',
+      resource: 'Sale',
+      resourceId: saleId,
+      description: `Deleted sale: ${deletedSale.saleNumber}`
+    });
   } catch (error) {
     console.error('Delete sale error:', error);
     res.status(500).json({ success: false, message: error.message });
