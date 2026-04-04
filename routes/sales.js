@@ -204,6 +204,53 @@ const normalizePacketSaleItems = (items = []) => {
   });
 };
 
+const validatePacketSaleItems = async (items = []) => {
+  const packetSaleItems = items.filter((item) => item?.isPacketSale);
+  if (!packetSaleItems.length) {
+    return;
+  }
+
+  const packetStockIds = packetSaleItems
+    .map((item) => item.packetStock)
+    .filter(Boolean);
+
+  if (packetStockIds.length !== packetSaleItems.length) {
+    throw new Error('Every packet sale item must include packetStock.');
+  }
+
+  const packetStocks = await PacketStock.find({
+    _id: { $in: packetStockIds },
+    isActive: true
+  })
+    .select('_id product barcode availablePackets reservedPackets')
+    .lean();
+
+  const packetStockMap = new Map(packetStocks.map((stock) => [stock._id.toString(), stock]));
+
+  for (const item of packetSaleItems) {
+    const packetQty = getPacketQuantity(item);
+    if (!packetQty) {
+      throw new Error(`Invalid packet quantity for product ${item.product}. Packet lines must map to a whole number of packets.`);
+    }
+
+    item.packetQuantity = packetQty;
+
+    const packetStock = packetStockMap.get(item.packetStock.toString ? item.packetStock.toString() : String(item.packetStock));
+    if (!packetStock) {
+      throw new Error(`Packet stock not found or inactive for packetStock ${item.packetStock}.`);
+    }
+
+    if (packetStock.product.toString() !== (item.product.toString ? item.product.toString() : String(item.product))) {
+      throw new Error(`Packet stock ${packetStock.barcode || item.packetStock} does not belong to product ${item.product}.`);
+    }
+
+    const actualAvailable = Number(packetStock.availablePackets || 0) - Number(packetStock.reservedPackets || 0);
+    if (actualAvailable < packetQty) {
+      throw new Error(`Insufficient packet stock for ${packetStock.barcode || item.packetStock}. Available: ${actualAvailable}, required: ${packetQty}.`);
+    }
+  }
+};
+
 const normalizeShippingPayload = async (payload = {}) => {
   const addShippingCost = Boolean(payload.addShippingCost);
 
@@ -591,6 +638,15 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
       }
     }
 
+    try {
+      await validatePacketSaleItems(req.body.items);
+    } catch (packetValidationError) {
+      return res.status(400).json({
+        success: false,
+        message: packetValidationError.message
+      });
+    }
+
     const saleNumber = await generateSaleNumber();
     const { subtotal, totalTax, grandTotal } = calculateTotals(
       req.body.items,
@@ -652,50 +708,43 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
       paymentStatus = 'paid';
     }
 
-    const sale = new Sale({
-      ...req.body,
-      saleNumber,
-      subtotal,
-      totalTax,
-      grandTotal,
-      shippingCost: shippingMeta.buyerShippingCharge,
-      addShippingCost: shippingMeta.addShippingCost,
-      buyerShippingCharge: shippingMeta.buyerShippingCharge,
-      shippingBoxes: shippingMeta.shippingBoxes,
-      logisticsCompany: shippingMeta.logisticsCompanyId,
-      logisticsBoxRateSnapshot: shippingMeta.logisticsBoxRateSnapshot,
-      logisticsPayable: shippingMeta.logisticsPayable,
-      cashPayment,
-      bankPayment,
-      paymentStatus,
-      isManualSale,
-      // Auto-deliver all sales - stock is deducted immediately
-      deliveryStatus: 'delivered',
-      createdBy: req.user._id
-    });
+    const saleSession = await mongoose.startSession();
+    let sale;
 
-    await sale.save();
+    try {
+      saleSession.startTransaction();
 
-    // Log the activity
-    await logActivity(req, {
-      action: 'CREATE',
-      resource: 'Sale',
-      resourceId: sale._id,
-      description: `Created new sale: ${sale.saleNumber} - Total: ${sale.grandTotal.toFixed(2)}`,
-      changes: { old: null, new: sale.toObject() }
-    });
+      sale = new Sale({
+        ...req.body,
+        saleNumber,
+        subtotal,
+        totalTax,
+        grandTotal,
+        shippingCost: shippingMeta.buyerShippingCharge,
+        addShippingCost: shippingMeta.addShippingCost,
+        buyerShippingCharge: shippingMeta.buyerShippingCharge,
+        shippingBoxes: shippingMeta.shippingBoxes,
+        logisticsCompany: shippingMeta.logisticsCompanyId,
+        logisticsBoxRateSnapshot: shippingMeta.logisticsBoxRateSnapshot,
+        logisticsPayable: shippingMeta.logisticsPayable,
+        cashPayment,
+        bankPayment,
+        paymentStatus,
+        isManualSale,
+        // Auto-deliver all sales - stock is deducted immediately
+        deliveryStatus: 'delivered',
+        createdBy: req.user._id
+      });
 
-    // Deduct stock for each item immediately (auto-delivered sales)
-    if (!isManualSale) {
-      const stockSession = await mongoose.startSession();
-      stockSession.startTransaction();
-      try {
+      await sale.save({ session: saleSession });
+
+      // Deduct stock for each item immediately (auto-delivered sales)
+      if (!isManualSale) {
         for (const item of req.body.items) {
-          const product = await Product.findById(item.product).session(stockSession);
-          const inventory = await Inventory.findOne({ product: item.product }).session(stockSession);
+          const product = await Product.findById(item.product).session(saleSession);
+          const inventory = await Inventory.findOne({ product: item.product }).session(saleSession);
           if (!inventory) {
-            console.warn(`Inventory not found for product ${item.product} when creating sale ${saleNumber}`);
-            continue;
+            throw new Error(`Inventory not found for product ${item.product} when creating sale ${saleNumber}`);
           }
 
           // Deduct variant-specific stock if applicable
@@ -709,7 +758,6 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
               req.user._id,
               `Sale: ${saleNumber}`
             );
-            console.log(`Variant stock deducted for product ${item.product} (${item.variant.color}-${item.variant.size}): ${item.quantity}`);
           } else {
             // Deduct from total stock directly
             inventory.currentStock = Math.max(0, inventory.currentStock - item.quantity);
@@ -725,44 +773,40 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
             });
 
             inventory.lastStockUpdate = new Date();
-            await inventory.save({ session: stockSession });
-
+            await inventory.save({ session: saleSession });
           }
 
-          // Handle PacketStock - always use sellPackets (no more reservation)
-          if (item.isPacketSale && item.packetStock) {
-            const packetStock = await PacketStock.findById(item.packetStock).session(stockSession);
-            if (packetStock) {
-              const packetQty = getPacketQuantity(item);
-              if (packetQty) {
-                await packetStock.sellPackets(packetQty);
-              } else {
-                console.warn(`Skipping packet stock deduction for sale ${sale.saleNumber}: could not resolve packetQuantity for item ${item.product}`);
-              }
-
-            } else {
-              console.warn(`PacketStock not found for ID ${item.packetStock} when creating sale ${saleNumber}`);
+          if (item.isPacketSale) {
+            const packetQty = getPacketQuantity(item);
+            if (!packetQty) {
+              throw new Error(`Invalid packet quantity for product ${item.product} in sale ${saleNumber}`);
             }
+
+            const packetStock = await PacketStock.findOne({
+              _id: item.packetStock,
+              isActive: true
+            }).session(saleSession);
+
+            if (!packetStock) {
+              throw new Error(`PacketStock ${item.packetStock} not found or inactive for sale ${saleNumber}`);
+            }
+
+            const actualAvailable = packetStock.availablePackets - packetStock.reservedPackets;
+            if (actualAvailable < packetQty) {
+              throw new Error(`Insufficient packet stock for ${packetStock.barcode}. Available: ${actualAvailable}, required: ${packetQty}`);
+            }
+
+            packetStock.availablePackets -= packetQty;
+            packetStock.reservedPackets = Math.max(0, packetStock.reservedPackets - packetQty);
+            packetStock.soldPackets += packetQty;
+            await packetStock.save({ session: saleSession });
           }
         }
-        await stockSession.commitTransaction();
-        stockSession.endSession();
-      } catch (stockError) {
-        await stockSession.abortTransaction();
-        stockSession.endSession();
-        console.error(`Error deducting stock atomically for sale ${saleNumber}:`, stockError);
-        // Sale is already saved — log error but don't fail the response
       }
-    }
 
-    // Create ledger entries immediately
-    try {
+      // Create ledger entries immediately
       if (isManualSale) {
-        // For manual sales, create ledger entries with customer name in description
-        // Note: We need a buyer entityId, so we'll create a special "Manual Customers" buyer
-        // or use a placeholder. For now, we'll skip ledger creation for manual sales
-        // and log it, or create entries with a note in description.
-        // TODO: Consider creating a special "Manual Customers" buyer group for ledger tracking
+        // TODO: Consider creating a dedicated Manual Customer ledger entity.
         console.log(`Manual sale ${saleNumber} created for customer: ${req.body.manualCustomer.name}. Ledger entries skipped (no buyer entity).`);
       } else {
         // 1. Create sale entry (debit) for the full grand total
@@ -783,7 +827,7 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
             remainingBalance: remainingBalance
           },
           createdBy: req.user._id
-        });
+        }, saleSession);
 
         // 2. Create receipt entry (credit) for cash payment if any
         let cashLedgerEntry = null;
@@ -807,7 +851,7 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
               remainingBalance: 0
             },
             createdBy: req.user._id
-          });
+          }, saleSession);
         }
 
         // 3. Create receipt entry (credit) for bank/card payment if any
@@ -832,60 +876,55 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
               remainingBalance: 0
             },
             createdBy: req.user._id
-          });
+          }, saleSession);
         }
 
         // 3b. Create a Payment document so sale-time payments appear in Payment Receipts tab
         const totalPaidAtSale = cashPayment + bankPayment;
         if (totalPaidAtSale > 0) {
-          try {
-            const paymentNumber = await Payment.getNextPaymentNumber();
-            const saleDistributions = [];
-            if (cashLedgerEntry) {
-              saleDistributions.push({
-                saleId: sale._id,
-                saleNumber,
-                amountApplied: cashPayment,
-                previousBalance: grandTotal,
-                newBalance: remainingBalance,
-                ledgerEntryId: cashLedgerEntry._id,
-                isAdvance: false
-              });
-            }
-            if (bankLedgerEntry) {
-              saleDistributions.push({
-                saleId: sale._id,
-                saleNumber,
-                amountApplied: bankPayment,
-                previousBalance: grandTotal,
-                newBalance: remainingBalance,
-                ledgerEntryId: bankLedgerEntry._id,
-                isAdvance: false
-              });
-            }
-            const salePayment = new Payment({
-              paymentNumber,
-              paymentType: 'customer',
-              paymentDirection: 'credit',
-              customerId: sale.buyer,
-              totalAmount: totalPaidAtSale,
-              cashAmount: cashPayment,
-              bankAmount: bankPayment,
-              paymentMethod: cashPayment > 0 ? 'cash' : 'bank',
-              paymentDate: sale.saleDate || new Date(),
-              description: `Payment at time of Sale ${saleNumber}`,
-              distributions: saleDistributions,
-              advanceAmount: 0,
-              balanceBefore: grandTotal,
-              balanceAfter: remainingBalance,
-              status: 'active',
-              createdBy: req.user._id
+          const paymentNumber = await Payment.getNextPaymentNumber();
+          const saleDistributions = [];
+          if (cashLedgerEntry) {
+            saleDistributions.push({
+              saleId: sale._id,
+              saleNumber,
+              amountApplied: cashPayment,
+              previousBalance: grandTotal,
+              newBalance: remainingBalance,
+              ledgerEntryId: cashLedgerEntry._id,
+              isAdvance: false
             });
-            await salePayment.save();
-          } catch (paymentCreateError) {
-            console.error(`Error creating Payment document for sale ${saleNumber}:`, paymentCreateError);
-            // Non-fatal: ledger entries and sale are already saved
           }
+          if (bankLedgerEntry) {
+            saleDistributions.push({
+              saleId: sale._id,
+              saleNumber,
+              amountApplied: bankPayment,
+              previousBalance: grandTotal,
+              newBalance: remainingBalance,
+              ledgerEntryId: bankLedgerEntry._id,
+              isAdvance: false
+            });
+          }
+          const salePayment = new Payment({
+            paymentNumber,
+            paymentType: 'customer',
+            paymentDirection: 'credit',
+            customerId: sale.buyer,
+            totalAmount: totalPaidAtSale,
+            cashAmount: cashPayment,
+            bankAmount: bankPayment,
+            paymentMethod: cashPayment > 0 ? 'cash' : 'bank',
+            paymentDate: sale.saleDate || new Date(),
+            description: `Payment at time of Sale ${saleNumber}`,
+            distributions: saleDistributions,
+            advanceAmount: 0,
+            balanceBefore: grandTotal,
+            balanceAfter: remainingBalance,
+            status: 'active',
+            createdBy: req.user._id
+          });
+          await salePayment.save({ session: saleSession });
         }
 
         // 4. Update buyer balance and total sales
@@ -894,24 +933,11 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
           {
             $inc: {
               totalSales: grandTotal,
-              currentBalance: remainingBalance // Increase balance by remaining amount (debit - credit)
+              currentBalance: remainingBalance
             }
-          }
+          },
+          { session: saleSession }
         );
-
-        // 5. Recalculate and sync buyer balance from ledger (source of truth)
-        // This ensures the balance is always accurate even if there were previous discrepancies
-        try {
-          const ledgerBalance = await Ledger.getBalance('buyer', sale.buyer);
-          await Buyer.findByIdAndUpdate(
-            sale.buyer,
-            { currentBalance: ledgerBalance }
-          );
-
-        } catch (balanceError) {
-          console.error('Error syncing buyer balance from ledger after sale creation:', balanceError);
-          // Don't fail the sale creation if balance sync fails
-        }
       }
 
       if (shippingMeta.logisticsPayable > 0 && shippingMeta.logisticsCompanyId) {
@@ -928,11 +954,37 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
           description: `Shipping payable for Sale ${saleNumber} - ${shippingMeta.shippingBoxes} boxes x ${shippingMeta.logisticsBoxRateSnapshot.toFixed(2)} = ${shippingMeta.logisticsPayable.toFixed(2)}`,
           remarks: `shippingBoxes=${shippingMeta.shippingBoxes};buyerShippingCharge=${shippingMeta.buyerShippingCharge.toFixed(2)}`,
           createdBy: req.user._id
-        });
+        }, saleSession);
       }
-    } catch (ledgerError) {
-      console.error('Error creating ledger entries for sale:', ledgerError);
-      // Don't fail the sale creation if ledger update fails, but log it
+
+      await saleSession.commitTransaction();
+    } catch (transactionError) {
+      await saleSession.abortTransaction();
+      throw transactionError;
+    } finally {
+      saleSession.endSession();
+    }
+
+    // Log the activity after successful commit
+    await logActivity(req, {
+      action: 'CREATE',
+      resource: 'Sale',
+      resourceId: sale._id,
+      description: `Created new sale: ${sale.saleNumber} - Total: ${sale.grandTotal.toFixed(2)}`,
+      changes: { old: null, new: sale.toObject() }
+    });
+
+    // Recalculate and sync buyer balance from ledger (source of truth)
+    if (!isManualSale) {
+      try {
+        const ledgerBalance = await Ledger.getBalance('buyer', sale.buyer);
+        await Buyer.findByIdAndUpdate(
+          sale.buyer,
+          { currentBalance: ledgerBalance }
+        );
+      } catch (balanceError) {
+        console.error('Error syncing buyer balance from ledger after sale creation:', balanceError);
+      }
     }
 
     // Populate sale for QR code and invoice generation

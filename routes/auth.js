@@ -13,7 +13,7 @@ const PasswordResetRequest = require('../models/PasswordResetRequest');
 const router = express.Router();
 
 const ROLE_OPTIONS = ['super-admin', 'admin',  'accountant', 'supplier', 'buyer'];
-const PORTAL_ACCESS_OPTIONS = ['crm', 'supplier', 'buyer'];
+const PORTAL_ACCESS_OPTIONS = ['crm', 'supplier', 'buyer', 'distributor'];
 const SIGNUP_SOURCES = ['crm', 'supplier-portal', 'distributor-portal', 'import'];
 
 // Roles allowed for self-registration (public signup)
@@ -142,8 +142,8 @@ router.post('/register', async (req, res) => {
     try {
       if (role === 'supplier' && supplierProfile) {
         const supplierPayload = {
-          name: supplierProfile.name,
-          company: supplierProfile.company || supplierProfile.name,
+          name: supplierProfile.name || name,
+          company: supplierProfile.company || supplierProfile.name || name,
           email: supplierProfile.email || email,
           phone: supplierProfile.phone || phone,
           alternatePhone: supplierProfile.alternatePhone || undefined,
@@ -456,7 +456,8 @@ function simplifyRelated(related) {
     company: obj.company,
     email: obj.email,
     phone: obj.phone,
-    phoneAreaCode: obj.phoneAreaCode
+    phoneAreaCode: obj.phoneAreaCode,
+    address: obj.address
   };
 }
 

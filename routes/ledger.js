@@ -632,7 +632,6 @@ router.post("/entry", auth, dateControl({ entityType: 'ledger', dateField: 'date
           message: "Supplier ID and payment amount are required",
         });
       }
-
       try {
         const result = await BalanceService.distributeUniversalPayment({
           supplierId: entityId,
@@ -662,6 +661,55 @@ router.post("/entry", auth, dateControl({ entityType: 'ledger', dateField: 'date
         return res.status(500).json({
           success: false,
           message: error.message || "Failed to distribute payment",
+        });
+      }
+    }
+
+    // Handle buyer receipts with universal distribution
+    if (
+      entryData.type === "buyer" &&
+      entryData.transactionType === "receipt" &&
+      (!entryData.referenceId || entryData.referenceId === "none")
+    ) {
+      // Universal receipt - distribute across pending sales
+      const { entityId, paymentMethod, credit } = entryData;
+
+      if (!entityId || !credit) {
+        return res.status(400).json({
+          success: false,
+          message: "Buyer ID and receipt amount are required",
+        });
+      }
+
+      try {
+        const result = await BalanceService.distributeBuyerPayment({
+          buyerId: entityId,
+          amount: credit,
+          paymentMethod: paymentMethod || "cash",
+          createdBy: req.user._id,
+          description: entryData.description,
+          date: entryData.date || new Date(),
+        });
+
+        // Log the activity
+        await logActivity(req, {
+          action: 'CREATE',
+          resource: 'UniversalReceipt',
+          resourceId: result.distributions?.[0]?.ledgerEntryId || entityId,
+          description: `Created universal buyer receipt distribution for buyer: ${entityId} (Amount: £${credit})`,
+          changes: { old: null, new: result }
+        });
+
+        return res.status(201).json({
+          success: true,
+          message: "Receipt distributed successfully",
+          data: result,
+        });
+      } catch (error) {
+        console.error("Universal buyer receipt distribution error:", error);
+        return res.status(500).json({
+          success: false,
+          message: error.message || "Failed to distribute receipt",
         });
       }
     }
@@ -849,6 +897,15 @@ router.post("/entry", auth, dateControl({ entityType: 'ledger', dateField: 'date
 
            
 
+          // Log the activity
+          await logActivity(req, {
+            action: 'CREATE',
+            resource: 'LedgerEntry',
+            resourceId: dispatchOrder._id,
+            description: `Payment split recorded for order ${dispatchOrder.orderNumber}: Applied €${paymentForOrder.toFixed(2)}, Credit €${excessPayment.toFixed(2)}`,
+            changes: { old: null, new: { orderPayment: paymentForOrder, creditAmount: excessPayment } }
+          });
+
           return res.status(201).json({
             success: true,
             message: `Payment split: €${paymentForOrder.toFixed(2)} applied to order, €${excessPayment.toFixed(2)} as credit`,
@@ -956,6 +1013,15 @@ router.post("/entry", auth, dateControl({ entityType: 'ledger', dateField: 'date
         console.log(
           `[Payment Transaction] Successfully committed payment for dispatch order ${referenceId}`
         );
+
+        // Log the activity
+        await logActivity(req, {
+          action: 'CREATE',
+          resource: 'LedgerEntry',
+          resourceId: entry._id,
+          description: `Recorded payment for dispatch order ${referenceId} (Amount: €${entryData.credit})`,
+          changes: { old: null, new: entry.toObject() }
+        });
 
         return res.status(201).json({
           success: true,
@@ -1141,6 +1207,15 @@ router.post("/entry", auth, dateControl({ entityType: 'ledger', dateField: 'date
         console.log(
           `[Payment Transaction] Successfully committed payment for purchase ${referenceId}`
         );
+
+        // Log the activity
+        await logActivity(req, {
+          action: 'CREATE',
+          resource: 'LedgerEntry',
+          resourceId: entry._id,
+          description: `Recorded payment for purchase ${referenceId} (Amount: €${entryData.credit})`,
+          changes: { old: null, new: entry.toObject() }
+        });
 
         return res.status(201).json({
           success: true,
@@ -2062,6 +2137,15 @@ router.post('/supplier/:id/payment-receipts/:receiptNumber/reverse', auth, async
     await receipt.save({ session });
 
     await session.commitTransaction();
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'SupplierPaymentReceipt',
+      resourceId: receipt._id,
+      description: `Reversed supplier payment receipt: ${receipt.receiptNumber}`,
+      changes: { old: 'active', new: 'reversed', reason: reason.trim() }
+    });
 
     return res.json({ success: true, message: `Receipt ${receipt.receiptNumber} reversed successfully`, data: receipt });
   } catch (error) {

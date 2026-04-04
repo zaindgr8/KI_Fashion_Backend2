@@ -472,7 +472,7 @@ router.post('/sell', auth, async (req, res) => {
 router.get('/barcode-label/:id', auth, async (req, res) => {
   try {
     const packetStock = await PacketStock.findById(req.params.id)
-      .populate('product', 'name productCode sku')
+      .populate('product', 'name productCode sku pricing')
       .populate('supplier', 'name company');
     
     if (!packetStock) {
@@ -541,7 +541,8 @@ router.get('/barcode-label/:id', auth, async (req, res) => {
       totalItemsPerPacket: packetStock.totalItemsPerPacket,
       isLoose: packetStock.isLoose,
       availablePackets: packetStock.availablePackets,
-      suggestedSellingPrice: packetStock.suggestedSellingPrice
+      suggestedSellingPrice: packetStock.suggestedSellingPrice,
+      minSellingPrice: packetStock.product?.pricing?.minSellingPrice || packetStock.suggestedSellingPrice
     };
     
     console.log('[Barcode Label] Response data:', JSON.stringify(responseData, null, 2));
@@ -567,7 +568,7 @@ router.get('/barcode-label/:id', auth, async (req, res) => {
 router.get('/print-label/:id', async (req, res) => {
   try {
     const packetStock = await PacketStock.findById(req.params.id)
-      .populate('product', 'name productCode')
+      .populate('product', 'name productCode pricing')
       .populate('supplier', 'name company');
     
     if (!packetStock) {
@@ -585,8 +586,7 @@ router.get('/print-label/:id', async (req, res) => {
     const productCode = packetStock.product?.productCode || 'N/A';
     const supplierName = packetStock.supplier?.name || packetStock.supplier?.company || 'N/A';
     const isLoose = packetStock.isLoose;
-    const price = packetStock.suggestedSellingPrice || 0;
-    
+    const price = packetStock.product?.pricing?.minSellingPrice || packetStock.suggestedSellingPrice || 0;
     const html = `
 <!DOCTYPE html>
 <html lang="en">
@@ -596,108 +596,101 @@ router.get('/print-label/:id', async (req, res) => {
   <title>Barcode: ${packetStock.barcode}</title>
   <style>
     @page {
-      size: 80mm 50mm;
-      margin: 2mm;
+      size: 50mm 25mm;
+      margin: 0;
     }
     
     * {
       box-sizing: border-box;
+      margin: 0;
+      padding: 0;
     }
     
     body {
       font-family: Arial, sans-serif;
-      margin: 0;
-      padding: 10px;
+      width: 50mm;
+      height: 25mm;
       display: flex;
       justify-content: center;
       align-items: center;
-      min-height: 100vh;
-      background: #f5f5f5;
-    }
-    
-    .label-container {
       background: white;
-      border: 2px solid #333;
-      border-radius: 8px;
-      padding: 15px;
-      width: 300px;
-      text-align: center;
-      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
     }
     
-    .product-name {
-      font-size: 14px;
-      font-weight: bold;
-      color: #333;
-      margin-bottom: 5px;
+    .label {
+      width: 48mm;
+      height: 23mm;
+      padding: 0.5mm 1mm;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      overflow: hidden;
+    }
+    
+    .header-section {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-bottom: 0.2mm;
+    }
+    
+    .product-code {
+      font-size: 6.5pt;
+      font-weight: 800;
+      font-family: 'Courier New', monospace;
+      color: #000;
+      text-align: center;
+      width: 100%;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
     
-    .product-code {
-      font-size: 11px;
-      color: #666;
-      margin-bottom: 8px;
-      font-family: 'Courier New', monospace;
+    .composition {
+      font-size: 5.5pt;
+      font-weight: 600;
+      color: #333;
+      text-align: center;
+      width: 100%;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      line-height: 1.3;
+      word-break: break-word;
     }
     
-    .barcode-image {
-      margin: 10px 0;
+    .barcode-img {
       display: flex;
       justify-content: center;
       align-items: center;
-      min-height: 60px;
+      flex: 1;
+      width: 100%;
+      min-height: 0;
+      padding-top: 0.5mm;
     }
     
-    .barcode-image img {
-      max-width: 100%;
-      height: auto;
-    }
-    
-    .barcode-number {
-      font-size: 16px;
-      font-weight: bold;
-      font-family: 'Courier New', monospace;
-      letter-spacing: 2px;
-      color: #000;
-      margin: 8px 0;
-    }
-    
-    .composition {
-      font-size: 10px;
-      color: #666;
-      margin-bottom: 8px;
-    }
-    
-    .badge {
-      display: inline-block;
-      padding: 3px 8px;
-      border-radius: 4px;
-      font-size: 10px;
-      font-weight: 600;
-      margin-bottom: 8px;
-    }
-    
-    .badge-packet {
-      background: #e3f2fd;
-      color: #1976d2;
-    }
-    
-    .badge-loose {
-      background: #fff3e0;
-      color: #f57c00;
+    .barcode-img img {
+      max-width: 46mm;
+      max-height: 12mm;
+      object-fit: contain;
     }
     
     .price {
-      font-size: 18px;
-      font-weight: bold;
-      color: #2e7d32;
+      font-size: 6pt;
+      font-weight: 700;
+      color: #000;
+      text-align: center;
+      width: 100%;
+      white-space: nowrap;
     }
     
-    .print-button {
-      margin-top: 15px;
-      padding: 10px 25px;
+    .print-btn {
+      position: fixed;
+      bottom: 10px;
+      right: 10px;
+      padding: 8px 20px;
       background: #1976d2;
       color: white;
       border: none;
@@ -706,39 +699,22 @@ router.get('/print-label/:id', async (req, res) => {
       cursor: pointer;
     }
     
-    .print-button:hover {
-      background: #1565c0;
-    }
-    
     @media print {
-      body {
-        background: white;
-        padding: 0;
-        min-height: auto;
-      }
-      
-      .label-container {
-        box-shadow: none;
-        border: 1px solid #000;
-      }
-      
-      .no-print {
-        display: none !important;
-      }
+      .print-btn { display: none !important; }
+      body { width: 50mm; height: 25mm; }
     }
   </style>
 </head>
 <body>
-  <div class="label-container">
-    <div class="product-name">${productName}</div>
-    <div class="product-code">SKU: ${productCode}</div>
-    ${itfBarcodeImage ? `<div class="barcode-image"><img src="${itfBarcodeImage}" alt="Barcode" /></div>` : ''}
-    <div class="barcode-number">${packetStock.barcode}</div>
+  <div class="label">
+    <div class="header-section">
+      <div class="product-code">${productCode}</div>
+      <div class="price">Min Sell Price: £${price.toFixed(2)}</div>
+    </div>
     <div class="composition">${compositionText}</div>
-    <span class="badge ${isLoose ? 'badge-loose' : 'badge-packet'}">${isLoose ? 'LOOSE' : 'PACKET'}</span>
-    <div class="price">£${price.toFixed(2)}</div>
-    <button class="print-button no-print" onclick="window.print();">🖨️ Print Label</button>
+    ${itfBarcodeImage ? `<div class="barcode-img"><img src="${itfBarcodeImage}" alt="Barcode" /></div>` : ''}
   </div>
+  <button class="print-btn" onclick="window.print();">🖨️ Print</button>
 </body>
 </html>
     `;

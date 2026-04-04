@@ -1889,6 +1889,14 @@ router.patch('/:id/status', auth, async (req, res) => {
 
     await order.save();
 
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'DispatchOrder',
+      resourceId: order._id,
+      description: `Updated status of dispatch order ${order.orderNumber} to ${status}`,
+      changes: { old: order.status, new: status, notes }
+    });
+
     return sendResponse.success(res, order, 'Order status updated successfully');
 
   } catch (error) {
@@ -3214,6 +3222,15 @@ router.post('/:id/confirm', auth, dateControl({ entityType: 'dispatch-order', da
     // Convert images to signed URLs
     await convertDispatchOrderImages(dispatchOrder);
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'DispatchOrder',
+      resourceId: dispatchOrder._id,
+      description: `Confirmed dispatch order: ${dispatchOrder.orderNumber}`,
+      changes: { old: 'pending', new: 'confirmed' }
+    });
+
     return sendResponse.success(res, dispatchOrder, 'Dispatch order confirmed successfully');
 
   } catch (error) {
@@ -4520,6 +4537,15 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
     // Convert images to signed URLs
     await convertDispatchOrderImages(dispatchOrder);
 
+    // Log the activity
+    await logActivity(req, {
+      action: 'STATUS_CHANGE',
+      resource: 'DispatchOrder',
+      resourceId: dispatchOrder._id,
+      description: `Confirmed dispatch order: ${dispatchOrder.orderNumber} via QR scan`,
+      changes: { old: 'pending', new: 'confirmed' }
+    });
+
     return sendResponse.success(res, dispatchOrder, 'Dispatch order confirmed successfully via QR scan');
   } catch (error) {
     console.error('Confirm dispatch order via QR error:', error);
@@ -4622,6 +4648,9 @@ router.put('/:id', auth, async (req, res) => {
       updateData.dispatchDate = new Date(updateData.date);
     }
 
+    // Capture old state for audit logging
+    const oldState = dispatchOrder.toObject();
+
     // Update dispatch order (apply updates then normalize using admin logic)
     Object.assign(dispatchOrder, updateData);
     try {
@@ -4655,7 +4684,7 @@ router.put('/:id', auth, async (req, res) => {
       resource: 'DispatchOrder',
       resourceId: dispatchOrder._id,
       description: `Updated dispatch order: ${dispatchOrder.orderNumber}`,
-      changes: { old: 'Previous state', new: req.body }
+      changes: { old: oldState, new: dispatchOrder.toObject() }
     });
 
     return sendResponse.success(res, dispatchOrder, 'Dispatch order updated successfully');
@@ -4722,6 +4751,15 @@ router.delete('/:id', auth, async (req, res) => {
       await DispatchOrder.findByIdAndDelete(req.params.id).session(session);
       await session.commitTransaction();
       session.endSession();
+      // Log the activity
+      await logActivity(req, {
+        action: 'DELETE',
+        resource: 'DispatchOrder',
+        resourceId: req.params.id,
+        description: `Deleted pending dispatch order: ${dispatchOrder.orderNumber}`,
+        changes: { old: dispatchOrder.toObject(), new: null }
+      });
+
       return sendResponse.success(res, null, 'Pending dispatch order deleted successfully');
     }
 
@@ -4856,6 +4894,15 @@ router.delete('/:id', auth, async (req, res) => {
     await session.commitTransaction();
     session.endSession();
     console.log(`[Clean Delete] Success: Order ${dispatchOrder.orderNumber} deleted.`);
+
+    // Log the activity
+    await logActivity(req, {
+      action: 'DELETE',
+      resource: 'DispatchOrder',
+      resourceId: req.params.id,
+      description: `Clean deleted confirmed dispatch order: ${dispatchOrder.orderNumber} and all associated records`,
+      changes: { old: dispatchOrder.toObject(), new: null }
+    });
 
     return sendResponse.success(res, null, 'Confirmed dispatch order and all associated records deleted successfully');
 
@@ -5335,7 +5382,7 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
   try {
     const dispatchOrder = await DispatchOrder.findById(req.params.id)
       .populate('supplier', 'name company')
-      .populate('items.product', 'name sku productCode');
+      .populate('items.product', 'name sku productCode pricing');
 
     if (!dispatchOrder) {
       return sendResponse.error(res, 'Dispatch order not found', 404);
@@ -5346,16 +5393,34 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
       return sendResponse.error(res, 'Barcodes are only available for confirmed orders', 400);
     }
 
+    // Helper: build a price map from PacketStock for all barcodes (uses product minSellingPrice)
+    const buildPriceMap = async (barcodes) => {
+      const barcodeStrings = barcodes.map(b => b.data).filter(Boolean);
+      if (barcodeStrings.length === 0) return {};
+      const packetStocks = await PacketStock.find({ barcode: { $in: barcodeStrings } })
+        .select('barcode suggestedSellingPrice product')
+        .populate('product', 'pricing')
+        .lean();
+      const priceMap = {};
+      packetStocks.forEach(ps => {
+        const minPrice = ps.product?.pricing?.minSellingPrice;
+        priceMap[ps.barcode] = minPrice || ps.suggestedSellingPrice || 0;
+      });
+      return priceMap;
+    };
+
     // Check if barcodes are already generated and stored in database
     if (dispatchOrder.barcodeData && dispatchOrder.barcodeData.length > 0) {
       // Validate that barcodes have proper structure (dataUrl and data fields)
       const validBarcodes = dispatchOrder.barcodeData.filter(b => b.dataUrl && b.data);
 
       if (validBarcodes.length > 0) {
+        const priceMap = await buildPriceMap(validBarcodes);
         return sendResponse.success(res, {
           orderNumber: dispatchOrder.orderNumber,
           supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
           barcodes: validBarcodes,
+          priceMap,
           source: 'database',
           generatedAt: dispatchOrder.barcodeGeneratedAt
         });
@@ -5513,10 +5578,12 @@ router.get('/:id/barcode-data', auth, async (req, res) => {
 
     }
 
+    const priceMap = await buildPriceMap(barcodeResults);
     return sendResponse.success(res, {
       orderNumber: dispatchOrder.orderNumber,
       supplierName: dispatchOrder.supplier?.name || dispatchOrder.supplier?.company || 'N/A',
       barcodes: barcodeResults,
+      priceMap,
       source: 'generated',
       generatedAt: dispatchOrder.barcodeGeneratedAt
     });

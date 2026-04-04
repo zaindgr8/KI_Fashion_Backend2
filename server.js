@@ -51,6 +51,8 @@ const productionOrigins = [
   "https://kifashion-website.vercel.app",
   "https://www.kifashion-website.vercel.app",
   "https://ki-fashion-admin-panel-mghs.vercel.app",
+  "https://ki-admin-521578431570.asia-south1.run.app",
+  "https://ki-admin-staging-521578431570.asia-south1.run.app",
   "http://localhost:3000",
   "http://localhost:3001",
   "http://localhost:3002",
@@ -74,13 +76,13 @@ const localhostOrigins = [
 // Combine all allowed origins
 const defaultOrigins = [...productionOrigins, ...localhostOrigins];
 
-// Always include localhost origins for development, even if ALLOWED_ORIGINS is set
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? [
-    ...process.env.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim()),
-    ...localhostOrigins,
-  ]
-  : defaultOrigins;
+// Combine ALL origins including environment variables
+const allowedOrigins = [
+  ...defaultOrigins, // Start with all hardcoded production + localhost origins
+  ...(process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(",").map((origin) => origin.trim())
+    : [])
+];
 
 // Remove duplicates
 const uniqueOrigins = [...new Set(allowedOrigins)];
@@ -94,16 +96,19 @@ app.use(
         return callback(null, true);
       }
 
-      // Check if origin is in allowed list
+      // Check for exact matches
       if (uniqueOrigins.indexOf(origin) !== -1) {
-
         return callback(null, true);
-      } else {
-        console.error("CORS blocked origin:", origin);
-        console.error("Allowed origins:", uniqueOrigins);
-        // Reject the request
-        return callback(new Error("Not allowed by CORS"), false);
       }
+
+      // Dynamically allow ALL Vercel preview environments
+      if (origin.endsWith(".vercel.app")) {
+        return callback(null, true);
+      }
+
+      // Proper clean rejection (prevents HTTP 500 error masking the issue)
+      console.error("CORS blocked origin:", origin);
+      return callback(null, false);
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],

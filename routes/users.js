@@ -1,6 +1,8 @@
 const express = require('express');
 const Joi = require('joi');
 const User = require('../models/User');
+const Supplier = require('../models/Supplier');
+const Buyer = require('../models/Buyer');
 const auth = require('../middleware/auth');
 const { logActivity } = require('../utils/auditLogger');
 
@@ -37,12 +39,14 @@ const userSchema = Joi.object({
 const updateUserSchema = Joi.object({
   name: Joi.string().min(2).max(100).optional(),
   email: Joi.string().email().optional(),
-  role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant', 'viewer').optional(),
+  role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant', 'viewer', 'supplier', 'buyer', 'distributor').optional(),
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
   permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery', 'dashboard', 'dispatch_orders', 'stock', 'buying', 'selling', 'buyer_ledger', 'supplier_ledger', 'logistics', 'cost_config', 'campaigns', 'approvals', 'setup')).optional(),
-  isActive: Joi.boolean().optional()
+  isActive: Joi.boolean().optional(),
+  supplierProfile: Joi.object().unknown(true).optional(),
+  buyerProfile: Joi.object().unknown(true).optional()
 });
 
 // Create user (admin or super-admin)
@@ -222,13 +226,41 @@ router.put('/:id', auth, requireAdmin, async (req, res) => {
       req.params.id,
       updates,
       { new: true, runValidators: true }
-    ).select('-password');
+    ).populate(['supplier', 'buyer']).select('-password');
 
     if (!user) {
       return res.status(404).json({
         success: false,
         message: 'User not found'
       });
+    }
+
+    // Cascaded updates for linked entities
+    try {
+      if (user.supplier) {
+        const supUpdates = req.body.supplierProfile || {};
+        // ALWAYS sync basic identities from user for consistency
+        supUpdates.name = user.name;
+        supUpdates.email = user.email;
+        if (updates.phone) supUpdates.phone = updates.phone;
+        if (updates.phoneAreaCode) supUpdates.phoneAreaCode = updates.phoneAreaCode;
+        
+        await Supplier.findByIdAndUpdate(user.supplier._id || user.supplier, supUpdates);
+      }
+
+      if (user.buyer) {
+        const buyerUpdates = req.body.buyerProfile || {};
+        // ALWAYS sync basic identities from user for consistency
+        buyerUpdates.name = user.name;
+        buyerUpdates.email = user.email;
+        if (updates.phone) buyerUpdates.phone = updates.phone;
+        if (updates.phoneAreaCode) buyerUpdates.phoneAreaCode = updates.phoneAreaCode;
+        
+        await Buyer.findByIdAndUpdate(user.buyer._id || user.buyer, buyerUpdates);
+      }
+    } catch (cascadeError) {
+      console.error('Cascaded update error:', cascadeError);
+      // We don't fail the main user update, but we log the error
     }
 
     // Log the activity
