@@ -28,6 +28,7 @@ const supplierSchema = new mongoose.Schema({
     maxlength: 5
   },
   address: {
+    fullAddress: String,
     street: String,
     city: String,
     state: String,

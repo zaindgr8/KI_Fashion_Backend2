@@ -31,6 +31,8 @@ const userSchema = Joi.object({
   role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant', 'viewer').default('employee'),
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
+  alternatePhone: Joi.string().optional(),
+  alternatePhoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
   permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery', 'dashboard', 'dispatch_orders', 'stock', 'buying', 'selling', 'buyer_ledger', 'supplier_ledger', 'logistics', 'cost_config', 'campaigns', 'approvals', 'setup')).optional(),
   isActive: Joi.boolean().default(true)
@@ -42,6 +44,8 @@ const updateUserSchema = Joi.object({
   role: Joi.string().valid('super-admin', 'admin', 'employee', 'accountant', 'viewer', 'supplier', 'buyer', 'distributor').optional(),
   phone: Joi.string().optional(),
   phoneAreaCode: Joi.string().max(5).optional(),
+  alternatePhone: Joi.string().optional(),
+  alternatePhoneAreaCode: Joi.string().max(5).optional(),
   address: Joi.string().optional(),
   permissions: Joi.array().items(Joi.string().valid('users', 'suppliers', 'buyers', 'products', 'sales', 'purchases', 'inventory', 'reports', 'expenses', 'delivery', 'dashboard', 'dispatch_orders', 'stock', 'buying', 'selling', 'buyer_ledger', 'supplier_ledger', 'logistics', 'cost_config', 'campaigns', 'approvals', 'setup')).optional(),
   isActive: Joi.boolean().optional(),
@@ -57,7 +61,7 @@ router.post('/', auth, requireAdmin, async (req, res) => {
       return res.status(400).json({ success: false, message: error.details[0].message });
     }
 
-    const { name, email, password, role, phone, phoneAreaCode, address, permissions } = req.body;
+    const { name, email, password, role, phone, phoneAreaCode, alternatePhone, alternatePhoneAreaCode, address, permissions } = req.body;
 
     // Only super-admin can create super-admin or admin accounts
     const targetRole = role || 'employee';
@@ -77,6 +81,8 @@ router.post('/', auth, requireAdmin, async (req, res) => {
       role: targetRole,
       phone,
       phoneAreaCode,
+      alternatePhone,
+      alternatePhoneAreaCode,
       address,
       permissions: permissions || [],
       signupSource: 'crm'
@@ -129,23 +135,15 @@ router.get('/', auth, requireAdmin, async (req, res) => {
 
     let users;
     
-    // For supplier role requests, populate the supplier profile
-    if (role === 'supplier') {
-      users = await User.find(query)
-        .populate('supplier', 'name company email phone address')
-        .select('-password')
-        .sort({ createdAt: -1 })
-        .limit(limit * 1)
-        .skip((page - 1) * limit)
-        .lean();
-    } else {
-      users = await User.find(query)
-        .select('-password')
-        .sort({ createdAt: -1 })
-        .limit(limit * 1)
-        .skip((page - 1) * limit)
-        .lean();
-    }
+    // Default: populate both profiles for list view to ensure data availability in modals
+    users = await User.find(query)
+      .populate('supplier', 'name company email phone phoneAreaCode alternatePhone alternatePhoneAreaCode address')
+      .populate('buyer', 'name company email phone phoneAreaCode alternatePhone alternatePhoneAreaCode address')
+      .select('-password')
+      .sort({ createdAt: -1 })
+      .limit(limit * 1)
+      .skip((page - 1) * limit)
+      .lean();
 
     const total = await User.countDocuments(query);
 
@@ -212,7 +210,7 @@ router.put('/:id', auth, requireAdmin, async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only super-admin can assign admin roles' });
     }
 
-    const allowedFields = ['name', 'email', 'phone', 'phoneAreaCode', 'address', 'permissions', 'isActive'];
+    const allowedFields = ['name', 'email', 'phone', 'phoneAreaCode', 'alternatePhone', 'alternatePhoneAreaCode', 'address', 'permissions', 'isActive'];
     if (req.user.role === 'super-admin' || (newRole && newRole !== 'admin' && newRole !== 'super-admin')) {
       allowedFields.push('role');
     }
@@ -244,6 +242,9 @@ router.put('/:id', auth, requireAdmin, async (req, res) => {
         supUpdates.email = user.email;
         if (updates.phone) supUpdates.phone = updates.phone;
         if (updates.phoneAreaCode) supUpdates.phoneAreaCode = updates.phoneAreaCode;
+        if (updates.alternatePhone) supUpdates.alternatePhone = updates.alternatePhone;
+        if (updates.alternatePhoneAreaCode) supUpdates.alternatePhoneAreaCode = updates.alternatePhoneAreaCode;
+        if (updates.address) supUpdates.address = { street: updates.address, fullAddress: updates.address, country: 'Pakistan' };
         
         await Supplier.findByIdAndUpdate(user.supplier._id || user.supplier, supUpdates);
       }
@@ -255,6 +256,9 @@ router.put('/:id', auth, requireAdmin, async (req, res) => {
         buyerUpdates.email = user.email;
         if (updates.phone) buyerUpdates.phone = updates.phone;
         if (updates.phoneAreaCode) buyerUpdates.phoneAreaCode = updates.phoneAreaCode;
+        if (updates.alternatePhone) buyerUpdates.alternatePhone = updates.alternatePhone;
+        if (updates.alternatePhoneAreaCode) buyerUpdates.alternatePhoneAreaCode = updates.alternatePhoneAreaCode;
+        if (updates.address) buyerUpdates.address = { street: updates.address, fullAddress: updates.address, country: 'Pakistan' };
         
         await Buyer.findByIdAndUpdate(user.buyer._id || user.buyer, buyerUpdates);
       }

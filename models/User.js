@@ -38,6 +38,15 @@ const userSchema = new mongoose.Schema({
     trim: true,
     maxlength: 5
   },
+  alternatePhone: {
+    type: String,
+    trim: true
+  },
+  alternatePhoneAreaCode: {
+    type: String,
+    trim: true,
+    maxlength: 5
+  },
   address: {
     type: String,
     trim: true

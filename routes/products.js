@@ -815,21 +815,31 @@ router.get('/', auth, checkPermission('products'), async (req, res) => {
     }
     if (isActive !== undefined) query.isActive = isActive === 'true';
 
-    // Support filtering by supplier (multiple ways)
-    if (supplier) query['suppliers.supplier'] = supplier;
-    if (supplierId) query['suppliers.supplier'] = supplierId;
-    if (createdBy) query.createdBy = createdBy;
+    const supplierFilter = supplier || supplierId;
 
-    // If both createdBy and supplier are provided, use OR logic
-    if (createdBy && (supplier || supplierId)) {
-      const supplierFilter = supplier || supplierId;
-      query.$or = [
-        { createdBy: createdBy },
-        { 'suppliers.supplier': supplierFilter }
-      ];
-      // Remove individual filters to avoid conflicts
-      delete query.createdBy;
-      delete query['suppliers.supplier'];
+    // Support filtering by supplier (primary supplier or suppliers list)
+    if (createdBy && supplierFilter) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { createdBy: createdBy },
+          { $or: [
+            { supplier: supplierFilter },
+            { 'suppliers.supplier': supplierFilter }
+          ] }
+        ]
+      });
+    } else {
+      if (createdBy) query.createdBy = createdBy;
+      if (supplierFilter) {
+        query.$and = query.$and || [];
+        query.$and.push({
+          $or: [
+            { supplier: supplierFilter },
+            { 'suppliers.supplier': supplierFilter }
+          ]
+        });
+      }
     }
 
     let productsQuery = Product.find(query)
@@ -909,6 +919,7 @@ router.get('/', auth, checkPermission('products'), async (req, res) => {
 router.get('/lookup/:productCode', auth, async (req, res) => {
   try {
     const { productCode } = req.params;
+    const { supplierId } = req.query;
 
     if (!productCode || productCode.trim() === '') {
       return res.status(400).json({
@@ -917,14 +928,27 @@ router.get('/lookup/:productCode', auth, async (req, res) => {
       });
     }
 
+    const codeCriteria = {
+      $or: [
+        { productCode: { $regex: new RegExp(`^${productCode.trim()}$`, 'i') } },
+        { sku: { $regex: new RegExp(`^${productCode.trim()}$`, 'i') } }
+      ]
+    };
+
+    const supplierCriteria = supplierId ? {
+      $or: [
+        { supplier: supplierId },
+        { 'suppliers.supplier': supplierId }
+      ]
+    } : null;
+
+    const lookupCriteria = supplierCriteria
+      ? { $and: [codeCriteria, supplierCriteria] }
+      : codeCriteria;
+
     // Search by productCode or SKU (case-insensitive)
     const product = await populateProductQuery(
-      Product.findOne({
-        $or: [
-          { productCode: { $regex: new RegExp(`^${productCode.trim()}$`, 'i') } },
-          { sku: { $regex: new RegExp(`^${productCode.trim()}$`, 'i') } }
-        ]
-      })
+      Product.findOne(lookupCriteria)
     ).lean();
 
     if (!product) {

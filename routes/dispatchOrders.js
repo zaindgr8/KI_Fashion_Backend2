@@ -754,6 +754,8 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
     }
 
     // Process items - support both product reference and productName/productCode
+    const normalizeText = (value) => String(value || '').trim().toLowerCase();
+    const normalizeSku = (value) => String(value || '').trim().toUpperCase();
     const itemsWithDetails = [];
     for (const item of value.items) {
       let product = null;
@@ -767,18 +769,48 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
         if (!product) {
           return sendResponse.error(res, `Product not found: ${item.product}`, 400);
         }
+        const productSupplierId = product.supplier?._id || product.supplier;
+        if (productSupplierId && String(productSupplierId) !== String(value.supplier)) {
+          return sendResponse.error(res, `Product supplier mismatch for item: ${item.productCode || product.sku || product.name}`, 400);
+        }
+        if (item.productCode) {
+          const itemCode = normalizeSku(item.productCode);
+          const productSku = normalizeSku(product.sku);
+          const productCode = normalizeSku(product.productCode);
+          if (itemCode && itemCode !== productSku && itemCode !== productCode) {
+            return sendResponse.error(res, `Product code mismatch for item: ${item.productCode}`, 400);
+          }
+        }
+        if (item.productName) {
+          const itemName = normalizeText(item.productName);
+          const productName = normalizeText(product.name);
+          if (itemName && productName && itemName !== productName) {
+            return sendResponse.error(res, `Product name mismatch for item: ${item.productName}`, 400);
+          }
+        }
         season = product.season;
       } else if (item.productCode) {
         // Try to find existing product by code
         // Try to find existing product by code AND supplier
+        const productCodeUpper = normalizeSku(item.productCode);
         product = await Product.findOne({
-          sku: item.productCode.toUpperCase(),
+          sku: productCodeUpper,
           supplier: value.supplier // Use the supplier from the dispatch order
         });
 
         if (product) {
+          if (item.productName) {
+            const itemName = normalizeText(item.productName);
+            const productName = normalizeText(product.name);
+            if (itemName && productName && itemName !== productName) {
+              return sendResponse.error(res, `Product name mismatch for item: ${item.productName}`, 400);
+            }
+          }
           season = product.season;
         } else if (item.season && Array.isArray(item.season) && item.season.length > 0) {
+          if (!item.productName || !String(item.productName).trim()) {
+            return sendResponse.error(res, `Product name required for new product: ${item.productCode}`, 400);
+          }
           // New product - use provided season
           season = item.season;
         } else {
