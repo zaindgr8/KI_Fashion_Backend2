@@ -626,7 +626,7 @@ class EditRequestService {
    * Apply dispatch order edit — mirrors logic from PATCH /:id/edit-confirmed
    */
   static async applyDispatchOrderEdit(orderId, payload, reviewerId, session) {
-    const { exchangeRate, percentage, discount, items: updatedItems } = payload;
+    const { exchangeRate, percentage, discount, dispatchDate, items: updatedItems } = payload;
 
     const dispatchOrder = await DispatchOrder.findById(orderId).populate('supplier').session(session);
     if (!dispatchOrder) throw new Error('Dispatch order not found');
@@ -641,6 +641,18 @@ class EditRequestService {
     }
 
     const oldSupplierPaymentTotal = dispatchOrder.supplierPaymentTotal || 0;
+    const oldDispatchDate = dispatchOrder.dispatchDate ? new Date(dispatchOrder.dispatchDate) : null;
+    let dateChanged = false;
+
+    if (dispatchDate !== undefined && dispatchDate !== null) {
+      const newD = new Date(dispatchDate);
+      if (!isNaN(newD.getTime())) {
+        if (!oldDispatchDate || oldDispatchDate.getTime() !== newD.getTime()) {
+          dispatchOrder.dispatchDate = newD;
+          dateChanged = true;
+        }
+      }
+    }
 
     // Apply order-level changes
     if (exchangeRate !== undefined) dispatchOrder.exchangeRate = exchangeRate;
@@ -753,11 +765,27 @@ class EditRequestService {
 
     await dispatchOrder.save({ session });
 
-    // Create ledger adjustment if supplier payment changed
-    let adjustmentEntry = null;
+    // Sync with Ledger
     const paymentDifference = supplierPaymentTotal - oldSupplierPaymentTotal;
-    if (Math.abs(paymentDifference) > 0.01) {
-      adjustmentEntry = new Ledger({
+    const originalPurchaseEntry = await Ledger.findOne({
+      referenceId: dispatchOrder._id,
+      transactionType: 'purchase'
+    }).session(session);
+
+    if (originalPurchaseEntry) {
+      // Update the original entry directly
+      originalPurchaseEntry.debit = supplierPaymentTotal;
+      originalPurchaseEntry.date = dispatchOrder.dispatchDate; // Update date
+      originalPurchaseEntry.description = `Confirmed Order ${dispatchOrder.orderNumber} confirmed (Edited) - Supplier Payment: €${supplierPaymentTotal.toFixed(2)}, Final Amount (inc discount): €${supplierPaymentTotal.toFixed(2)}`;
+      
+      await originalPurchaseEntry.save({ session });
+
+      // Recalculate balances from the earlier of old/new date
+      const recalcStartDate = (oldDispatchDate && oldDispatchDate < dispatchOrder.dispatchDate) ? oldDispatchDate : dispatchOrder.dispatchDate;
+      await Ledger.recalculateBalances('supplier', dispatchOrder.supplier._id || dispatchOrder.supplier, recalcStartDate);
+    } else if (Math.abs(paymentDifference) > 0.01) {
+      // Fallback to adjustment if original missing
+      const adjustmentEntry = new Ledger({
         type: 'supplier',
         entityId: dispatchOrder.supplier._id || dispatchOrder.supplier,
         entityModel: 'Supplier',
@@ -766,14 +794,33 @@ class EditRequestService {
         referenceModel: 'DispatchOrder',
         debit: paymentDifference > 0 ? paymentDifference : 0,
         credit: paymentDifference < 0 ? Math.abs(paymentDifference) : 0,
-        date: new Date(),
+        date: dispatchOrder.dispatchDate || new Date(),
         description: `Edit request adjustment for order ${dispatchOrder.orderNumber}`,
         createdBy: reviewerId
       });
       await adjustmentEntry.save({ session });
     }
 
-    return { order: dispatchOrder, adjustmentEntry };
+    // Update inventory batch dates
+    if (dateChanged) {
+      for (const item of dispatchOrder.items) {
+        if (!item.product) continue;
+        const inv = await Inventory.findOne({ product: item.product }).session(session);
+        if (inv) {
+          await inv.updateBatchDate(dispatchOrder._id, dispatchOrder.dispatchDate);
+        }
+      }
+    }
+
+    // Update Supplier currentBalance if changed
+    if (Math.abs(paymentDifference) > 0.001) {
+      await Supplier.findByIdAndUpdate(
+        dispatchOrder.supplier._id || dispatchOrder.supplier,
+        { $inc: { currentBalance: paymentDifference } }
+      ).session(session);
+    }
+
+    return { order: dispatchOrder };
   }
 
   /**

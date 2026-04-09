@@ -1207,8 +1207,7 @@ router.get('/', auth, async (req, res) => {
         endDate = today;
       }
     } else if (!startDate && !endDate) {
-      startDate = today;
-      endDate = today;
+      // Default to today removed to allow loading all data by default
     }
 
 

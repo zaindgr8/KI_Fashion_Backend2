@@ -477,7 +477,7 @@ const manualEntryItemSchema = Joi.object({
   productCode: Joi.string().optional(), // For new products
   season: Joi.array().items(Joi.string().valid('winter', 'summer', 'spring', 'autumn', 'all_season', 'accessories')).min(1).optional(), // For new products
   costPrice: Joi.number().min(0).optional(), // For new products
-  minSellingPrice: Joi.number().min(0).optional(),
+  minSellingPrice: Joi.number().min(0).required(),
   primaryColor: Joi.alternatives().try(
     Joi.string().allow(null, ''),
     Joi.array().items(Joi.string())
@@ -749,873 +749,238 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
 
     // Verify supplier exists
     const supplier = await Supplier.findById(value.supplier);
-    if (!supplier) {
-      return sendResponse.error(res, 'Supplier not found', 400);
-    }
+    if (!supplier) return sendResponse.error(res, 'Supplier not found', 400);
 
-    // Process items - support both product reference and productName/productCode
-    const normalizeText = (value) => String(value || '').trim().toLowerCase();
     const normalizeSku = (value) => String(value || '').trim().toUpperCase();
     const itemsWithDetails = [];
+
+    const productIds = value.items.map(i => i.product).filter(Boolean);
+    const productCodes = value.items.map(i => i.productCode).filter(Boolean).map(c => normalizeSku(c));
+    
+    const [existingProductsById, existingProductsBySku] = await Promise.all([
+      Product.find({ _id: { $in: productIds } }),
+      Product.find({ sku: { $in: productCodes }, supplier: value.supplier })
+    ]);
+
+    const productMap = new Map();
+    existingProductsById.forEach(p => productMap.set(p._id.toString(), p));
+    existingProductsBySku.forEach(p => productMap.set(p.sku, p));
+
     for (const item of value.items) {
       let product = null;
       let season = null;
-      let color = null;
-      let size = null;
 
-      // If product reference provided, use it
       if (item.product) {
-        product = await Product.findById(item.product);
-        if (!product) {
-          return sendResponse.error(res, `Product not found: ${item.product}`, 400);
-        }
+        product = productMap.get(String(item.product));
+        if (!product) return sendResponse.error(res, `Product not found: ${item.product}`, 400);
         const productSupplierId = product.supplier?._id || product.supplier;
         if (productSupplierId && String(productSupplierId) !== String(value.supplier)) {
-          return sendResponse.error(res, `Product supplier mismatch for item: ${item.productCode || product.sku || product.name}`, 400);
-        }
-        if (item.productCode) {
-          const itemCode = normalizeSku(item.productCode);
-          const productSku = normalizeSku(product.sku);
-          const productCode = normalizeSku(product.productCode);
-          if (itemCode && itemCode !== productSku && itemCode !== productCode) {
-            return sendResponse.error(res, `Product code mismatch for item: ${item.productCode}`, 400);
-          }
-        }
-        if (item.productName) {
-          const itemName = normalizeText(item.productName);
-          const productName = normalizeText(product.name);
-          if (itemName && productName && itemName !== productName) {
-            return sendResponse.error(res, `Product name mismatch for item: ${item.productName}`, 400);
-          }
+          return sendResponse.error(res, `Product supplier mismatch for item: ${item.productCode || product.sku}`, 400);
         }
         season = product.season;
       } else if (item.productCode) {
-        // Try to find existing product by code
-        // Try to find existing product by code AND supplier
         const productCodeUpper = normalizeSku(item.productCode);
-        product = await Product.findOne({
-          sku: productCodeUpper,
-          supplier: value.supplier // Use the supplier from the dispatch order
-        });
-
+        product = productMap.get(productCodeUpper);
         if (product) {
-          if (item.productName) {
-            const itemName = normalizeText(item.productName);
-            const productName = normalizeText(product.name);
-            if (itemName && productName && itemName !== productName) {
-              return sendResponse.error(res, `Product name mismatch for item: ${item.productName}`, 400);
-            }
-          }
           season = product.season;
-        } else if (item.season && Array.isArray(item.season) && item.season.length > 0) {
-          if (!item.productName || !String(item.productName).trim()) {
-            return sendResponse.error(res, `Product name required for new product: ${item.productCode}`, 400);
-          }
-          // New product - use provided season
+        } else if (item.season?.length > 0) {
+          if (!item.productName?.trim()) return sendResponse.error(res, `Product name required for new product: ${item.productCode}`, 400);
           season = item.season;
         } else {
           return sendResponse.error(res, `Season required for new product: ${item.productCode}`, 400);
         }
-      } else {
-        return sendResponse.error(res, 'Either product reference or productCode is required', 400);
       }
 
       const costPrice = item.costPrice || (product ? product.pricing?.costPrice : 0);
-      const exchangeRate = value.exchangeRate;
-      const percentage = value.percentage;
-      const defaultMinSell = truncateToTwoDecimals((costPrice / exchangeRate) * (1 + (percentage / 100)));
-      const minSellingPrice = resolveMinSellingPrice(item.minSellingPrice, defaultMinSell);
-
-      // Calculate supplier payment amount (what admin pays supplier - NO exchange rate, NO profit margin)
-      // Formula: cost price × quantity
-      const supplierPaymentAmount = costPrice;
-      const supplierPaymentItemTotal = supplierPaymentAmount * item.quantity;
-
-      // Calculate landed price (for inventory valuation - WITH profit margin)
-      // Formula: (cost price / exchange rate) × (1 + percentage/100)
-      // Truncate to 2 decimal places (no rounding) for database storage
+      const exchangeRate = value.exchangeRate || 1.0;
+      const percentage = value.percentage || 0;
       const landedPrice = truncateToTwoDecimals((costPrice / exchangeRate) * (1 + (percentage / 100)));
-      const landedTotal = truncateToTwoDecimals(landedPrice * item.quantity);
-
-      // Ensure packet composition quantity exactly matches item quantity.
-      const totalPacketItems = item.packets.reduce((sum, packet) => {
-        const packetTotal = packet.composition.reduce((packetSum, comp) => packetSum + comp.quantity, 0);
-        return sum + packetTotal;
-      }, 0);
-
-      if (totalPacketItems !== item.quantity) {
-        return sendResponse.error(
-          res,
-          `Packet composition total (${totalPacketItems}) must equal item quantity (${item.quantity}) for item ${item.productName || item.productCode || 'Unknown'}`,
-          400
-        );
-      }
+      const landedTotal = item.landedTotal ? truncateToTwoDecimals(item.landedTotal) : truncateToTwoDecimals(landedPrice * item.quantity);
 
       itemsWithDetails.push({
         product: product ? product._id : undefined,
-        productName: item.productName || (product ? product.name : undefined),
-        productCode: item.productCode || (product ? (product.productCode || product.sku) : undefined),
-        season: season,
-        costPrice: costPrice,
-        minSellingPrice,
-        primaryColor: item.primaryColor || (product ? product.primaryColor : undefined),
-        size: item.size || (product ? product.size : undefined), // Add size field
-        material: item.material || (product ? product.specifications?.material : undefined),
-        description: item.description,
+        productName: item.productName || product?.name,
+        productCode: item.productCode || product?.productCode || product?.sku,
+        season, costPrice, minSellingPrice: item.minSellingPrice, landedPrice, landedTotal,
         quantity: item.quantity,
-        supplierPaymentAmount: supplierPaymentAmount,
-        landedPrice: landedPrice,
-        landedTotal: item.landedTotal ? truncateToTwoDecimals(item.landedTotal) : landedTotal, // Use provided (truncated) or calculated
-        productImage: item.productImage || undefined,
+        productImage: item.productImage,
         useVariantTracking: true,
-        packets: item.packets
+        packets: item.packets,
+        size: item.size,
+        primaryColor: item.primaryColor,
+        material: item.material
       });
     }
 
-    // Calculate totals
-    // 1. Supplier payment total (what admin owes supplier - NO profit margin)
-    // Formula: cost price × quantity (Raw Currency)
-    const supplierPaymentTotal = itemsWithDetails.reduce((sum, item) => {
-      const costPrice = item.costPrice || 0;
-      return sum + (costPrice * item.quantity);
-    }, 0);
-
-    // 2. Landed Subtotal (for inventory valuation - WITH profit margin)
+    const supplierPaymentTotal = itemsWithDetails.reduce((sum, item) => sum + ((item.costPrice || 0) * item.quantity), 0);
     const subtotal = itemsWithDetails.reduce((sum, item) => sum + (item.landedTotal || 0), 0);
-
     const totalDiscount = value.totalDiscount || 0;
-    const totalTax = value.totalTax || 0;
-    const shippingCost = value.shippingCost || 0;
-    const totalBoxes = value.totalBoxes || 0;
-
-    // Apply discount to both totals (matching confirmation logic)
     const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
-    const grandTotal = Math.max(0, subtotal - totalDiscount + totalTax + shippingCost);
+    const grandTotal = Math.max(0, subtotal - totalDiscount + (value.totalTax || 0) + (value.shippingCost || 0));
 
-    const cashPayment = Number(value.cashPayment || 0);
-    const bankPayment = Number(value.bankPayment || 0);
-    const initialPaidAmount = cashPayment + bankPayment;
-
-    // ==========================================
-    // CREDIT APPLICATION: Check if supplier owes admin and auto-apply credit
-    // ==========================================
+    const initialPaidAmount = Number(value.cashPayment || 0) + Number(value.bankPayment || 0);
     const currentSupplierBalance = await Ledger.getBalance('supplier', supplier._id);
     let creditApplied = 0;
     let finalRemainingBalance = Math.max(0, discountedSupplierPaymentTotal - initialPaidAmount);
 
-    // If balance is negative, supplier owes admin - apply credit
     if (currentSupplierBalance < 0) {
-      const availableCredit = Math.abs(currentSupplierBalance);
-      creditApplied = Math.min(availableCredit, finalRemainingBalance);
+      creditApplied = Math.min(Math.abs(currentSupplierBalance), finalRemainingBalance);
       finalRemainingBalance = Math.max(0, finalRemainingBalance - creditApplied);
     }
 
-    const paymentStatus = value.paymentStatus || (
-      finalRemainingBalance <= 0
-        ? 'paid'
-        : (initialPaidAmount + creditApplied) > 0
-          ? 'partial'
-          : 'pending'
-    );
-
-    // Create dispatch order as manual entry
-    // If the supplier has a portal account (userId), set supplierUser so the entry appears in their portal
-    const supplierUserId = supplier.userId || null;
-
     const dispatchOrder = new DispatchOrder({
       supplier: value.supplier,
-      supplierUser: supplierUserId, // Set to supplier's userId if they have a portal account
-      logisticsCompany: value.logisticsCompany || null, // Optional - for tracking logistics charges
+      supplierUser: supplier.userId || null,
+      logisticsCompany: value.logisticsCompany || null,
       dispatchDate: value.purchaseDate ? new Date(value.purchaseDate) : new Date(),
-      expectedDeliveryDate: value.expectedDeliveryDate,
-      exchangeRate: value.exchangeRate,
-      percentage: value.percentage,
       items: itemsWithDetails,
-      status: 'confirmed', // Manual entries are pre-confirmed
-      confirmedAt: new Date(),
-      confirmedBy: req.user._id,
-      // Financial fields
-      subtotal,
-      totalDiscount,
-      totalBoxes,
-      totalTax,
-      shippingCost,
-      supplierPaymentTotal: discountedSupplierPaymentTotal, // What admin owes supplier (after discount)
-      grandTotal: grandTotal, // Landed total (for inventory valuation)
-      cashPayment,
-      bankPayment,
+      status: 'confirmed', confirmedAt: new Date(), confirmedBy: req.user._id,
+      subtotal, totalDiscount, totalTax: value.totalTax || 0, shippingCost: value.shippingCost || 0,
+      supplierPaymentTotal: discountedSupplierPaymentTotal, grandTotal,
+      cashPayment: value.cashPayment || 0, bankPayment: value.bankPayment || 0,
       remainingBalance: finalRemainingBalance,
-      paymentStatus,
-      // Payment details (nested)
-      paymentDetails: {
-        cashPayment,
-        bankPayment,
-        creditApplied, // Track credit applied
-        remainingBalance: finalRemainingBalance,
-        paymentStatus
-      },
-      // Purchase-specific fields
-      invoiceNumber: value.invoiceNumber,
-      paymentTerms: value.paymentTerms,
-      notes: value.notes,
-      attachments: value.attachments || [],
-      createdBy: req.user._id
+      paymentStatus: finalRemainingBalance <= 0 ? 'paid' : (initialPaidAmount + creditApplied > 0 ? 'partial' : 'pending'),
+      paymentDetails: { cashPayment: value.cashPayment || 0, bankPayment: value.bankPayment || 0, creditApplied, remainingBalance: finalRemainingBalance, paymentStatus: finalRemainingBalance <= 0 ? 'paid' : (initialPaidAmount + creditApplied > 0 ? 'partial' : 'pending') },
+      invoiceNumber: value.invoiceNumber, notes: value.notes, createdBy: req.user._id
     });
 
     await dispatchOrder.save();
 
-    // Create ledger entry for purchase (debit) - use supplierPaymentTotal (what admin owes supplier)
-    try {
-      await Ledger.createEntry({
-        type: 'supplier',
-        entityId: supplier._id,
-        entityModel: 'Supplier',
-        transactionType: 'purchase',
-        referenceId: dispatchOrder._id,
-        referenceModel: 'DispatchOrder',
-        debit: discountedSupplierPaymentTotal,
-        credit: 0,
-        date: dispatchOrder.dispatchDate,
-        description: `Manual Purchase ${dispatchOrder.orderNumber} - Supplier Debt: €${discountedSupplierPaymentTotal.toFixed(2)} (Subtotal: €${supplierPaymentTotal.toFixed(2)}, Discount: €${totalDiscount.toFixed(2)}), Valuation: €${grandTotal.toFixed(2)}, Cash: €${cashPayment.toFixed(2)}, Bank: €${bankPayment.toFixed(2)}, Credit: €${creditApplied.toFixed(2)}, Remaining: €${finalRemainingBalance.toFixed(2)}`,
-        paymentDetails: {
-          cashPayment: cashPayment,
-          bankPayment: bankPayment,
-          remainingBalance: finalRemainingBalance
-        },
-        createdBy: req.user._id
-      });
-    } catch (ledgerError) {
-      console.error(`Error creating purchase ledger entry:`, ledgerError);
-    }
-
-    // Create separate ledger entries for payments (credit entries)
-    if (cashPayment > 0) {
-      try {
-        await Ledger.createEntry({
-          type: 'supplier',
-          entityId: supplier._id,
-          entityModel: 'Supplier',
-          transactionType: 'payment',
-          referenceId: dispatchOrder._id,
-          referenceModel: 'DispatchOrder',
-          debit: 0,
-          credit: cashPayment,
-          date: dispatchOrder.dispatchDate,
-          description: `Cash payment for Manual Purchase ${dispatchOrder.orderNumber}`,
-          paymentMethod: 'cash',
-          paymentDetails: {
-            cashPayment: cashPayment,
-            bankPayment: 0,
-            remainingBalance: 0
-          },
-          createdBy: req.user._id
-        });
-      } catch (paymentError) {
-        console.error(`Error creating cash payment ledger entry:`, paymentError);
-      }
-    }
-
-    if (bankPayment > 0) {
-      try {
-        await Ledger.createEntry({
-          type: 'supplier',
-          entityId: supplier._id,
-          entityModel: 'Supplier',
-          transactionType: 'payment',
-          referenceId: dispatchOrder._id,
-          referenceModel: 'DispatchOrder',
-          debit: 0,
-          credit: bankPayment,
-          date: dispatchOrder.dispatchDate,
-          description: `Bank payment for Manual Purchase ${dispatchOrder.orderNumber}`,
-          paymentMethod: 'bank',
-          paymentDetails: {
-            cashPayment: 0,
-            bankPayment: bankPayment,
-            remainingBalance: 0
-          },
-          createdBy: req.user._id
-        });
-      } catch (paymentError) {
-        console.error(`Error creating bank payment ledger entry:`, paymentError);
-      }
-    }
-
-    // Create credit application entry if credit was applied
-    if (creditApplied > 0) {
-      try {
-        await Ledger.createEntry({
-          type: 'supplier',
-          entityId: supplier._id,
-          entityModel: 'Supplier',
-          transactionType: 'credit_application',
-          referenceId: dispatchOrder._id,
-          referenceModel: 'DispatchOrder',
-          debit: 0,
-          credit: creditApplied,
-          date: dispatchOrder.dispatchDate,
-          description: `Credit application for Manual Purchase ${dispatchOrder.orderNumber} from existing supplier overpayment`,
-          createdBy: req.user._id
-        });
-
-      } catch (creditError) {
-        console.error(`Error creating credit application ledger entry:`, creditError);
-      }
-    }
-
-    // Create logistics charge entry (debit) if logistics company and boxes exist
-    try {
-      if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {
-        // Fetch logistics company to get rates
-        const logisticsCompany = await LogisticsCompany.findById(dispatchOrder.logisticsCompany);
-        if (logisticsCompany) {
-          const boxRate = logisticsCompany.rates?.boxRate || 0;
-          const totalBoxes = dispatchOrder.totalBoxes || 0;
-          const logisticsCharge = totalBoxes * boxRate;
-
-          if (logisticsCharge > 0) {
-            await Ledger.createEntry({
-              type: 'logistics',
-              entityId: logisticsCompany._id,
-              entityModel: 'LogisticsCompany',
-              transactionType: 'charge',
-              referenceId: dispatchOrder._id,
-              referenceModel: 'DispatchOrder',
-              debit: logisticsCharge,
-              credit: 0,
-              date: dispatchOrder.dispatchDate,
-              description: `Logistics charge for Manual Purchase ${dispatchOrder.orderNumber} - ${totalBoxes} boxes × £${boxRate.toFixed(2)}/box = £${logisticsCharge.toFixed(2)}`,
-              createdBy: req.user._id
-            });
-            console.log(`[Manual Entry] Created logistics charge ledger entry: £${logisticsCharge} (${totalBoxes} boxes × £${boxRate}/box)`);
-          }
+    const ledgerTasks = [];
+    ledgerTasks.push(Ledger.createEntry({
+      type: 'supplier', entityId: supplier._id, entityModel: 'Supplier', transactionType: 'purchase',
+      referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: discountedSupplierPaymentTotal, credit: 0,
+      date: dispatchOrder.dispatchDate, description: `Manual Purchase ${dispatchOrder.orderNumber}`, createdBy: req.user._id
+    }));
+    if (value.cashPayment > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplier._id, entityModel: 'Supplier', transactionType: 'payment', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: value.cashPayment, date: dispatchOrder.dispatchDate, description: `Cash payment: ${dispatchOrder.orderNumber}`, paymentMethod: 'cash', createdBy: req.user._id }));
+    if (value.bankPayment > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplier._id, entityModel: 'Supplier', transactionType: 'payment', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: value.bankPayment, date: dispatchOrder.dispatchDate, description: `Bank payment: ${dispatchOrder.orderNumber}`, paymentMethod: 'bank', createdBy: req.user._id }));
+    if (creditApplied > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplier._id, entityModel: 'Supplier', transactionType: 'credit_application', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: creditApplied, date: dispatchOrder.dispatchDate, description: `Credit applied: ${dispatchOrder.orderNumber}`, createdBy: req.user._id }));
+    ledgerTasks.push(Supplier.findByIdAndUpdate(supplier._id, { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: discountedSupplierPaymentTotal - initialPaidAmount - creditApplied } }));
+    
+    if (dispatchOrder.logisticsCompany && value.totalBoxes > 0) {
+      LogisticsCompany.findById(dispatchOrder.logisticsCompany).then(lc => {
+        if (lc?.rates?.boxRate > 0) {
+          Ledger.createEntry({
+            type: 'logistics', entityId: lc._id, entityModel: 'LogisticsCompany', transactionType: 'charge',
+            referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: value.totalBoxes * lc.rates.boxRate, credit: 0,
+            date: dispatchOrder.dispatchDate, description: `Logistics charge: ${dispatchOrder.orderNumber}`, createdBy: req.user._id
+          }).catch(e => console.error("Logistics Ledger Error:", e));
         }
-      }
-    } catch (ledgerError) {
-      console.error(`[Manual Entry] Error creating logistics charge ledger entry:`, ledgerError);
-      // Don't fail the entire manual entry creation if logistics charge entry fails
+      });
     }
+    await Promise.all(ledgerTasks);
 
-    // Update supplier balance - use supplierPaymentTotal (what admin owes supplier)
-    try {
-      await Supplier.findByIdAndUpdate(
-        supplier._id,
-        { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: discountedSupplierPaymentTotal - cashPayment - bankPayment } }
-      );
-    } catch (supplierError) {
-      console.error(`Error updating supplier balance:`, supplierError);
-    }
-
-    // Update inventory immediately (manual entries = already delivered)
     try {
       await dispatchOrder.populate({ path: 'items.product' });
+      const bwipjs = require('bwip-js');
+      const transactionDate = dispatchOrder.dispatchDate || new Date();
+
+      const productUpdateTasks = dispatchOrder.items.map(async (item) => {
+        let productObj = item.product;
+        if (!productObj) {
+          productObj = new Product({
+            name: item.productName || 'Unknown Product', sku: item.productCode?.toUpperCase(), supplier: supplier._id,
+            productCode: item.productCode, season: item.season, category: 'General', unit: 'piece',
+            pricing: { costPrice: item.costPrice, sellingPrice: resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2) },
+            size: normalizeToArray(item.size), color: normalizeToArray(item.primaryColor), specifications: { material: item.material },
+            createdBy: req.user._id, images: Array.isArray(item.productImage) ? item.productImage : (item.productImage ? [item.productImage] : [])
+          });
+          await productObj.save();
+          item.product = productObj._id;
+        } else {
+          let hasUpdates = false;
+          if (item.productImage) {
+            const imgs = Array.isArray(item.productImage) ? item.productImage : [item.productImage];
+            imgs.forEach(url => { if (url && !productObj.images.includes(url)) { productObj.images.unshift(url); hasUpdates = true; } });
+          }
+          const newSizes = normalizeToArray(item.size);
+          const mergedSizes = [...new Set([...normalizeToArray(productObj.size), ...newSizes])];
+          if (mergedSizes.length !== normalizeToArray(productObj.size).length) { productObj.size = mergedSizes; hasUpdates = true; }
+          if (hasUpdates) await productObj.save();
+        }
+        return productObj;
+      });
+      await Promise.all(productUpdateTasks);
 
       for (const item of dispatchOrder.items) {
-        if (!item.product) {
-          // Create product if it doesn't exist
-          if (!item.season || !Array.isArray(item.season) || item.season.length === 0) {
-            console.warn(`Season required for item: ${item.productCode}`);
-            continue;
-          }
-
-          // Normalize sizes and colors using helper function
-          const productSizes = normalizeToArray(item.size);
-          const productColors = normalizeToArray(item.primaryColor);
-          const colorForSpec = productColors.length > 0 ? productColors[0] : undefined;
-
-          const newProduct = new Product({
-            name: item.productName || 'Unknown Product',
-            sku: item.productCode?.toUpperCase() || 'UNKNOWN',
-            supplier: supplier._id, // Associate product with supplier
-            productCode: item.productCode,
-            season: item.season,
-            category: 'General',
-            unit: 'piece',
-            pricing: {
-              costPrice: item.costPrice || (item.landedTotal / item.quantity),
-              sellingPrice: resolveMinSellingPrice(item.minSellingPrice, (item.costPrice || (item.landedTotal / item.quantity)) * 1.2),
-              minSellingPrice: resolveMinSellingPrice(item.minSellingPrice, (item.costPrice || (item.landedTotal / item.quantity)) * 1.2)
-            },
-            size: productSizes,
-            color: productColors,
-            specifications: {
-              color: colorForSpec,
-              material: item.material || undefined
-            },
-            createdBy: req.user._id
-          });
-
-          try {
-            await newProduct.save();
-            item.product = newProduct._id;
-          } catch (productError) {
-            if (productError.code === 11000) {
-              // Duplicate SKU+supplier - find existing for this supplier
-              const existingProduct = await Product.findOne({
-                sku: item.productCode?.toUpperCase(),
-                supplier: supplier._id
-              });
-              if (existingProduct) {
-                item.product = existingProduct._id;
-              } else {
-                console.error(`Error creating product:`, productError);
-                continue;
-              }
-            } else {
-              console.error(`Error creating product:`, productError);
-              continue;
-            }
-          }
-        }
-
-        // Add productImage from dispatch order item to Product's images array
-        const productObj = typeof item.product === 'object' && item.product._id
-          ? await Product.findById(item.product._id)
-          : await Product.findById(item.product);
-
-        if (productObj && item.productImage) {
-          // Initialize images array if it doesn't exist
-          if (!productObj.images || !Array.isArray(productObj.images)) {
-            productObj.images = [];
-          }
-
-          // Handle both string (backward compat) and array of images
-          const imagesToAdd = Array.isArray(item.productImage)
-            ? item.productImage
-            : [item.productImage];
-
-          // Add images to beginning of array (most recent first)
-          // Check if image already exists to avoid duplicates
-          let addedCount = 0;
-          for (const imageUrl of imagesToAdd) {
-            if (imageUrl && !productObj.images.includes(imageUrl)) {
-              productObj.images.unshift(imageUrl);
-              addedCount++;
-            }
-          }
-
-          if (addedCount > 0) {
-            try {
-              await productObj.save();
-              console.log(`[Manual Entry] Added ${addedCount} image(s) to product ${productObj.name || productObj._id}`);
-            } catch (productImageError) {
-              console.error(`[Manual Entry] Failed to save image to product ${productObj.name || productObj._id}:`, {
-                message: productImageError.message,
-                stack: productImageError.stack
-              });
-              // Don't fail the entire creation if product image save fails
-            }
-          } else {
-
-          }
-        }
-
-        // Update existing product's size and color arrays (merge new values)
-        if (productObj) {
-          let hasUpdates = false;
-
-          // Merge new sizes into existing product sizes (normalize both to handle old merged values)
-          if (item.size) {
-            const newSizes = normalizeToArray(item.size);
-            const existingSizes = normalizeToArray(productObj.size); // Normalize existing too!
-            const mergedSizes = [...new Set([...existingSizes, ...newSizes])];
-            if (JSON.stringify(mergedSizes.sort()) !== JSON.stringify((productObj.size || []).sort())) {
-              productObj.size = mergedSizes;
-              hasUpdates = true;
-            }
-          }
-
-          // Merge new colors into existing product colors (normalize both to handle old merged values)
-          if (item.primaryColor) {
-            const newColors = normalizeToArray(item.primaryColor);
-            const existingColors = normalizeToArray(productObj.color); // Normalize existing too!
-            const mergedColors = [...new Set([...existingColors, ...newColors])];
-            if (JSON.stringify(mergedColors.sort()) !== JSON.stringify((productObj.color || []).sort())) {
-              productObj.color = mergedColors;
-              hasUpdates = true;
-            }
-          }
-
-          // Save if we have updates
-          if (hasUpdates) {
-            try {
-              await productObj.save();
-              console.log(`[Manual Entry] Updated product ${productObj.name} with sizes: [${productObj.size?.join(', ')}], colors: [${productObj.color?.join(', ')}]`);
-            } catch (updateError) {
-              console.error(`[Manual Entry] Failed to update product sizes/colors:`, updateError.message);
-            }
-          }
-        }
-
-        // Validate product exists before creating inventory
-        const productId = item.product?._id || item.product;
-        if (!productId) {
-          console.warn(`[Manual Entry] Skipping inventory creation for item ${item.productCode || item.productName || 'unknown'} - invalid product reference`);
-          continue;
-        }
-
-        // Verify product actually exists in database
-        const productExists = await Product.findById(productId);
-        if (!productExists) {
-          console.warn(`[Manual Entry] Skipping inventory creation for item ${item.productCode || item.productName || 'unknown'} - product ${productId} not found in database`);
-          continue;
-        }
-
-        const quantity = item.quantity;
-        const unitPrice = item.landedTotal / quantity;
-        const costPrice = item.costPrice || unitPrice; // Actual cost price paid to supplier
-
-        // Find or create Inventory
-        let inventory = await Inventory.findOne({ product: productId });
-
-        if (!inventory) {
-          inventory = new Inventory({
-            product: productId,
-            currentStock: 0,
-            averageCostPrice: unitPrice,
+        const prodId = item.product?._id || item.product;
+        const [inventory, packetGroups] = await Promise.all([
+          Inventory.findOne({ product: prodId }).then(async inv => inv || await new Inventory({ 
+            product: prodId, 
+            currentStock: 0, 
+            averageCostPrice: item.landedPrice, 
+            purchaseBatches: [],
             minStockLevel: 0,
             maxStockLevel: 1000,
-            reorderLevel: 10,
-            purchaseBatches: [] // Initialize empty batches array
-          });
-          await inventory.save();
-        }
+            reorderLevel: 10
+          }).save()),
+          (async () => {
+             const groups = new Map();
+             const isLoose = item.packets.some(p => p.isLoose);
+             if (isLoose) {
+               item.packets.filter(p => p.isLoose).forEach(p => p.composition.forEach(c => {
+                 const k = `${c.color}|${c.size}`;
+                 if (groups.has(k)) groups.get(k).quantity += c.quantity;
+                 else groups.set(k, { color: c.color, size: c.size, quantity: c.quantity, isLoose: true });
+               }));
+             } else {
+               item.packets.forEach(p => {
+                 const b = generatePacketBarcode(supplier._id.toString(), prodId.toString(), p.composition, false);
+                 if (groups.has(b)) groups.get(b).count++;
+                 else groups.set(b, { barcode: b, comp: p.composition, items: p.totalItems || p.composition.reduce((s, c) => s + c.quantity, 0), count: 1, isLoose: false });
+               });
+             }
+             return Array.from(groups.values());
+          })()
+        ]);
 
-        // Prepare batch info for FIFO cost tracking
-        const batchInfo = {
-          dispatchOrderId: dispatchOrder._id,
-          supplierId: supplier._id,
-          purchaseDate: dispatchOrder.dispatchDate || new Date(),
-          costPrice: costPrice, // Actual cost price paid to supplier
-          landedPrice: unitPrice, // Landed price for inventory valuation
-          exchangeRate: value.exchangeRate || 1.0
-        };
-
-        const transactionDate = dispatchOrder.dispatchDate || new Date();
-
-        // Add stock to inventory with batch tracking
-        if (item.useVariantTracking && item.packets && item.packets.length > 0) {
-          // Build variant composition from packets
+        const batchInfo = { dispatchOrderId: dispatchOrder._id, supplierId: supplier._id, purchaseDate: transactionDate, costPrice: item.costPrice, landedPrice: item.landedPrice, exchangeRate: value.exchangeRate || 1.0 };
+        if (item.packets?.length > 0) {
           const variantComposition = [];
-          item.packets.forEach(packet => {
-            packet.composition.forEach(comp => {
-              const existing = variantComposition.find(v => v.size === comp.size && v.color === comp.color);
-              if (existing) {
-                existing.quantity += comp.quantity;
-              } else {
-                variantComposition.push({
-                  size: comp.size,
-                  color: comp.color,
-                  quantity: comp.quantity
-                });
-              }
-            });
-          });
-
-          // Add stock with variant composition and batch tracking
-          await inventory.addStockWithVariants(
-            quantity,
-            variantComposition,
-            'DispatchOrder',
-            dispatchOrder._id,
-            req.user._id,
-            `Manual Purchase ${dispatchOrder.orderNumber} - Variants`,
-            transactionDate
-          );
-
-          // Also add purchase batch for FIFO tracking
-          inventory.purchaseBatches.push({
-            dispatchOrderId: batchInfo.dispatchOrderId,
-            supplierId: batchInfo.supplierId,
-            purchaseDate: batchInfo.purchaseDate,
-            quantity: quantity,
-            remainingQuantity: quantity,
-            costPrice: batchInfo.costPrice,
-            landedPrice: batchInfo.landedPrice,
-            exchangeRate: batchInfo.exchangeRate,
-            notes: `Manual Purchase ${dispatchOrder.orderNumber} - With variants`
-          });
-
-          // Recalculate weighted average cost from all batches
-          inventory.recalculateAverageCost();
-          await inventory.save();
-
-          // ==========================================
-          // CREATE PACKET STOCK ENTRIES FOR BARCODE-BASED SELLING
-          // ==========================================
-          const supplierId = supplier._id;
-
-          // Helper function to generate barcode image
-          const bwipjs = require('bwip-js');
-          const generateBarcodeImage = async (barcodeText) => {
-            try {
-              const barcodeBuffer = await bwipjs.toBuffer({
-                bcid: 'code128',
-                text: barcodeText,
-                scale: 3,
-                height: 10,
-                includetext: true,
-                textxalign: 'center',
-                textsize: 8
-              });
-              return `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-            } catch (err) {
-              console.error(`[Manual Entry] Failed to generate barcode image for ${barcodeText}:`, err.message);
-              return null;
-            }
-          };
-
-          // Check if this is a loose item configuration (packets with isLoose: true)
-          const hasLooseItems = item.packets.some(p => p.isLoose === true);
-
-          if (hasLooseItems) {
-            // ==========================================
-            // LOOSE ITEMS: Create separate barcode for each color/size combination
-            // ==========================================
-            // Merge all compositions from loose packets and group by color/size
-            const looseItemGroups = new Map();
-
-            for (const packet of item.packets) {
-              if (!packet.isLoose) continue;
-
-              for (const comp of packet.composition) {
-                const key = `${comp.color}|${comp.size}`;
-                if (looseItemGroups.has(key)) {
-                  looseItemGroups.get(key).quantity += comp.quantity;
-                } else {
-                  looseItemGroups.set(key, {
-                    color: comp.color,
-                    size: comp.size,
-                    quantity: comp.quantity
-                  });
-                }
-              }
-            }
-
-            // Create PacketStock for each color/size combination
-            for (const [key, looseItem] of looseItemGroups) {
-              try {
-                // Single-item composition for this color/size
-                const singleComposition = [{
-                  size: looseItem.size,
-                  color: looseItem.color,
-                  quantity: 1
-                }];
-
-                // Generate unique barcode for this color/size combination
-                const looseBarcode = generatePacketBarcode(
-                  supplierId.toString(),
-                  productId.toString(),
-                  singleComposition,
-                  true // isLoose = true
-                );
-
-                // Find existing packet stock or create new
-                let packetStock = await PacketStock.findOne({ barcode: looseBarcode });
-
-                if (packetStock) {
-                  // Add to existing stock
-                  await packetStock.addStock(
-                    looseItem.quantity,
-                    dispatchOrder._id,
-                    batchInfo.costPrice,
-                    batchInfo.landedPrice,
-                    transactionDate
-                  );
-                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
-                  packetStock.suggestedSellingPrice = itemMinSell;
-                  await packetStock.save();
-                } else {
-                  // Create new packet stock for this loose item variant
-                  // Generate barcode image
-                  const looseBarcodeImage = await generateBarcodeImage(looseBarcode);
-
-                  packetStock = new PacketStock({
-                    barcode: looseBarcode,
-                    product: productId,
-                    supplier: supplierId,
-                    composition: singleComposition,
-                    totalItemsPerPacket: 1,
-                    availablePackets: looseItem.quantity,
-                    costPricePerPacket: batchInfo.costPrice,
-                    landedPricePerPacket: batchInfo.landedPrice,
-                    suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20),
-                    isLoose: true,
-                    barcodeImage: looseBarcodeImage ? {
-                      dataUrl: looseBarcodeImage,
-                      format: 'code128',
-                      generatedAt: transactionDate
-                    } : undefined,
-                    dispatchOrderHistory: [{
-                      dispatchOrderId: dispatchOrder._id,
-                      quantity: looseItem.quantity,
-                      costPricePerPacket: batchInfo.costPrice,
-                      landedPricePerPacket: batchInfo.landedPrice,
-                      addedAt: transactionDate
-                    }]
-                  });
-                  await packetStock.save();
-                }
-              } catch (looseStockError) {
-                console.error(`[Manual Entry] Failed to create/update loose PacketStock for ${looseItem.color}/${looseItem.size}:`, looseStockError.message);
-              }
-            }
-          } else {
-            // ==========================================
-            // REGULAR PACKETS: One barcode per packet composition
-            // ==========================================
-            // Group packets by their composition to count duplicates
-            const packetGroups = new Map();
-
-            for (const packet of item.packets) {
-              // Generate deterministic barcode for this packet composition
-              const barcode = generatePacketBarcode(
-                supplierId.toString(),
-                productId.toString(),
-                packet.composition,
-                false // isLoose = false for packets
-              );
-
-              if (packetGroups.has(barcode)) {
-                packetGroups.get(barcode).count += 1;
-              } else {
-                packetGroups.set(barcode, {
-                  barcode,
-                  composition: packet.composition,
-                  totalItemsPerPacket: packet.totalItems || packet.composition.reduce((sum, c) => sum + c.quantity, 0),
-                  count: 1
-                });
-              }
-            }
-
-            // Create or update PacketStock for each unique packet configuration
-            for (const [barcode, packetGroup] of packetGroups) {
-              try {
-                // Calculate cost per packet (landed price × items per packet)
-                const costPerPacket = batchInfo.costPrice * packetGroup.totalItemsPerPacket;
-                const landedPerPacket = batchInfo.landedPrice * packetGroup.totalItemsPerPacket;
-
-                // Find existing packet stock or create new
-                let packetStock = await PacketStock.findOne({ barcode });
-
-                if (packetStock) {
-                  // Add to existing stock
-                  await packetStock.addStock(
-                    packetGroup.count,
-                    dispatchOrder._id,
-                    costPerPacket,
-                    landedPerPacket,
-                    transactionDate
-                  );
-                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, landedPerPacket * 1.20);
-                  packetStock.suggestedSellingPrice = typeof truncateToTwoDecimals === 'function' ? truncateToTwoDecimals(itemMinSell * (packetGroup.totalItemsPerPacket || 1)) : itemMinSell * (packetGroup.totalItemsPerPacket || 1);
-                  await packetStock.save();
-
-                } else {
-                  // Create new packet stock
-                  // Generate barcode image
-                  const packetBarcodeImage = await generateBarcodeImage(barcode);
-
-                  packetStock = new PacketStock({
-                    barcode,
-                    product: productId,
-                    supplier: supplierId,
-                    composition: packetGroup.composition,
-                    totalItemsPerPacket: packetGroup.totalItemsPerPacket,
-                    availablePackets: packetGroup.count,
-                    costPricePerPacket: costPerPacket,
-                    landedPricePerPacket: landedPerPacket,
-                    suggestedSellingPrice: typeof truncateToTwoDecimals === 'function' ? truncateToTwoDecimals(resolveMinSellingPrice(item.minSellingPrice, (batchInfo.landedPrice || 0) * 1.20) * (packetGroup.totalItemsPerPacket || 1)) : resolveMinSellingPrice(item.minSellingPrice, (batchInfo.landedPrice || 0) * 1.20) * (packetGroup.totalItemsPerPacket || 1),
-                    isLoose: false,
-                    barcodeImage: packetBarcodeImage ? {
-                      dataUrl: packetBarcodeImage,
-                      format: 'code128',
-                      generatedAt: transactionDate
-                    } : undefined,
-                    dispatchOrderHistory: [{
-                      dispatchOrderId: dispatchOrder._id,
-                      quantity: packetGroup.count,
-                      costPricePerPacket: costPerPacket,
-                      landedPricePerPacket: landedPerPacket,
-                      addedAt: transactionDate
-                    }]
-                  });
-                  await packetStock.save();
-
-                }
-              } catch (packetStockError) {
-                console.error(`[Manual Entry] Failed to create PacketStock for barcode ${barcode}:`, packetStockError.message);
-              }
-            }
-          }
+          item.packets.forEach(packet => packet.composition.forEach(comp => {
+            const existing = variantComposition.find(v => v.size === comp.size && v.color === comp.color);
+            if (existing) existing.quantity += comp.quantity;
+            else variantComposition.push({ size: comp.size, color: comp.color, quantity: comp.quantity });
+          }));
+          await inventory.addStockWithVariants(item.quantity, variantComposition, 'DispatchOrder', dispatchOrder._id, req.user._id, `Manual Purchase ${dispatchOrder.orderNumber}`, transactionDate);
+          inventory.purchaseBatches.push({ ...batchInfo, quantity: item.quantity, remainingQuantity: item.quantity });
         } else {
-          // Add stock with batch tracking (for FIFO cost calculation)
-          await inventory.addStockWithBatch(
-            quantity,
-            batchInfo,
-            'DispatchOrder',
-            dispatchOrder._id,
-            req.user._id,
-            `Manual Purchase ${dispatchOrder.orderNumber}`
-          );
-
-          // ==========================================
-          // CREATE LOOSE ITEM PACKET STOCK ENTRIES
-          // ==========================================
-          const supplierId = supplier._id;
-
-          const productObjForSpec = await Product.findById(productId);
-          const itemColor = productObjForSpec?.specifications?.color || 'Default';
-          const itemSize = (productObjForSpec?.size && productObjForSpec.size.length > 0) ? productObjForSpec.size[0] : 'Default';
-
-          const looseComposition = [{ size: itemSize, color: itemColor, quantity: 1 }];
-
-          const looseBarcode = generatePacketBarcode(supplierId.toString(), productId.toString(), looseComposition, true);
-
-          try {
-            let packetStock = await PacketStock.findOne({ barcode: looseBarcode });
-
-            if (packetStock) {
-              await packetStock.addStock(quantity, dispatchOrder._id, batchInfo.costPrice, batchInfo.landedPrice, transactionDate);
-              await packetStock.save();
-            } else {
-              const bwipjs = require('bwip-js');
-              let looseBarcodeImage = null;
-              try {
-                const barcodeBuffer = await bwipjs.toBuffer({ bcid: 'code128', text: looseBarcode, scale: 3, height: 10, includetext: true, textxalign: 'center', textsize: 8 });
-                looseBarcodeImage = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-              } catch (err) { }
-
-              packetStock = new PacketStock({
-                barcode: looseBarcode,
-                product: productId,
-                supplier: supplierId,
-                composition: looseComposition,
-                totalItemsPerPacket: 1,
-                availablePackets: quantity,
-                costPricePerPacket: batchInfo.costPrice,
-                landedPricePerPacket: batchInfo.landedPrice,
-                suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20),
-                isLoose: true,
-                barcodeImage: looseBarcodeImage ? { dataUrl: looseBarcodeImage, format: 'code128', generatedAt: transactionDate } : undefined,
-                dispatchOrderHistory: [{
-                  dispatchOrderId: dispatchOrder._id,
-                  quantity: quantity,
-                  costPricePerPacket: batchInfo.costPrice,
-                  landedPricePerPacket: batchInfo.landedPrice,
-                  addedAt: transactionDate
-                }]
-              });
-              await packetStock.save();
-            }
-          } catch (looseError) {
-            console.error(`[Manual Entry] Failed loose packet stock for ${looseBarcode}:`, looseError.message);
-          }
+          await inventory.addStockWithBatch(item.quantity, batchInfo, 'DispatchOrder', dispatchOrder._id, req.user._id, `Manual Purchase ${dispatchOrder.orderNumber}`);
         }
+        inventory.recalculateAverageCost();
+        await inventory.save();
+
+        const packetTasks = packetGroups.map(async (group) => {
+          let barcode = group.barcode;
+          let comp = group.comp;
+          let itemsPerPacket = group.items;
+          let qty = group.count;
+          if (group.isLoose) {
+            comp = [{ size: group.size, color: group.color, quantity: 1 }];
+            barcode = generatePacketBarcode(supplier._id.toString(), prodId.toString(), comp, true);
+            qty = group.quantity;
+            itemsPerPacket = 1;
+          }
+          let ps = await PacketStock.findOne({ barcode });
+          if (ps) {
+            await ps.addStock(qty, dispatchOrder._id, item.costPrice * itemsPerPacket, item.landedPrice * itemsPerPacket, transactionDate);
+            ps.suggestedSellingPrice = resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2) * itemsPerPacket;
+          } else {
+            const buffer = await bwipjs.toBuffer({ bcid: 'code128', text: barcode, scale: 3, height: 10, includetext: true, textxalign: 'center', textsize: 8 }).catch(() => null);
+            const image = buffer ? `data:image/png;base64,${buffer.toString('base64')}` : null;
+            ps = new PacketStock({
+              barcode, product: prodId, supplier: supplier._id, composition: comp, totalItemsPerPacket: itemsPerPacket, availablePackets: qty,
+              costPricePerPacket: item.costPrice * itemsPerPacket, landedPricePerPacket: item.landedPrice * itemsPerPacket,
+              suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2) * itemsPerPacket,
+              isLoose: !!group.isLoose, barcodeImage: image ? { dataUrl: image, format: 'code128', generatedAt: transactionDate } : undefined,
+              dispatchOrderHistory: [{ dispatchOrderId: dispatchOrder._id, quantity: qty, costPricePerPacket: item.costPrice * itemsPerPacket, landedPricePerPacket: item.landedPrice * itemsPerPacket, addedAt: transactionDate }]
+            });
+          }
+          return ps.save();
+        });
+        await Promise.all(packetTasks);
       }
-    } catch (inventoryError) {
-      console.error(`Error updating inventory:`, inventoryError);
-    }
+    } catch (invError) { console.error("Inventory/Stock Error:", invError); }
 
     // Populate for response
     await dispatchOrder.populate([
@@ -2116,824 +1481,193 @@ router.post('/:id/confirm', auth, dateControl({ entityType: 'dispatch-order', da
       await dispatchOrder.save();
     }
 
-    // Calculate confirmed quantities
-    // Now that dispatchOrder.items is updated, we can rely on it and the return logic
+    // Calculate confirmed quantities and prices
     const confirmedQuantities = dispatchOrder.items.map((item, index) => {
-      const returnedItems = dispatchOrder.returnedItems || [];
-      const totalReturned = returnedItems
-        .filter(returned => returned.itemIndex === index)
-        .reduce((sum, returned) => sum + returned.quantity, 0);
-
-      // Confirmed Qty is simply the current item quantity minus any returns
-      // (If user edited quantity in requestItems, item.quantity is now that edited value)
-      const confirmedQty = Math.max(0, (item.quantity || 0) - totalReturned);
-
-      return {
-        itemIndex: index,
-        quantity: confirmedQty
-      };
+      const returnedQty = (dispatchOrder.returnedItems || [])
+        .filter(r => r.itemIndex === index)
+        .reduce((sum, r) => sum + r.quantity, 0);
+      return { itemIndex: index, quantity: Math.max(0, (item.quantity || 0) - returnedQty) };
     });
 
-    // Calculate supplier payment amount and landed price for each item
-    // Supplier Payment = costPrice × quantity (NO exchange rate, NO profit margin) - what admin pays supplier
-    // Landed Price = (costPrice / exchangeRate) × (1 + profit%) × quantity - for inventory valuation
     let supplierPaymentTotal = 0;
     let landedPriceTotal = 0;
     const itemsWithPrices = dispatchOrder.items.map((item, index) => {
-      const costPrice = item.costPrice || 0;
-      const confirmedQty = confirmedQuantities[index].quantity;
-
-      // Supplier payment amount (what admin pays supplier - NO exchange rate, NO profit margin)
-      // Formula: cost price × quantity
-      const supplierPaymentAmount = costPrice;
-      const supplierPaymentItemTotal = supplierPaymentAmount * confirmedQty;
-      supplierPaymentTotal += supplierPaymentItemTotal;
-
-      // Landed price (for inventory valuation - WITH profit margin)
-      // Formula: (cost price / exchange rate) × (1 + percentage/100)
-      // Truncate to 2 decimal places (no rounding) for database storage
-      const landedPrice = truncateToTwoDecimals((costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
-      const landedPriceItemTotal = truncateToTwoDecimals(landedPrice * confirmedQty);
-      landedPriceTotal += landedPriceItemTotal;
-
-      return {
-        ...item.toObject(),
-        supplierPaymentAmount,
-        landedPrice,
-        confirmedQuantity: confirmedQty
-      };
+      const qty = confirmedQuantities[index].quantity;
+      const landedPrice = truncateToTwoDecimals((item.costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
+      supplierPaymentTotal += item.costPrice * qty;
+      landedPriceTotal += landedPrice * qty;
+      return { ...item.toObject(), supplierPaymentAmount: item.costPrice, landedPrice, confirmedQuantity: qty };
     });
 
-    // Get discount from order (set by supplier) or from request (admin override)
-    const totalDiscount = parseFloat(discount) !== undefined && discount !== null
-      ? parseFloat(discount)
-      : (dispatchOrder.totalDiscount || 0);
-
-    // Apply discount to supplierPaymentTotal (what admin pays supplier)
+    const totalDiscount = (discount !== undefined && discount !== null) ? parseFloat(discount) : (dispatchOrder.totalDiscount || 0);
     const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
-
-    // Truncate subtotal and grandTotal to 2 decimal places
     const subtotal = truncateToTwoDecimals(landedPriceTotal);
     const grandTotal = truncateToTwoDecimals(Math.max(0, subtotal - totalDiscount));
 
     // ==========================================
-    // STEP 1: Process products and inventory FIRST (before changing order status)
-    // This ensures atomicity - if products/inventory fail, nothing else happens
+    // STEP 1: BATCH LOOKUPS & PARALLEL PROCESSING
     // ==========================================
+    const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
+    const skus = [...new Set(dispatchOrder.items.map(i => i.productCode?.trim().toUpperCase()).filter(Boolean))];
+    
+    const [existingProducts, existingInventories] = await Promise.all([
+      Product.find({ sku: { $in: skus }, supplier: supplierId }),
+      Inventory.find({ product: { $in: dispatchOrder.items.map(i => i.product).filter(Boolean) } })
+    ]);
 
+    const productMap = new Map(existingProducts.map(p => [p.sku, p]));
+    const inventoryMap = new Map(existingInventories.map(inv => [inv.product.toString(), inv]));
 
-
-    // Track results for each item
     const inventoryResults = [];
+    const bwipjs = require('bwip-js');
 
-    // Season is now an array field, no need to populate
-
-    for (let index = 0; index < dispatchOrder.items.length; index++) {
+    // Item processing tasks
+    const itemTasks = dispatchOrder.items.map(async (item, index) => {
       try {
-        const item = dispatchOrder.items[index];
-        const confirmedQtyEntry = confirmedQuantities.find(cq => cq.itemIndex === index);
-        const confirmedQuantity = confirmedQtyEntry ? confirmedQtyEntry.quantity : 0;
+        const confirmedQty = confirmedQuantities[index].quantity;
+        if (confirmedQty <= 0) return { index, success: true, skipped: true };
 
-        if (confirmedQuantity <= 0) {
-          const totalReturned = (item.quantity || 0) - confirmedQuantity;
-          console.warn(`[Confirm Order] Skipping item ${index} for dispatch order ${dispatchOrder.orderNumber}: confirmedQuantity=${confirmedQuantity}, item.quantity=${item.quantity || 0}, totalReturned=${totalReturned}, productCode=${item.productCode || 'unknown'}`);
-          inventoryResults.push({
-            index,
-            success: false,
-            skipped: true,
-            reason: 'Zero or negative confirmed quantity',
-            productCode: item.productCode,
-            productName: item.productName
-          });
-          continue; // Skip items with no confirmed quantity
-        }
+        const productCodeUpper = item.productCode?.trim().toUpperCase();
+        let product = productMap.get(productCodeUpper);
+        const landedPrice = itemsWithPrices[index].landedPrice;
 
-        // Validate required fields
-        if (!item.productCode) {
-          const error = 'Missing productCode';
-          console.error(`[Confirm Order] Item ${index} ${error}`);
-          inventoryResults.push({
-            index,
-            success: false,
-            error,
-            productName: item.productName
-          });
-          continue;
-        }
-
-        // Extract season (handle both array and single value for backward compatibility)
-        const season = Array.isArray(item.season) ? item.season : (item.season ? [item.season] : []);
-
-        if (!season || season.length === 0) {
-          const error = 'Missing season';
-          console.error(`[Confirm Order] Item ${index} ${error}`);
-          inventoryResults.push({
-            index,
-            success: false,
-            error,
-            productCode: item.productCode,
-            productName: item.productName
-          });
-          continue;
-        }
-
-        const landedPrice = item.landedPrice || itemsWithPrices[index].landedPrice;
-
-        // Find or create Product
-        // SUPPLIER-SCOPED: Look for product with this SKU FROM THIS SUPPLIER
-        const productCodeTrimmed = item.productCode ? item.productCode.trim() : '';
-        const productCodeUpper = productCodeTrimmed.toUpperCase();
-        const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
-
-
-
-        // First, try to find a product with matching SKU AND supplier
-        let product = await Product.findOne({
-          sku: productCodeUpper,
-          supplier: supplierId
-        });
-
-        if (product) {
-          console.log(`[Confirm Order] Found existing product for supplier: ${product.name} (SKU: ${product.sku}, Supplier: ${product.supplier}, isActive: ${product.isActive})`);
-        } else {
-
-        }
-
+        // 1. Product Updates/Creation
         if (!product) {
-          // Create new Product
-          // Extract all colors (handle both array and string)
-          const colors = Array.isArray(item.primaryColor)
-            ? item.primaryColor.filter(c => c && c.trim())
-            : (item.primaryColor ? [item.primaryColor] : []);
-
-          // Extract all sizes (handle both array and string)
-          const sizes = Array.isArray(item.size)
-            ? item.size.filter(s => s && s.trim())
-            : (item.size ? [item.size] : []);
-
-          // Primary color for specifications (backward compatibility with single string)
-          const primaryColor = colors.length > 0 ? colors[0] : undefined;
-
+          const colors = Array.isArray(item.primaryColor) ? item.primaryColor : [item.primaryColor];
+          const sizes = Array.isArray(item.size) ? item.size : [item.size];
           product = new Product({
-            name: item.productName,
-            sku: item.productCode.toUpperCase(),
-            supplier: supplierId, // Associate product with supplier
-            productCode: item.productCode,
-            season: season,
-            category: 'General',
-            unit: 'piece',
-            pricing: {
-              costPrice: landedPrice,
-              sellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2),
-              minSellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2)
-            },
-            // Only set color and size if arrays have values
-            ...(colors.length > 0 && { color: colors }),
-            ...(sizes.length > 0 && { size: sizes }),
-            specifications: {
-              color: primaryColor,
-              material: item.material || undefined
-            },
-            isActive: true, // Ensure product is active when created
-            variantTracking: {
-              enabled: colors.length > 1 || sizes.length > 1,
-              ...(colors.length > 0 && { availableColors: colors }),
-              ...(sizes.length > 0 && { availableSizes: sizes })
-            },
-            createdBy: req.user._id
+            name: item.productName, sku: productCodeUpper, supplier: supplierId, productCode: item.productCode,
+            season: item.season, category: 'General', unit: 'piece',
+            pricing: { costPrice: landedPrice, sellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) },
+            color: colors.filter(Boolean), size: sizes.filter(Boolean),
+            specifications: { color: colors[0], material: item.material },
+            isActive: true, createdBy: req.user._id
           });
-
-          try {
-            await product.save();
-            console.log(`[Confirm Order] Created new product: ${product.name} (${product.sku}) for supplier ${supplierId}`);
-          } catch (productError) {
-            // If product creation fails (e.g., duplicate SKU+supplier), try to find again
-            if (productError.code === 11000) {
-              product = await Product.findOne({
-                sku: item.productCode.toUpperCase(),
-                supplier: supplierId
-              });
-              if (!product) {
-                const error = `Failed to create product and refetch failed: ${productError.message}`;
-                console.error(`[Confirm Order] Item ${index} ${error}`);
-                inventoryResults.push({
-                  index,
-                  success: false,
-                  error,
-                  productCode: item.productCode,
-                  productName: item.productName
-                });
-                continue;
-              }
-            } else {
-              const error = `Failed to create product: ${productError.message}`;
-              console.error(`[Confirm Order] Item ${index} ${error}`);
-              inventoryResults.push({
-                index,
-                success: false,
-                error,
-                productCode: item.productCode,
-                productName: item.productName
-              });
-              continue;
-            }
-          }
+          await product.save();
         } else {
-          // Ensure product is active (reactivate if it was deactivated)
-          let productNeedsSave = false;
-          if (!product.isActive) {
-            product.isActive = true;
-            productNeedsSave = true;
-            console.log(`[Confirm Order] Reactivating product: ${product.name} (${product.sku})`);
+          let needsSave = false;
+          if (!product.isActive) { product.isActive = true; needsSave = true; }
+          if (product.pricing.costPrice !== landedPrice) { product.pricing.costPrice = landedPrice; needsSave = true; }
+          const resMin = resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2);
+          if (product.pricing.sellingPrice !== resMin) { product.pricing.sellingPrice = resMin; product.pricing.minSellingPrice = resMin; needsSave = true; }
+          if (item.productImage) {
+            const imgs = Array.isArray(item.productImage) ? item.productImage : [item.productImage];
+            imgs.forEach(url => { if (url && !product.images.includes(url)) { product.images.unshift(url); needsSave = true; } });
           }
-
-          // Update product cost price if landed price is different (use latest landed price)
-          if (product.pricing.costPrice !== landedPrice) {
-            product.pricing.costPrice = landedPrice;
-            productNeedsSave = true;
-
-          }
-
-          if (item.minSellingPrice !== undefined) {
-            const resolvedMinSell = resolveMinSellingPrice(item.minSellingPrice, product.pricing?.minSellingPrice);
-            if (product.pricing.minSellingPrice !== resolvedMinSell || product.pricing.sellingPrice !== resolvedMinSell) {
-              product.pricing.minSellingPrice = resolvedMinSell;
-              product.pricing.sellingPrice = resolvedMinSell;
-              productNeedsSave = true;
-            }
-          }
-
-          // Always ensure product is active before proceeding
-          if (!product.isActive) {
-            product.isActive = true;
-            productNeedsSave = true;
-          }
-
-          if (productNeedsSave) {
-            await product.save();
-            console.log(`[Confirm Order] Saved product: ${product.name} (${product.sku}), isActive: ${product.isActive}`);
-          }
+          if (needsSave) await product.save();
         }
-
-        // Add productImage from dispatch order item to Product's images array
-        if (item.productImage) {
-          // Initialize images array if it doesn't exist
-          if (!product.images || !Array.isArray(product.images)) {
-            product.images = [];
-          }
-
-          // Handle both string (backward compat) and array of images
-          const imagesToAdd = Array.isArray(item.productImage)
-            ? item.productImage
-            : [item.productImage];
-
-          // Add images to beginning of array (most recent first)
-          // Check if image already exists to avoid duplicates
-          let addedCount = 0;
-          for (const imageUrl of imagesToAdd) {
-            if (imageUrl && !product.images.includes(imageUrl)) {
-              product.images.unshift(imageUrl);
-              addedCount++;
-            }
-          }
-
-          if (addedCount > 0) {
-            try {
-              await product.save();
-              console.log(`[Confirm Order] Added ${addedCount} image(s) to product ${product.name}`);
-            } catch (productImageError) {
-              console.error(`[Confirm Order] Failed to save image to product ${product.name}:`, productImageError.message);
-              // Don't fail the entire confirmation if product image save fails
-            }
-          }
-        }
-
-        // Validate product exists before creating inventory
-        if (!product || !product._id) {
-          const error = 'Invalid product reference after save';
-          console.error(`[Confirm Order] Item ${index} ${error}`);
-          inventoryResults.push({
-            index,
-            success: false,
-            error,
-            productCode: item.productCode,
-            productName: item.productName
-          });
-          continue;
-        }
-
-        // CRITICAL: Update item.product so barcode generation can use the correct product ID
-        // This ensures barcodes match what's stored in PacketStock
         item.product = product._id;
 
-
-        // Find or create Inventory
-        let inventory = await Inventory.findOne({ product: product._id });
-
+        // 2. Inventory Updates
+        let inventory = inventoryMap.get(product._id.toString());
         if (!inventory) {
-          inventory = new Inventory({
-            product: product._id,
-            currentStock: 0,
-            averageCostPrice: landedPrice,
+          inventory = new Inventory({ 
+            product: product._id, 
+            currentStock: 0, 
+            averageCostPrice: landedPrice, 
+            purchaseBatches: [],
             minStockLevel: 0,
             maxStockLevel: 1000,
-            reorderLevel: 10,
-            isActive: true, // Ensure inventory is active
-            purchaseBatches: [] // Initialize empty batches array
+            reorderLevel: 10
           });
           await inventory.save();
-          console.log(`[Confirm Order] Created new inventory for product ${product.name} (${product.sku})`);
-        } else {
-          // Ensure inventory is active (reactivate if it was deactivated)
-          if (!inventory.isActive) {
-            inventory.isActive = true;
-            await inventory.save();
-            console.log(`[Confirm Order] Reactivated inventory for product ${product.name} (${product.sku})`);
-          }
         }
 
-        // Double-check: Ensure both product and inventory are active before adding stock
-        if (!product.isActive) {
-          product.isActive = true;
-          await product.save();
-          console.log(`[Confirm Order] Force-activated product: ${product.name} (${product.sku})`);
-        }
-        if (!inventory.isActive) {
-          inventory.isActive = true;
-          await inventory.save();
-          console.log(`[Confirm Order] Force-activated inventory for product: ${product.name} (${product.sku})`);
-        }
+        const batchInfo = { dispatchOrderId: dispatchOrder._id, supplierId, purchaseDate: transactionDate, costPrice: item.costPrice, landedPrice, exchangeRate: finalExchangeRate };
 
-        // Prepare batch info for FIFO cost tracking
-        const batchInfo = {
-          dispatchOrderId: dispatchOrder._id,
-          supplierId: dispatchOrder.supplier._id || dispatchOrder.supplier,
-          purchaseDate: transactionDate,
-          costPrice: item.costPrice || 0, // Actual cost price paid to supplier
-          landedPrice: landedPrice, // Landed price for inventory valuation
-          exchangeRate: finalExchangeRate
-        };
-
-        // Add stock to inventory with batch tracking
-        if (item.useVariantTracking && item.packets && item.packets.length > 0) {
-          // Build variant composition from packets
-          const variantComposition = [];
-          item.packets.forEach(packet => {
-            packet.composition.forEach(comp => {
-              const existing = variantComposition.find(v => v.size === comp.size && v.color === comp.color);
-              if (existing) {
-                existing.quantity += comp.quantity;
-              } else {
-                variantComposition.push({
-                  size: comp.size,
-                  color: comp.color,
-                  quantity: comp.quantity
-                });
+        if (item.useVariantTracking && item.packets?.length > 0) {
+          const variantComp = [];
+          item.packets.forEach(p => {
+            if (!p.composition || !Array.isArray(p.composition)) return;
+            p.composition.forEach(c => {
+              const qty = Number(c.quantity);
+              if (c.size && c.color && !isNaN(qty) && qty > 0) {
+                const e = variantComp.find(v => v.size === c.size && v.color === c.color);
+                if (e) e.quantity += qty;
+                else variantComp.push({ size: c.size, color: c.color, quantity: qty });
               }
             });
           });
-
-          // Add stock with variant composition and batch tracking
-          await inventory.addStockWithVariants(
-            confirmedQuantity,
-            variantComposition,
-            'DispatchOrder',
-            dispatchOrder._id,
-            req.user._id,
-            `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed quantity with variants`,
-            transactionDate
-          );
-
-          // Also add purchase batch for FIFO tracking
-          inventory.purchaseBatches.push({
-            dispatchOrderId: batchInfo.dispatchOrderId,
-            supplierId: batchInfo.supplierId,
-            purchaseDate: batchInfo.purchaseDate,
-            quantity: confirmedQuantity,
-            remainingQuantity: confirmedQuantity,
-            costPrice: batchInfo.costPrice,
-            landedPrice: batchInfo.landedPrice,
-            exchangeRate: batchInfo.exchangeRate,
-            notes: `Dispatch Order ${dispatchOrder.orderNumber} - With variants`
-          });
-
-          // Recalculate weighted average cost from all batches
-          inventory.recalculateAverageCost();
-          await inventory.save();
-
-
-
-          // ==========================================
-          // CREATE PACKET STOCK ENTRIES FOR BARCODE-BASED SELLING
-          // ==========================================
-          const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
-          const productId = product._id;
-
-          // Helper function to generate barcode image
-          const bwipjs = require('bwip-js');
-          const generateBarcodeImage = async (barcodeText) => {
-            try {
-              const barcodeBuffer = await bwipjs.toBuffer({
-                bcid: 'code128',
-                text: barcodeText,
-                scale: 3,
-                height: 10,
-                includetext: true,
-                textxalign: 'center',
-                textsize: 8
-              });
-              return `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-            } catch (err) {
-              console.error(`[Confirm Order] Failed to generate barcode image for ${barcodeText}:`, err.message);
-              return null;
-            }
-          };
-
-          // Check if this is a loose item configuration (packets with isLoose: true)
-          const hasLooseItems = item.packets.some(p => p.isLoose === true);
-
-          if (hasLooseItems) {
-            // ==========================================
-            // LOOSE ITEMS: Create separate barcode for each color/size combination
-            // ==========================================
-
-
-            // Merge all compositions from loose packets and group by color/size
-            const looseItemGroups = new Map();
-
-            for (const packet of item.packets) {
-              if (!packet.isLoose) continue;
-
-              for (const comp of packet.composition) {
-                const key = `${comp.color}|${comp.size}`;
-                if (looseItemGroups.has(key)) {
-                  looseItemGroups.get(key).quantity += comp.quantity;
-                } else {
-                  looseItemGroups.set(key, {
-                    color: comp.color,
-                    size: comp.size,
-                    quantity: comp.quantity
-                  });
-                }
-              }
-            }
-
-            // Create PacketStock for each color/size combination
-            for (const [key, looseItem] of looseItemGroups) {
-              try {
-                // Single-item composition for this color/size
-                const singleComposition = [{
-                  size: looseItem.size,
-                  color: looseItem.color,
-                  quantity: 1
-                }];
-
-                // Generate unique barcode for this color/size combination
-                const looseBarcode = generatePacketBarcode(
-                  supplierId.toString(),
-                  productId.toString(),
-                  singleComposition,
-                  true // isLoose = true
-                );
-
-                // Find existing packet stock or create new
-                let packetStock = await PacketStock.findOne({ barcode: looseBarcode });
-
-                if (packetStock) {
-                  // Add to existing stock
-                  await packetStock.addStock(
-                    looseItem.quantity,
-                    dispatchOrder._id,
-                    batchInfo.costPrice,
-                    batchInfo.landedPrice,
-                    transactionDate
-                  );
-                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
-                  packetStock.suggestedSellingPrice = itemMinSell;
-                  await packetStock.save();
-                  console.log(`[Confirm Order] Added ${looseItem.quantity} loose items (${looseItem.color}/${looseItem.size}) to existing PacketStock ${looseBarcode}`);
-                } else {
-                  // Create new packet stock for this loose item variant
-                  // Generate barcode image
-                  const looseBarcodeImage = await generateBarcodeImage(looseBarcode);
-
-                  packetStock = new PacketStock({
-                    barcode: looseBarcode,
-                    product: productId,
-                    supplier: supplierId,
-                    composition: singleComposition,
-                    totalItemsPerPacket: 1,
-                    availablePackets: looseItem.quantity,
-                    costPricePerPacket: batchInfo.costPrice,
-                    landedPricePerPacket: batchInfo.landedPrice,
-                    suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20),
-                    isLoose: true,
-                    barcodeImage: looseBarcodeImage ? {
-                      dataUrl: looseBarcodeImage,
-                      format: 'code128',
-                      generatedAt: transactionDate
-                    } : undefined,
-                    dispatchOrderHistory: [{
-                      dispatchOrderId: dispatchOrder._id,
-                      quantity: looseItem.quantity,
-                      costPricePerPacket: batchInfo.costPrice,
-                      landedPricePerPacket: batchInfo.landedPrice,
-                      addedAt: transactionDate
-                    }]
-                  });
-                  await packetStock.save();
-                  console.log(`[Confirm Order] Created new loose item PacketStock ${looseBarcode} (${looseItem.color}/${looseItem.size}) with ${looseItem.quantity} items`);
-                }
-              } catch (looseStockError) {
-                console.error(`[Confirm Order] Failed to create/update loose PacketStock for ${looseItem.color}/${looseItem.size}:`, looseStockError.message);
-                // Don't fail the entire confirmation if packet stock creation fails
-              }
-            }
-          } else {
-            // ==========================================
-            // REGULAR PACKETS: One barcode per packet composition
-            // ==========================================
-            // Group packets by their composition to count duplicates
-            const packetGroups = new Map();
-
-            for (const packet of item.packets) {
-              // Generate deterministic barcode for this packet composition
-              const barcode = generatePacketBarcode(
-                supplierId.toString(),
-                productId.toString(),
-                packet.composition,
-                false // isLoose = false for packets
-              );
-
-              if (packetGroups.has(barcode)) {
-                packetGroups.get(barcode).count += 1;
-              } else {
-                packetGroups.set(barcode, {
-                  barcode,
-                  composition: packet.composition,
-                  totalItemsPerPacket: packet.totalItems || packet.composition.reduce((sum, c) => sum + c.quantity, 0),
-                  count: 1
-                });
-              }
-            }
-
-            // Create or update PacketStock for each unique packet configuration
-            for (const [barcode, packetGroup] of packetGroups) {
-              try {
-                // Calculate cost per packet (landed price × items per packet)
-                const costPerPacket = batchInfo.costPrice * packetGroup.totalItemsPerPacket;
-                const landedPerPacket = batchInfo.landedPrice * packetGroup.totalItemsPerPacket;
-
-                // Find existing packet stock or create new
-                let packetStock = await PacketStock.findOne({ barcode });
-
-                if (packetStock) {
-                  // Add to existing stock
-                  await packetStock.addStock(
-                    packetGroup.count,
-                    dispatchOrder._id,
-                    costPerPacket,
-                    landedPerPacket,
-                    transactionDate
-                  );
-                  const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, landedPerPacket * 1.20);
-                  packetStock.suggestedSellingPrice = truncateToTwoDecimals(itemMinSell * (packetGroup.totalItemsPerPacket || 1));
-                  await packetStock.save();
-
-                } else {
-                  // Create new packet stock
-                  // Generate barcode image
-                  const packetBarcodeImage = await generateBarcodeImage(barcode);
-
-                  packetStock = new PacketStock({
-                    barcode,
-                    product: productId,
-                    supplier: supplierId,
-                    composition: packetGroup.composition,
-                    totalItemsPerPacket: packetGroup.totalItemsPerPacket,
-                    availablePackets: packetGroup.count,
-                    costPricePerPacket: costPerPacket,
-                    landedPricePerPacket: landedPerPacket,
-                    suggestedSellingPrice: truncateToTwoDecimals(resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.20) * (packetGroup.totalItemsPerPacket || 1)),
-                    isLoose: false,
-                    barcodeImage: packetBarcodeImage ? {
-                      dataUrl: packetBarcodeImage,
-                      format: 'code128',
-                      generatedAt: transactionDate
-                    } : undefined,
-                    dispatchOrderHistory: [{
-                      dispatchOrderId: dispatchOrder._id,
-                      quantity: packetGroup.count,
-                      costPricePerPacket: costPerPacket,
-                      landedPricePerPacket: landedPerPacket,
-                      addedAt: transactionDate
-                    }]
-                  });
-                  await packetStock.save();
-
-                }
-              } catch (packetStockError) {
-                console.error(`[Confirm Order] Failed to create/update PacketStock for barcode ${barcode}:`, packetStockError.message);
-                // Don't fail the entire confirmation if packet stock creation fails
-              }
-            }
-          }
+          await inventory.addStockWithVariants(confirmedQty, variantComp, 'DispatchOrder', dispatchOrder._id, req.user._id, `Confirm Order ${dispatchOrder.orderNumber}`, transactionDate);
+          inventory.purchaseBatches.push({ ...batchInfo, quantity: confirmedQty, remainingQuantity: confirmedQty });
         } else {
-          // Add stock with batch tracking (for FIFO cost calculation)
-          await inventory.addStockWithBatch(
-            confirmedQuantity,
-            batchInfo,
-            'DispatchOrder',
-            dispatchOrder._id,
-            req.user._id,
-            `Dispatch Order ${dispatchOrder.orderNumber} - Confirmed quantity`
-          );
+          await inventory.addStockWithBatch(confirmedQty, batchInfo, 'DispatchOrder', dispatchOrder._id, req.user._id, `Confirm Order ${dispatchOrder.orderNumber}`);
+        }
+        inventory.recalculateAverageCost();
+        await inventory.save();
 
-
-          // ==========================================
-          // CREATE LOOSE ITEM PACKET STOCK ENTRIES
-          // Each loose item gets its own barcode for tracking
-          // ==========================================
-          const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
-          const productId = product._id;
-
-          // For loose items, create a single-item composition
-          // Use item's color/size if available, otherwise use defaults
-          const itemColor = item.color || product.specifications?.color || 'Default';
-          const itemSize = item.size || product.size || 'Default';
-
-          const looseComposition = [{
-            size: itemSize,
-            color: itemColor,
-            quantity: 1
-          }];
-
-          // Generate barcode for loose item
-          const looseBarcode = generatePacketBarcode(
-            supplierId.toString(),
-            productId.toString(),
-            looseComposition,
-            true // isLoose = true
-          );
-
-          try {
-            // Find existing packet stock or create new
-            let packetStock = await PacketStock.findOne({ barcode: looseBarcode });
-
-            if (packetStock) {
-              // Add to existing stock
-              await packetStock.addStock(
-                confirmedQuantity,
-                dispatchOrder._id,
-                batchInfo.costPrice,
-                batchInfo.landedPrice,
-                transactionDate
-              );
-              const itemMinSell = resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20);
-              packetStock.suggestedSellingPrice = itemMinSell;
-              await packetStock.save();
-
-            } else {
-              // Create new packet stock for loose items
-              // Generate barcode image (need bwipjs for this block too)
-              const bwipjsLoose = require('bwip-js');
-              let looseBarcodeImageDataUrl = null;
-              try {
-                const barcodeBuffer = await bwipjsLoose.toBuffer({
-                  bcid: 'code128',
-                  text: looseBarcode,
-                  scale: 3,
-                  height: 10,
-                  includetext: true,
-                  textxalign: 'center',
-                  textsize: 8
-                });
-                looseBarcodeImageDataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-              } catch (imgErr) {
-                console.error(`[Confirm Order] Failed to generate barcode image for ${looseBarcode}:`, imgErr.message);
+        // 3. PacketStock Updates
+        const packetGroups = new Map();
+        const isLoose = item.packets.some(p => p.isLoose);
+        
+        if (isLoose) {
+          item.packets.filter(p => p.isLoose).forEach(p => {
+            if (!p.composition || !Array.isArray(p.composition)) return;
+            p.composition.forEach(c => {
+              const qty = Number(c.quantity);
+              if (c.size && c.color && !isNaN(qty) && qty > 0) {
+                const k = `${c.color}|${c.size}`;
+                if (packetGroups.has(k)) packetGroups.get(k).quantity += qty;
+                else packetGroups.set(k, { color: c.color, size: c.size, quantity: qty, isLoose: true });
               }
+            });
+          });
+        } else {
+          item.packets.forEach(p => {
+            const b = generatePacketBarcode(supplierId.toString(), product._id.toString(), p.composition, false);
+            if (packetGroups.has(b)) packetGroups.get(b).count++;
+            else packetGroups.set(b, { barcode: b, comp: p.composition, items: p.totalItems || p.composition.reduce((s, c) => s + c.quantity, 0), count: 1, isLoose: false });
+          });
+        }
 
-              packetStock = new PacketStock({
-                barcode: looseBarcode,
-                product: productId,
-                supplier: supplierId,
-                composition: looseComposition,
-                totalItemsPerPacket: 1,
-                availablePackets: confirmedQuantity,
-                costPricePerPacket: batchInfo.costPrice,
-                landedPricePerPacket: batchInfo.landedPrice,
-                suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, batchInfo.landedPrice * 1.20),
-                isLoose: true,
-                barcodeImage: looseBarcodeImageDataUrl ? {
-                  dataUrl: looseBarcodeImageDataUrl,
-                  format: 'code128',
-                  generatedAt: transactionDate
-                } : undefined,
-                dispatchOrderHistory: [{
-                  dispatchOrderId: dispatchOrder._id,
-                  quantity: confirmedQuantity,
-                  costPricePerPacket: batchInfo.costPrice,
-                  landedPricePerPacket: batchInfo.landedPrice,
-                  addedAt: transactionDate
-                }]
-              });
-              await packetStock.save();
+        const psTasks = Array.from(packetGroups.values()).map(async (group) => {
+          let barcode = group.barcode;
+          let comp = group.comp;
+          let itemsPerPkt = group.items;
+          let qty = group.count;
 
-            }
-          } catch (looseStockError) {
-            console.error(`[Confirm Order] Failed to create/update loose PacketStock ${looseBarcode}:`, looseStockError.message);
-            // Don't fail the entire confirmation if packet stock creation fails
+          if (group.isLoose) {
+            comp = [{ size: group.size, color: group.color, quantity: 1 }];
+            barcode = generatePacketBarcode(supplierId.toString(), product._id.toString(), comp, true);
+            qty = group.quantity;
+            itemsPerPkt = 1;
           }
-        }
 
-        // Verify inventory was saved correctly and ensure both product and inventory are active
-        const savedInventory = await Inventory.findById(inventory._id).populate('product');
-        const savedProduct = await Product.findById(product._id);
-
-        // Final verification: ensure both are active
-        if (savedProduct && !savedProduct.isActive) {
-          savedProduct.isActive = true;
-          await savedProduct.save();
-          console.log(`[Confirm Order] Final fix: Activated product ${savedProduct.name} (${savedProduct.sku})`);
-        }
-        if (savedInventory && !savedInventory.isActive) {
-          savedInventory.isActive = true;
-          await savedInventory.save();
-
-        }
-
-        console.log(`[Confirm Order] Inventory verification for ${product.name}:`, {
-          productId: savedProduct?._id?.toString(),
-          productSku: savedProduct?.sku,
-          productIsActive: savedProduct?.isActive,
-          productCode: savedProduct?.productCode,
-          inventoryId: savedInventory?._id?.toString(),
-          inventoryCurrentStock: savedInventory?.currentStock,
-          inventoryIsActive: savedInventory?.isActive,
-          hasPurchaseBatches: savedInventory?.purchaseBatches?.length > 0,
-          inventoryProductId: savedInventory?.product?.toString()
-        });
-
-        // Track successful processing
-        inventoryResults.push({
-          index,
-          success: true,
-          productCode: item.productCode,
-          productName: item.productName,
-          quantity: confirmedQuantity
-        });
-
-      } catch (itemError) {
-        console.error(`[Confirm Order] Failed to process item ${index}:`, {
-          error: itemError.message,
-          stack: itemError.stack,
-          item: {
-            productCode: item.productCode,
-            productName: item.productName,
-            season: item.season,
-            quantity: item.quantity
+          let ps = await PacketStock.findOne({ barcode });
+          if (ps) {
+            await ps.addStock(qty, dispatchOrder._id, item.costPrice * itemsPerPkt, landedPrice * itemsPerPkt, transactionDate);
+            ps.suggestedSellingPrice = resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) * itemsPerPkt;
+          } else {
+            const buffer = await bwipjs.toBuffer({ bcid: 'code128', text: barcode, scale: 3, height: 10, includetext: true, textxalign: 'center', textsize: 8 }).catch(() => null);
+            ps = new PacketStock({
+              barcode, product: product._id, supplier: supplierId, composition: comp, totalItemsPerPacket: itemsPerPkt, availablePackets: qty,
+              costPricePerPacket: item.costPrice * itemsPerPkt, landedPricePerPacket: landedPrice * itemsPerPkt,
+              suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) * itemsPerPkt,
+              isLoose: !!group.isLoose, barcodeImage: buffer ? { dataUrl: `data:image/png;base64,${buffer.toString('base64')}`, format: 'code128', generatedAt: transactionDate } : undefined,
+              dispatchOrderHistory: [{ dispatchOrderId: dispatchOrder._id, quantity: qty, costPricePerPacket: item.costPrice * itemsPerPkt, landedPricePerPacket: landedPrice * itemsPerPkt, addedAt: transactionDate }]
+            });
           }
+          return ps.save();
         });
+        await Promise.all(psTasks);
 
-        inventoryResults.push({
-          index,
-          success: false,
-          error: itemError.message,
-          productCode: item.productCode,
-          productName: item.productName
-        });
+        return { index, success: true, productCode: item.productCode };
+      } catch (err) {
+        console.error(`Item ${index} error:`, err);
+        return { index, success: false, error: err.message };
       }
-    }
+    });
 
-    // Check results - enforce all-or-nothing approach
-    const successCount = inventoryResults.filter(r => r.success).length;
-    const failCount = inventoryResults.filter(r => !r.success && !r.skipped).length;
-    const skippedCount = inventoryResults.filter(r => r.skipped).length;
-
-
-
-    // If ANY items failed (excluding skipped), abort the entire confirmation
-    if (failCount > 0) {
-      const failedItems = inventoryResults.filter(r => !r.success && !r.skipped);
-      const errorDetails = failedItems.map(r =>
-        `Item ${r.index} (${r.productCode || r.productName || 'unknown'}): ${r.error}`
-      ).join('; ');
-
-      console.error(`[Confirm Order] ABORTING: ${failCount} item(s) failed processing. Details: ${errorDetails}`);
-
-      return sendResponse.error(res,
-        `Cannot confirm order - ${failCount} item(s) failed processing. Please fix the following issues and try again:\n${errorDetails}`,
-        400
-      );
+    const results = await Promise.all(itemTasks);
+    if (results.some(r => !r.success)) {
+      const failedItems = results.filter(r => !r.success);
+      const errorDetails = failedItems.map(r => `Item ${r.index} (${r.productCode || 'unknown'}): ${r.error}`).join('; ');
+      return sendResponse.error(res, `Confirmation failed. Errors: ${errorDetails}`, 400);
     }
 
     // ==========================================
-    // STEP 2: All products/inventory succeeded - now update order status
+    // STEP 2: FINALIZE ORDER & LEDGER
     // ==========================================
-
-
-
-    // Update dispatch order
     dispatchOrder.status = 'confirmed';
     dispatchOrder.confirmedAt = transactionDate;
     dispatchOrder.confirmedBy = req.user._id;
@@ -2941,329 +1675,56 @@ router.post('/:id/confirm', auth, dateControl({ entityType: 'dispatch-order', da
     dispatchOrder.percentage = finalPercentage;
     dispatchOrder.totalDiscount = totalDiscount;
     dispatchOrder.subtotal = subtotal;
-    dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal; // Use discounted amount
-    dispatchOrder.grandTotal = grandTotal; // Landed total after discount (for inventory valuation)
-    dispatchOrder.paymentDetails = {
-      cashPayment: (parseFloat(cashPayment) || 0),
-      bankPayment: (parseFloat(bankPayment) || 0),
-      remainingBalance: discountedSupplierPaymentTotal - (parseFloat(cashPayment) || 0) - (parseFloat(bankPayment) || 0),
-      paymentStatus: discountedSupplierPaymentTotal === (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0)
-        ? 'paid'
-        : (parseFloat(cashPayment) || 0) + (parseFloat(bankPayment) || 0) > 0
-          ? 'partial'
-          : 'pending'
+    dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
+    dispatchOrder.grandTotal = grandTotal;
+    dispatchOrder.paymentDetails = { 
+      cashPayment: Number(cashPayment || 0), 
+      bankPayment: Number(bankPayment || 0), 
+      remainingBalance: discountedSupplierPaymentTotal - Number(cashPayment || 0) - Number(bankPayment || 0),
+      paymentStatus: (discountedSupplierPaymentTotal <= Number(cashPayment || 0) + Number(bankPayment || 0)) ? 'paid' : (Number(cashPayment || 0) + Number(bankPayment || 0) > 0 ? 'partial' : 'pending')
     };
-    dispatchOrder.confirmedQuantities = confirmedQuantities;
-
-    // ==========================================
-    // CREDIT APPLICATION: DISABLED - Manual payment application only
-    // ==========================================
-
-    // Automatic credit application disabled - credits must be manually applied through payment modal
-    let creditApplied = 0;
-
-    // Update prices on items
-    dispatchOrder.items.forEach((item, index) => {
-      item.supplierPaymentAmount = itemsWithPrices[index].supplierPaymentAmount;
-      item.landedPrice = itemsWithPrices[index].landedPrice;
-      item.minSellingPrice = resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2);
-    });
 
     await dispatchOrder.save();
-    console.log(`[Confirm Order] Order saved with final remainingBalance: €${dispatchOrder.paymentDetails.remainingBalance.toFixed(2)}`);
 
+    const ledgerTasks = [];
+    ledgerTasks.push(Ledger.createEntry({
+      type: 'supplier', entityId: supplierId, entityModel: 'Supplier', transactionType: 'purchase',
+      referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: discountedSupplierPaymentTotal, credit: 0,
+      date: transactionDate, description: `Confirmed Order ${dispatchOrder.orderNumber}`, createdBy: req.user._id
+    }));
+    if (Number(cashPayment) > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplierId, entityModel: 'Supplier', transactionType: 'payment', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: Number(cashPayment), date: transactionDate, description: `Cash payment: ${dispatchOrder.orderNumber}`, createdBy: req.user._id }));
+    if (Number(bankPayment) > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplierId, entityModel: 'Supplier', transactionType: 'payment', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: Number(bankPayment), date: transactionDate, description: `Bank payment: ${dispatchOrder.orderNumber}`, createdBy: req.user._id }));
+    ledgerTasks.push(Supplier.findByIdAndUpdate(supplierId, { $inc: { currentBalance: discountedSupplierPaymentTotal - Number(cashPayment || 0) - Number(bankPayment || 0) } }));
 
-    // ==========================================
-    // STEP 3: Create ledger entries
-    // ==========================================
-
-
-
-    // Create ledger entry for purchase (debit) - use supplierPaymentTotal (what admin owes supplier)
-    await Ledger.createEntry({
-      type: 'supplier',
-      entityId: dispatchOrder.supplier._id,
-      entityModel: 'Supplier',
-      transactionType: 'purchase',
-      referenceId: dispatchOrder._id,
-      referenceModel: 'DispatchOrder',
-      debit: discountedSupplierPaymentTotal, // What admin owes supplier (cost / exchange rate, NO profit, after discount)
-      credit: 0,
-      date: transactionDate,
-      description: `Dispatch Order ${dispatchOrder.orderNumber} confirmed - Supplier Payment: €${supplierPaymentTotal.toFixed(2)} (Cost ÷ Exchange Rate × Qty), Discount: €${totalDiscount.toFixed(2)}, Final Amount: €${discountedSupplierPaymentTotal.toFixed(2)}, Ledger shows: €${landedPriceTotal.toFixed(2)} ((Cost ÷ Exchange Rate + ${finalPercentage}%) × Qty), Cash: €${parseFloat(cashPayment).toFixed(2)}, Bank: €${parseFloat(bankPayment).toFixed(2)}, Remaining: €${dispatchOrder.paymentDetails.remainingBalance.toFixed(2)}`,
-      paymentDetails: {
-        cashPayment: parseFloat(cashPayment) || 0,
-        bankPayment: parseFloat(bankPayment) || 0,
-        remainingBalance: dispatchOrder.paymentDetails.remainingBalance
-      },
-      createdBy: req.user._id
-    });
-
-    // Create separate ledger entries for payments (credit entries)
-    const cashPaymentAmount = parseFloat(cashPayment) || 0;
-    const bankPaymentAmount = parseFloat(bankPayment) || 0;
-
-    // Create payment entries
-    if (cashPaymentAmount > 0) {
-      await Ledger.createEntry({
-        type: 'supplier',
-        entityId: dispatchOrder.supplier._id,
-        entityModel: 'Supplier',
-        transactionType: 'payment',
-        referenceId: dispatchOrder._id,
-        referenceModel: 'DispatchOrder',
-        debit: 0,
-        credit: cashPaymentAmount,
-        date: transactionDate,
-        description: `Cash payment for Dispatch Order ${dispatchOrder.orderNumber}`,
-        paymentMethod: 'cash',
-        paymentDetails: {
-          cashPayment: cashPaymentAmount,
-          bankPayment: 0,
-          remainingBalance: 0
-        },
-        createdBy: req.user._id
-      });
-
-    }
-
-    if (bankPaymentAmount > 0) {
-      await Ledger.createEntry({
-        type: 'supplier',
-        entityId: dispatchOrder.supplier._id,
-        entityModel: 'Supplier',
-        transactionType: 'payment',
-        referenceId: dispatchOrder._id,
-        referenceModel: 'DispatchOrder',
-        debit: 0,
-        credit: bankPaymentAmount,
-        date: transactionDate,
-        description: `Bank payment for Dispatch Order ${dispatchOrder.orderNumber}`,
-        paymentMethod: 'bank',
-        paymentDetails: {
-          cashPayment: 0,
-          bankPayment: bankPaymentAmount,
-          remainingBalance: 0
-        },
-        createdBy: req.user._id
-      });
-
-    }
-
-    // Credit application entry - DISABLED (automatic credit application disabled)
-    // Credits must be manually applied through payment modal
-
-    try {
-      if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {
-        // logisticsCompany should be populated from the initial query
-        const logisticsCompany = dispatchOrder.logisticsCompany;
-        const boxRate = logisticsCompany?.rates?.boxRate || 0;
-        const totalBoxes = dispatchOrder.totalBoxes || 0;
-        const logisticsCharge = totalBoxes * boxRate;
-
-        if (logisticsCharge > 0 && logisticsCompany?._id) {
-          await Ledger.createEntry({
-            type: 'logistics',
-            entityId: logisticsCompany._id,
-            entityModel: 'LogisticsCompany',
-            transactionType: 'charge',
-            referenceId: dispatchOrder._id,
-            referenceModel: 'DispatchOrder',
-            debit: logisticsCharge,
-            credit: 0,
-            date: transactionDate,
-            description: `Logistics charge for Dispatch Order ${dispatchOrder.orderNumber} - ${totalBoxes} boxes × £${boxRate.toFixed(2)}/box = £${logisticsCharge.toFixed(2)}`,
-            createdBy: req.user._id
-          });
-          console.log(`[Confirm Order] Created logistics charge ledger entry: £${logisticsCharge} (${totalBoxes} boxes × £${boxRate}/box)`);
-        }
+    if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {
+      const lc = dispatchOrder.logisticsCompany;
+      if (lc.rates?.boxRate > 0) {
+        ledgerTasks.push(Ledger.createEntry({
+          type: 'logistics', entityId: lc._id, entityModel: 'LogisticsCompany', transactionType: 'charge',
+          referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: dispatchOrder.totalBoxes * lc.rates.boxRate, credit: 0,
+          date: transactionDate, description: `Logistics charge: ${dispatchOrder.orderNumber}`, createdBy: req.user._id
+        }));
       }
-    } catch (ledgerError) {
-      console.error(`[Confirm Order] Error creating logistics charge ledger entry:`, ledgerError);
-      // Don't fail the entire confirmation if logistics charge entry fails
     }
+    await Promise.all(ledgerTasks);
 
-    // ==========================================
-    // STEP 4: Update supplier balance
-    // ==========================================
+    await dispatchOrder.populate([{ path: 'supplier', select: 'name company' }, { path: 'createdBy', select: 'name' }]);
+    sendResponse.success(res, dispatchOrder, 'Dispatch order confirmed successfully');
 
-    await Supplier.findByIdAndUpdate(
-      dispatchOrder.supplier._id,
-      { $inc: { currentBalance: discountedSupplierPaymentTotal - cashPaymentAmount - bankPaymentAmount } }
-    );
-    console.log(`[Confirm Order] Updated supplier balance`)
-
-    // ==========================================
-    // STEP 5: Generate and save barcodes (AFTER inventory processing)
-    // ==========================================
-
-
-    try {
-      const bwipjs = require('bwip-js');
-
-      // Generate barcodes with dataURL format like QR codes
-      const barcodeResults = [];
-
-      for (const item of dispatchOrder.items) {
-        const supplierId = dispatchOrder.supplier._id.toString();
-        // Handle both populated product (object with _id) and direct ObjectId reference
-        const productId = item.product
-          ? (item.product._id ? item.product._id.toString() : item.product.toString())
-          : 'manual';
-
-        if (item.useVariantTracking && item.packets && item.packets.length > 0) {
-          // Generate barcodes for packets
-          for (const packet of item.packets) {
-
-            // If packet is marked as loose, generate SEPARATE barcode for EACH composition entry
-            if (packet.isLoose) {
-              for (const comp of packet.composition) {
-                // Generate unique barcode for each size/color combo
-                const looseBarcode = generateLooseItemBarcode(
-                  supplierId,
-                  productId,
-                  comp.size,
-                  comp.color
-                );
-
-                // Generate barcode image as dataURL (like QR codes)
-                const barcodeBuffer = await bwipjs.toBuffer({
-                  bcid: 'code128',
-                  text: looseBarcode,
-                  scale: 3,
-                  height: 10,
-                  includetext: true,
-                  textxalign: 'center',
-                  textsize: 8
-                });
-
-                const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-
-                barcodeResults.push({
-                  type: 'loose',
-                  productName: item.productName,
-                  productCode: item.productCode,
-                  packetNumber: packet.packetNumber,
-                  size: comp.size,
-                  color: comp.color,
-                  quantity: comp.quantity,
-                  data: looseBarcode,
-                  dataUrl: dataUrl,
-                  isLoose: true,
-                  generatedAt: transactionDate
-                });
-              }
-            } else {
-              // Regular packet - generate one barcode for entire packet
-              const packetBarcode = generatePacketBarcode(
-                supplierId,
-                productId,
-                packet.composition,
-                false
-              );
-
-              // Generate barcode image as dataURL (like QR codes)
-              const barcodeBuffer = await bwipjs.toBuffer({
-                bcid: 'code128',
-                text: packetBarcode,
-                scale: 3,
-                height: 10,
-                includetext: true,
-                textxalign: 'center',
-                textsize: 8
-              });
-
-              const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-
-              barcodeResults.push({
-                type: 'packet',
-                productName: item.productName,
-                productCode: item.productCode,
-                packetNumber: packet.packetNumber,
-                composition: packet.composition,
-                data: packetBarcode,
-                dataUrl: dataUrl,
-                isLoose: false,
-                generatedAt: transactionDate
-              });
-            }
-          }
-        } else {
-          // Generate barcode for loose item (no packet structure)
-          const firstColor = Array.isArray(item.primaryColor) && item.primaryColor.length > 0
-            ? item.primaryColor[0]
-            : (typeof item.primaryColor === 'string' ? item.primaryColor : 'default');
-          const firstSize = Array.isArray(item.size) && item.size.length > 0
-            ? item.size[0]
-            : (typeof item.size === 'string' ? item.size : 'default');
-
-          const looseBarcode = generateLooseItemBarcode(
-            supplierId,
-            productId,
-            firstSize,
-            firstColor
-          );
-
-          // Generate barcode image as dataURL (like QR codes)
-          const barcodeBuffer = await bwipjs.toBuffer({
-            bcid: 'code128',
-            text: looseBarcode,
-            scale: 3,
-            height: 10,
-            includetext: true,
-            textxalign: 'center',
-            textsize: 8
-          });
-
-          const dataUrl = `data:image/png;base64,${barcodeBuffer.toString('base64')}`;
-
-          barcodeResults.push({
-            type: 'loose',
-            productName: item.productName,
-            productCode: item.productCode,
-            size: firstSize,
-            color: firstColor,
-            quantity: item.quantity,
-            data: looseBarcode,
-            dataUrl: dataUrl,
-            isLoose: true,
-            generatedAt: transactionDate
-          });
-        }
-      }
-
-      // Save barcode data to dispatch order (with dataURL like QR codes)
-      dispatchOrder.barcodeData = barcodeResults;
-      dispatchOrder.barcodeGeneratedAt = transactionDate;
-
-
-
-    } catch (barcodeError) {
-      console.error('Barcode generation error:', barcodeError);
-      // Don't fail confirmation if barcode generation fails
-    }
-
-    // Populate for response
-    await dispatchOrder.populate([
-      { path: 'supplier', select: 'name company' },
-      { path: 'logisticsCompany', select: 'name code contactInfo rates' },
-      { path: 'createdBy', select: 'name' },
-      { path: 'confirmedBy', select: 'name' }
-    ]);
-
-    // Convert images to signed URLs
-    await convertDispatchOrderImages(dispatchOrder);
-
-    // Log the activity
-    await logActivity(req, {
-      action: 'STATUS_CHANGE',
-      resource: 'DispatchOrder',
-      resourceId: dispatchOrder._id,
-      description: `Confirmed dispatch order: ${dispatchOrder.orderNumber}`,
-      changes: { old: 'pending', new: 'confirmed' }
-    });
-
-    return sendResponse.success(res, dispatchOrder, 'Dispatch order confirmed successfully');
+    // Fire-and-forget
+    (async () => {
+      try {
+        const fullOrder = await DispatchOrder.findById(dispatchOrder._id).populate('items.product', 'name sku images color size');
+        await Promise.all([
+          convertDispatchOrderImages(fullOrder),
+          logActivity(req, {
+            action: 'STATUS_CHANGE', resource: 'DispatchOrder', resourceId: dispatchOrder._id,
+            description: `Confirmed dispatch order: ${dispatchOrder.orderNumber}`, changes: { old: 'pending', new: 'confirmed' }
+          })
+        ]);
+        await fullOrder.save();
+      } catch (err) { console.error("Post-confirmation background error:", err); }
+    })();
 
   } catch (error) {
     console.error('Confirm dispatch order error:', error);
@@ -3383,6 +1844,7 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
       exchangeRate,
       percentage,
       discount,
+      dispatchDate,
       items: updatedItems
     } = req.body;
 
@@ -3411,6 +1873,21 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
     }
     if (isNaN(newPercentage) || newPercentage < 0) {
       return sendResponse.error(res, 'Invalid percentage. Must be a non-negative number.', 400);
+    }
+
+    // Capture old values for sync
+    const oldSupplierPaymentTotal = dispatchOrder.supplierPaymentTotal || 0;
+    const oldDispatchDate = dispatchOrder.dispatchDate ? new Date(dispatchOrder.dispatchDate) : null;
+    let dateChanged = false;
+
+    if (dispatchDate !== undefined && dispatchDate !== null) {
+      const newD = new Date(dispatchDate);
+      if (!isNaN(newD.getTime())) {
+        if (!oldDispatchDate || oldDispatchDate.getTime() !== newD.getTime()) {
+          dispatchOrder.dispatchDate = newD;
+          dateChanged = true;
+        }
+      }
     }
 
     // Validate item updates — quantity floors and safe configuration edits
@@ -3481,9 +1958,6 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
       }
     }
 
-    // Store old total for ledger delta
-    const oldSupplierPaymentTotal = dispatchOrder.supplierPaymentTotal || 0;
-
     // Apply item-level cost/quantity updates
     if (Array.isArray(updatedItems)) {
       updatedItems.forEach((reqItem, index) => {
@@ -3548,25 +2022,48 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
 
     await dispatchOrder.save();
 
-    // Ledger adjustment entry if supplier payment total changed
+    // Update original Ledger purchase entry instead of creating an adjustment
     const ledgerDelta = parseFloat((discountedSupplierPaymentTotal - oldSupplierPaymentTotal).toFixed(4));
-    let adjustmentEntry = null;
 
     if (Math.abs(ledgerDelta) > 0.001) {
-      const isIncrease = ledgerDelta > 0;
-      adjustmentEntry = await Ledger.createEntry({
-        type: 'supplier',
-        entityId: dispatchOrder.supplier._id,
-        entityModel: 'Supplier',
-        transactionType: 'adjustment',
+      const originalPurchaseEntry = await Ledger.findOne({
         referenceId: dispatchOrder._id,
-        referenceModel: 'DispatchOrder',
-        debit: isIncrease ? truncateToTwoDecimals(Math.abs(ledgerDelta)) : 0,
-        credit: !isIncrease ? truncateToTwoDecimals(Math.abs(ledgerDelta)) : 0,
-        date: new Date(), // Current date — prevents cascade recalculation of past balances
-        description: `Order ${dispatchOrder.orderNumber} edited by super-admin — supplier payment adjusted from €${oldSupplierPaymentTotal.toFixed(2)} to €${discountedSupplierPaymentTotal.toFixed(2)} (delta: ${isIncrease ? '+' : ''}€${ledgerDelta.toFixed(2)})`,
-        createdBy: req.user._id
+        transactionType: 'purchase'
       });
+
+      if (originalPurchaseEntry) {
+        // Update the original entry directly
+        originalPurchaseEntry.debit = discountedSupplierPaymentTotal;
+        originalPurchaseEntry.date = dispatchOrder.dispatchDate; // Update date
+        originalPurchaseEntry.description = `Confirmed Order ${dispatchOrder.orderNumber} confirmed (Edited) - Supplier Payment: €${discountedSupplierPaymentTotal.toFixed(2)}, Discount: €${newDiscount.toFixed(2)}, Final Amount: €${discountedSupplierPaymentTotal.toFixed(2)}`;
+        
+        // Save the updated entry (this triggers internal balance calculation for THIS entry)
+        await originalPurchaseEntry.save();
+
+        // Recalculate all subsequent balances for this supplier to ensure the ledger remains consistent
+        // Use the earlier of the old and new date as the starting point for recalculation
+        const recalcStartDate = (oldDispatchDate && oldDispatchDate < dispatchOrder.dispatchDate) ? oldDispatchDate : dispatchOrder.dispatchDate;
+        await Ledger.recalculateBalances('supplier', dispatchOrder.supplier._id, recalcStartDate);
+        
+        console.log(`[Edit Order] Updated original ledger entry for order ${dispatchOrder.orderNumber} and recalculated balances from ${recalcStartDate.toISOString()}.`);
+      } else {
+        // Fallback: If for some reason the original purchase entry is missing, create an adjustment as before
+        const isIncrease = ledgerDelta > 0;
+        await Ledger.createEntry({
+          type: 'supplier',
+          entityId: dispatchOrder.supplier._id,
+          entityModel: 'Supplier',
+          transactionType: 'adjustment',
+          referenceId: dispatchOrder._id,
+          referenceModel: 'DispatchOrder',
+          debit: isIncrease ? truncateToTwoDecimals(Math.abs(ledgerDelta)) : 0,
+          credit: !isIncrease ? truncateToTwoDecimals(Math.abs(ledgerDelta)) : 0,
+          date: new Date(),
+          description: `Order ${dispatchOrder.orderNumber} edited by super-admin — original purchase entry not found, applied adjustment (delta: ${isIncrease ? '+' : ''}€${ledgerDelta.toFixed(2)})`,
+          createdBy: req.user._id
+        });
+        console.log(`[Edit Order] Original ledger entry not found for order ${dispatchOrder.orderNumber}, created adjustment fallback.`);
+      }
 
       // Keep Supplier.currentBalance in sync
       await Supplier.findByIdAndUpdate(
@@ -3575,18 +2072,25 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
       );
     }
 
-    // Update inventory batch prices (non-fatal per item)
+    // Update inventory batch prices & dates (non-fatal per item)
     for (const { item, landedPrice, minSellingPrice } of recalcedItems) {
       if (!item.product) continue;
       try {
         const inventory = await Inventory.findOne({ product: item.product });
         if (!inventory) continue;
+        
+        // Update price
         await inventory.updateBatchPrices(dispatchOrder._id, {
           costPrice: item.costPrice,
           landedPrice,
           exchangeRate: newExchangeRate,
           quantity: item.quantity
         });
+
+        // Update date if changed
+        if (dateChanged) {
+          await inventory.updateBatchDate(dispatchOrder._id, dispatchOrder.dispatchDate);
+        }
       } catch (invErr) {
         console.error(`[Edit Confirmed] Failed to update inventory batch for product ${item.product}:`, invErr.message);
       }
@@ -3650,19 +2154,10 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
 
     return sendResponse.success(res, {
       order: dispatchOrder,
-      adjustmentEntry: adjustmentEntry
-        ? {
-          _id: adjustmentEntry._id,
-          entryNumber: adjustmentEntry.entryNumber,
-          debit: adjustmentEntry.debit,
-          credit: adjustmentEntry.credit,
-          description: adjustmentEntry.description
-        }
-        : null,
       ledgerDelta,
-      message: adjustmentEntry
-        ? `Order updated. Ledger adjustment created (${ledgerDelta > 0 ? '+' : ''}€${ledgerDelta.toFixed(2)}).`
-        : 'Order updated. No ledger change needed (supplier payment total unchanged).'
+      message: Math.abs(ledgerDelta) > 0.001
+        ? `Order updated. Ledger entry updated (delta: ${ledgerDelta > 0 ? '+' : ''}€${ledgerDelta.toFixed(2)}).`
+        : 'Order updated. No ledger change needed.'
     }, 'Confirmed order updated successfully');
 
   } catch (error) {

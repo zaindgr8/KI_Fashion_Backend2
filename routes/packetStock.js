@@ -6,6 +6,7 @@ const auth = require('../middleware/auth');
 const QRCode = require('qrcode');
 const bwipjs = require('bwip-js');
 const { generatePacketBarcode, generateLooseItemBarcode, normalizeBarcode, parseBarcodeType } = require('../utils/barcodeGenerator');
+const { getProductMinSellingPrice, toMoney } = require('../utils/websitePricing');
 
 // Helper function to generate ITF barcode image from barcode string
 async function generateITFBarcodeImage(barcodeText) {
@@ -530,6 +531,12 @@ router.get('/barcode-label/:id', auth, async (req, res) => {
       }
     }
     
+    const totalItemsPerPacket = Number(packetStock.totalItemsPerPacket || 1);
+    const unitMinPrice = getProductMinSellingPrice(packetStock.product);
+    const minPacketPrice = unitMinPrice > 0
+      ? toMoney(unitMinPrice * Math.max(1, totalItemsPerPacket))
+      : 0;
+
     const responseData = {
       barcode: packetStock.barcode,
       barcodeImage: barcodeImageDataUrl,
@@ -538,11 +545,12 @@ router.get('/barcode-label/:id', auth, async (req, res) => {
       productCode: packetStock.product?.productCode || packetStock.product?.sku,
       supplierName: packetStock.supplier?.name || packetStock.supplier?.company,
       composition: packetStock.composition,
-      totalItemsPerPacket: packetStock.totalItemsPerPacket,
+      totalItemsPerPacket,
       isLoose: packetStock.isLoose,
       availablePackets: packetStock.availablePackets,
       suggestedSellingPrice: packetStock.suggestedSellingPrice,
-      minSellingPrice: packetStock.product?.pricing?.minSellingPrice || packetStock.suggestedSellingPrice
+      minSellingPrice: unitMinPrice,
+      minPacketPrice
     };
     
     console.log('[Barcode Label] Response data:', JSON.stringify(responseData, null, 2));
@@ -586,7 +594,12 @@ router.get('/print-label/:id', async (req, res) => {
     const productCode = packetStock.product?.productCode || 'N/A';
     const supplierName = packetStock.supplier?.name || packetStock.supplier?.company || 'N/A';
     const isLoose = packetStock.isLoose;
-    const price = packetStock.product?.pricing?.minSellingPrice || packetStock.suggestedSellingPrice || 0;
+    const totalItemsPerPacket = Number(packetStock.totalItemsPerPacket || 1);
+    const unitMinPrice = getProductMinSellingPrice(packetStock.product);
+    const minPacketPrice = unitMinPrice > 0
+      ? toMoney(unitMinPrice * Math.max(1, totalItemsPerPacket))
+      : 0;
+    const price = minPacketPrice;
     const html = `
 <!DOCTYPE html>
 <html lang="en">

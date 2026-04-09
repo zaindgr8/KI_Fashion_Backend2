@@ -643,6 +643,29 @@ inventorySchema.methods.updateBatchPrices = function (dispatchOrderId, { costPri
   return this.save();
 };
 
+// Update purchase date on an existing batch and its corresponding stock movement.
+inventorySchema.methods.updateBatchDate = function (dispatchOrderId, newDate) {
+  const batch = this.purchaseBatches.find(
+    b => b.dispatchOrderId && b.dispatchOrderId.toString() === dispatchOrderId.toString()
+  );
+  if (!batch) return Promise.resolve(this);
+
+  const oldDate = batch.purchaseDate;
+  batch.purchaseDate = newDate;
+
+  // Also update the associated "in" stock movement date for this order
+  const movement = this.stockMovements.find(
+    m => m.type === 'in' && m.referenceId && m.referenceId.toString() === dispatchOrderId.toString()
+  );
+  if (movement) {
+    movement.date = newDate;
+  }
+
+  this.markModified('purchaseBatches');
+  this.markModified('stockMovements');
+  return this.save();
+};
+
 // Performance indexes for frequently queried fields
 inventorySchema.index({ isActive: 1 });
 inventorySchema.index({ needsReorder: 1 });

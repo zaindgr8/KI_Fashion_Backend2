@@ -587,6 +587,17 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
     const inventoryMap = new Map(inventories.map(inv => [inv.product.toString(), inv]));
 
+    // Batch fetch PacketStock if needed
+    const packetStockIds = req.body.items
+      .filter(item => item.isPacketSale && item.packetStock)
+      .map(item => item.packetStock);
+    
+    let packetStockMap = new Map();
+    if (packetStockIds.length > 0) {
+      const packetStocks = await PacketStock.find({ _id: { $in: packetStockIds }, isActive: true });
+      packetStockMap = new Map(packetStocks.map(ps => [ps._id.toString(), ps]));
+    }
+
     // Verify all products exist and check stock
     for (const item of req.body.items) {
       const product = productMap.get(item.product.toString ? item.product.toString() : item.product);
@@ -596,18 +607,6 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
           message: `Product not found: ${item.product}`
         });
       }
-
-      // Validation check for variant selection removed as per user request
-      /* 
-      if (product.variantTracking && product.variantTracking.enabled) {
-        if (!item.variant || !item.variant.size || !item.variant.color) {
-          return res.status(400).json({
-            success: false,
-            message: `Product ${product.name} requires size and color selection`
-          });
-        }
-      }
-      */
 
       const inventory = inventoryMap.get(item.product.toString ? item.product.toString() : item.product);
       if (!inventory) {
@@ -738,14 +737,18 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
 
       await sale.save({ session: saleSession });
 
-      // Deduct stock for each item immediately (auto-delivered sales)
+      // Deduct stock for each item immediately in parallel
       if (!isManualSale) {
-        for (const item of req.body.items) {
-          const product = await Product.findById(item.product).session(saleSession);
-          const inventory = await Inventory.findOne({ product: item.product }).session(saleSession);
+        await Promise.all(req.body.items.map(async (item) => {
+          const product = productMap.get(item.product.toString());
+          const inventory = inventoryMap.get(item.product.toString());
+          
           if (!inventory) {
             throw new Error(`Inventory not found for product ${item.product} when creating sale ${saleNumber}`);
           }
+
+          // Attach session to the inventory fetched outside but ensure updates are transactional
+          inventory.$session(saleSession);
 
           // Deduct variant-specific stock if applicable
           if (product && product.variantTracking && product.variantTracking.enabled && item.variant) {
@@ -777,31 +780,25 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
           }
 
           if (item.isPacketSale) {
-            const packetQty = getPacketQuantity(item);
-            if (!packetQty) {
-              throw new Error(`Invalid packet quantity for product ${item.product} in sale ${saleNumber}`);
-            }
-
-            const packetStock = await PacketStock.findOne({
-              _id: item.packetStock,
-              isActive: true
-            }).session(saleSession);
+            const packetQty = item.packetQuantity; // Should be set by normalize/validate
+            const packetStock = packetStockMap.get(item.packetStock.toString());
 
             if (!packetStock) {
               throw new Error(`PacketStock ${item.packetStock} not found or inactive for sale ${saleNumber}`);
             }
 
-            const actualAvailable = packetStock.availablePackets - packetStock.reservedPackets;
-            if (actualAvailable < packetQty) {
-              throw new Error(`Insufficient packet stock for ${packetStock.barcode}. Available: ${actualAvailable}, required: ${packetQty}`);
+            // Attach session manually
+            const ps = await PacketStock.findOne({ _id: packetStock._id }).session(saleSession);
+            if (!ps) {
+              throw new Error(`PacketStock ${item.packetStock} disappeared!`);
             }
 
-            packetStock.availablePackets -= packetQty;
-            packetStock.reservedPackets = Math.max(0, packetStock.reservedPackets - packetQty);
-            packetStock.soldPackets += packetQty;
-            await packetStock.save({ session: saleSession });
+            ps.availablePackets -= packetQty;
+            ps.reservedPackets = Math.max(0, ps.reservedPackets - packetQty);
+            ps.soldPackets += packetQty;
+            await ps.save({ session: saleSession });
           }
-        }
+        }));
       }
 
       // Create ledger entries immediately
@@ -965,125 +962,97 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
       saleSession.endSession();
     }
 
-    // Log the activity after successful commit
-    await logActivity(req, {
-      action: 'CREATE',
-      resource: 'Sale',
-      resourceId: sale._id,
-      description: `Created new sale: ${sale.saleNumber} - Total: ${sale.grandTotal.toFixed(2)}`,
-      changes: { old: null, new: sale.toObject() }
-    });
-
-    // Recalculate and sync buyer balance from ledger (source of truth)
-    if (!isManualSale) {
-      try {
-        const ledgerBalance = await Ledger.getBalance('buyer', sale.buyer);
-        await Buyer.findByIdAndUpdate(
-          sale.buyer,
-          { currentBalance: ledgerBalance }
-        );
-      } catch (balanceError) {
-        console.error('Error syncing buyer balance from ledger after sale creation:', balanceError);
-      }
-    }
-
-    // Populate sale for QR code and invoice generation
-    let populatedSale = await Sale.findById(sale._id)
-      .populate('buyer', 'name company email phone address')
-      .populate('items.product', 'name sku unit pricing images')
-      .populate('logisticsCompany', 'name code rates.boxRate')
-      .populate('deliveryPersonnel', 'name phone')
-      .populate('createdBy', 'name email');
-
-    // For manual sales, add customer info to populated sale object for display
-    if (isManualSale && populatedSale.manualCustomer) {
-      // Create a virtual buyer object for manual sales
-      populatedSale.buyer = {
-        name: populatedSale.manualCustomer.name,
-        company: populatedSale.manualCustomer.name,
-        email: populatedSale.manualCustomer.email || null,
-        phone: populatedSale.manualCustomer.phone || null,
-        address: populatedSale.manualCustomer.address || {}
-      };
-    }
-
-    // Convert product images to signed URLs
-    await convertSaleProductImages(populatedSale);
-
-    // Generate QR code for the sale
-    try {
-      await generateSaleQR(populatedSale, req.user._id);
-      // Re-populate to get QR code
-      await populatedSale.populate('qrCode.generatedBy', 'name');
-    } catch (qrError) {
-      console.error('Error generating QR code for sale:', qrError);
-      // Don't fail the sale creation if QR generation fails
-    }
-
-    // Generate invoice PDF and send emails (async, don't block response)
-    (async () => {
-      try {
-        // Create invoices directory if it doesn't exist
-        const invoicesDir = path.join(__dirname, '../invoices');
-        if (!fs.existsSync(invoicesDir)) {
-          fs.mkdirSync(invoicesDir, { recursive: true });
-        }
-
-        const invoiceFileName = `Invoice-${populatedSale.invoiceNumber || populatedSale.saleNumber}-${Date.now()}.pdf`;
-        const invoicePath = path.join(invoicesDir, invoiceFileName);
-
-        // Generate invoice PDF
-        await generateInvoicePDF(populatedSale, invoicePath);
-
-        // Update sale with invoice PDF info
-        populatedSale.invoicePdf = {
-          url: `/invoices/${invoiceFileName}`,
-          generatedAt: new Date(),
-          generatedBy: req.user._id
-        };
-        await populatedSale.save();
-
-        // Get distributor email (from buyer or user)
-        let distributorEmail = null;
-        if (populatedSale.buyer?.email) {
-          distributorEmail = populatedSale.buyer.email;
-        } else {
-          // Try to get email from buyer's associated user
-          const buyerUser = await User.findOne({ buyer: populatedSale.buyer._id });
-          if (buyerUser?.email) {
-            distributorEmail = buyerUser.email;
-          }
-        }
-
-        // Get admin email (first admin user)
-        const adminUser = await User.findOne({ role: 'super-admin' });
-        const adminEmail = adminUser?.email || process.env.ADMIN_EMAIL;
-
-        // Send emails if we have at least one recipient
-        if (distributorEmail || adminEmail) {
-          // Email functionality removed
-        } else {
-          console.warn('No email addresses found for invoice delivery');
-        }
-
-      } catch (invoiceError) {
-        console.error('Error generating invoice or sending emails:', invoiceError);
-        // Don't fail the sale creation if invoice/email fails
-      }
-    })();
-
+    // Send early response
     res.status(201).json({
       success: true,
       message: 'Sale created successfully. Invoice will be generated and emailed shortly.',
-      data: populatedSale
+      data: sale // Return basics immediately
+    });
+
+    // Fire-and-forget non-critical processes
+    setImmediate(async () => {
+      try {
+        // 1. Log Activity
+        await logActivity(req, {
+          action: 'CREATE',
+          resource: 'Sale',
+          resourceId: sale._id,
+          description: `Created new sale: ${sale.saleNumber} - Total: ${sale.grandTotal.toFixed(2)}`,
+          changes: { old: null, new: sale.toObject() }
+        });
+
+        // 2. Sync balance from ledger (extra safety)
+        if (!isManualSale) {
+          try {
+            const ledgerBalance = await Ledger.getBalance('buyer', sale.buyer);
+            await Buyer.findByIdAndUpdate(sale.buyer, { currentBalance: ledgerBalance });
+          } catch (err) {
+            console.error('[Sale Success] Sync balance failed:', err.message);
+          }
+        }
+
+        // 3. Complete Population for QR and PDF
+        let populatedSale = await Sale.findById(sale._id)
+          .populate('buyer', 'name company email phone address')
+          .populate('items.product', 'name sku unit pricing images')
+          .populate('logisticsCompany', 'name code rates.boxRate')
+          .populate('deliveryPersonnel', 'name phone')
+          .populate('createdBy', 'name email');
+
+        if (isManualSale && populatedSale.manualCustomer) {
+          populatedSale.buyer = {
+            name: populatedSale.manualCustomer.name,
+            company: populatedSale.manualCustomer.name,
+            email: populatedSale.manualCustomer.email || null,
+            phone: populatedSale.manualCustomer.phone || null,
+            address: populatedSale.manualCustomer.address || {}
+          };
+        }
+
+        // 4. Image Conversion
+        await convertSaleProductImages(populatedSale);
+
+        // 5. Generate QR code
+        try {
+          await generateSaleQR(populatedSale, req.user._id);
+        } catch (qrErr) {
+          console.error('[Sale Success] QR generation failed:', qrErr.message);
+        }
+
+        // 6. Generate Invoice PDF
+        try {
+          const invoicesDir = path.join(__dirname, '../invoices');
+          if (!fs.existsSync(invoicesDir)) {
+            fs.mkdirSync(invoicesDir, { recursive: true });
+          }
+
+          const invoiceFileName = `Invoice-${populatedSale.invoiceNumber || populatedSale.saleNumber}-${Date.now()}.pdf`;
+          const invoicePath = path.join(invoicesDir, invoiceFileName);
+          await generateInvoicePDF(populatedSale, invoicePath);
+
+          populatedSale.invoicePdf = {
+            url: `/invoices/${invoiceFileName}`,
+            generatedAt: new Date(),
+            generatedBy: req.user._id
+          };
+          await populatedSale.save();
+        } catch (pdfErr) {
+          console.error('[Sale Success] PDF generation failed:', pdfErr.message);
+        }
+
+      } catch (backgroundError) {
+        console.error('[Sale Success] Background process error:', backgroundError);
+      }
     });
 
   } catch (error) {
     console.error('Create sale error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error'
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: 'Server error: ' + error.message
+      });
+    }
   }
 });
 
@@ -1206,11 +1175,7 @@ router.get('/', auth, async (req, res) => {
     } = req.query;
 
     // Default to today if no date range is provided
-    if (!startDate && !endDate && !search && !buyer) {
-      const today = new Date().toISOString().split('T')[0];
-      startDate = today;
-      endDate = today;
-    }
+    // Removed to allow loading all data by default
 
     // Role-based restriction: Employee search results should only show current day
     if (req.user.role === 'employee' && search) {

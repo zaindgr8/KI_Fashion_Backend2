@@ -145,10 +145,33 @@ router.get('/', auth, checkPermission('expenses'), async (req, res) => {
       endDate
     } = req.query;
 
+    const isValidDate = (value) => {
+      if (!value) return false;
+      const parsed = new Date(value);
+      return !Number.isNaN(parsed.getTime());
+    };
+
     const today = new Date().toISOString().split('T')[0];
-    if (!startDate && !endDate) {
-      startDate = today;
-      endDate = today;
+    let effectiveStartDate = startDate;
+    let effectiveEndDate = endDate;
+
+    if (!effectiveStartDate && !effectiveEndDate) {
+      effectiveStartDate = today;
+      effectiveEndDate = today;
+    }
+
+    if (effectiveStartDate && !isValidDate(effectiveStartDate)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid startDate'
+      });
+    }
+
+    if (effectiveEndDate && !isValidDate(effectiveEndDate)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid endDate'
+      });
     }
 
     const query = {};
@@ -166,10 +189,10 @@ router.get('/', auth, checkPermission('expenses'), async (req, res) => {
     if (paymentMethod) query.paymentMethod = paymentMethod;
     if (status) query.status = status;
 
-    if (startDate || endDate) {
+    if (effectiveStartDate || effectiveEndDate) {
       query.expenseDate = {};
-      if (startDate) query.expenseDate.$gte = new Date(startDate);
-      if (endDate) query.expenseDate.$lte = new Date(endDate);
+      if (effectiveStartDate) query.expenseDate.$gte = new Date(effectiveStartDate);
+      if (effectiveEndDate) query.expenseDate.$lte = new Date(effectiveEndDate);
     }
 
     const expenses = await Expense.find(query)

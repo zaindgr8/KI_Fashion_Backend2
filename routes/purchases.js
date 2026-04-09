@@ -327,7 +327,7 @@ function transformDispatchOrderToPurchase(dispatchOrder) {
   // Calculate total from confirmed quantities and landed prices
   const items = dispatchOrder.items?.map((item, index) => {
     const confirmedQty = dispatchOrder.confirmedQuantities?.find(cq => cq.itemIndex === index)?.quantity || item.quantity;
-    const landedPrice = item.landedPrice || (item.costPrice * dispatchOrder.exchangeRate * (1 + (dispatchOrder.percentage / 100)));
+    const landedPrice = item.landedPrice || ((item.costPrice / (dispatchOrder.exchangeRate || 1)) * (1 + (dispatchOrder.percentage / 100)));
     const landedTotal = landedPrice * confirmedQty;
 
     // Extract product name from various sources
@@ -450,8 +450,8 @@ router.get('/', auth, checkPermission('purchases'), async (req, res) => {
     const todayStr = new Date().toISOString().split('T')[0];
     if (req.user.role === 'employee') {
       // 1. Employee cannot see any data of current day on buying page
-      andConditions.push({ 
-        dispatchDate: { $lt: new Date(`${todayStr}T00:00:00.000Z`) } 
+      andConditions.push({
+        dispatchDate: { $lt: new Date(`${todayStr}T00:00:00.000Z`) }
       });
 
       // 2. Search restricted to current day
@@ -461,11 +461,7 @@ router.get('/', auth, checkPermission('purchases'), async (req, res) => {
       }
     }
 
-    // Default to today if no date range is provided
-    if (!startDate && !endDate && !search && !supplier) {
-      startDate = todayStr;
-      endDate = todayStr;
-    }
+    // Removed to allow loading all data by default
 
 
     const limitNum = Math.min(parseInt(limit) || 20, 100); // Safety cap
@@ -566,10 +562,10 @@ router.get('/', auth, checkPermission('purchases'), async (req, res) => {
       // Map items and collect image keys
       const items = (purchase.items || []).map(item => {
         // Debug logs
-         
-         
-         
-        
+
+
+
+
         // Collect image keys for batch signing (only from productImage as requested)
         if (Array.isArray(item.productImage)) {
           item.productImage.forEach(key => key && imageKeys.add(key));
@@ -639,9 +635,9 @@ router.get('/', auth, checkPermission('purchases'), async (req, res) => {
       }
 
       // Debug logs for purchase
-       
-       
-       
+
+
+
 
       return {
         id: purchase._id.toString(),
