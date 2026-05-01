@@ -8,6 +8,7 @@ const auth = require('../middleware/auth');
 const BalanceService = require('../services/BalanceService');
 const { logActivity } = require('../utils/auditLogger');
 const dateControl = require('../middleware/dateControl');
+const { getTransactionDate } = require('../utils/helpers');
 
 const router = express.Router();
 
@@ -96,7 +97,7 @@ router.post('/customer', auth, dateControl({ entityType: 'payment', dateField: '
 
     // Generate payment number
     const paymentNumber = await Payment.getNextPaymentNumber(session);
-    const paymentDate = date ? new Date(date) : new Date();
+    const paymentDate = getTransactionDate(date);
 
     // Get pending sales for FIFO distribution
     const pendingSales = await BalanceService.getPendingSalesForBuyer(customerId, session);
@@ -797,7 +798,8 @@ router.get('/:paymentNumber/receipt', auth, async (req, res) => {
         company: payment.customerId?.company || '',
         email: payment.customerId?.email || '',
         phone: payment.customerId?.phone || '',
-        address: payment.customerId?.address || ''
+        address: payment.customerId?.address || '',
+        customerId: payment.customerId?.buyerId || '-'
       },
       payment: {
         totalAmount: payment.totalAmount,
@@ -809,8 +811,13 @@ router.get('/:paymentNumber/receipt', auth, async (req, res) => {
       },
       distributions: payment.distributions.map(d => ({
         reference: d.saleNumber,
+        saleNumber: d.saleNumber,
         amount: d.amountApplied,
-        isAdvance: d.isAdvance
+        amountApplied: d.amountApplied,
+        previousBalance: d.previousBalance || 0,
+        newBalance: d.newBalance || 0,
+        isAdvance: d.isAdvance,
+        saleId: d.saleId
       })),
       balances: {
         before: payment.balanceBefore,

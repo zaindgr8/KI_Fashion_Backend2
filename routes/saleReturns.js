@@ -9,7 +9,7 @@ const Product = require('../models/Product');
 const Ledger = require('../models/Ledger');
 const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
-const { sendResponse } = require('../utils/helpers');
+const { sendResponse, getTransactionDate } = require('../utils/helpers');
 const { generateSignedUrls } = require('../utils/imageUpload');
 const { generatePacketBarcode } = require('../utils/barcodeGenerator');
 const { logActivity } = require('../utils/auditLogger');
@@ -477,7 +477,7 @@ router.post('/', auth, dateControl('returnDate'), async (req, res) => {
       items: value.items,
       totalReturnValue,
       status,
-      returnedAt: value.returnDate || new Date(),
+      returnedAt: getTransactionDate(value.returnDate),
       returnedBy: req.user._id,
       processedBy: isAdmin ? req.user._id : undefined,
       processedAt: isAdmin ? new Date() : undefined,
@@ -763,19 +763,35 @@ async function processSaleReturn(returnId, userId) {
       referenceModel: 'SaleReturn',
       debit: 0,
       credit: saleReturn.totalReturnValue,
-      date: saleReturn.returnedAt || new Date(),
+      date: getTransactionDate(saleReturn.returnedAt),
       description: `Sale Return from Sale ${saleReturn.sale.saleNumber}`,
       createdBy: userId
     }, session);
 
-    // Debit inventory value (cost price * quantity for each item)
-    let totalCostValue = 0;
-    for (const item of saleReturn.items) {
-      const inventory = await Inventory.findOne({ product: item.product._id }).session(session);
-      if (inventory) {
-        const costPrice = inventory.averageCostPrice || 0;
-        totalCostValue += item.returnedQuantity * costPrice;
+    // [IMPROVED] Update the original Sale document with cumulative return totals and payment status
+    if (originalSale) {
+      // Recalculate total returns for this sale from all approved return records
+      const allApprovedReturns = await SaleReturn.find({
+        sale: originalSale._id,
+        status: 'approved'
+      }).session(session);
+
+      const totalReturnVal = allApprovedReturns.reduce((sum, r) => sum + (r.totalReturnValue || 0), 0);
+      originalSale.returnTotal = totalReturnVal;
+
+      // Recalculate payment status based on all sources of coverage (Cash + Bank + Returns)
+      const totalPaid = (originalSale.cashPayment || 0) + (originalSale.bankPayment || 0);
+      const totalCoverage = totalPaid + totalReturnVal;
+
+      if (totalCoverage >= originalSale.grandTotal - 0.01) {
+        originalSale.paymentStatus = 'paid';
+      } else if (totalCoverage > 0) {
+        originalSale.paymentStatus = 'partial';
+      } else {
+        originalSale.paymentStatus = 'pending';
       }
+
+      await originalSale.save({ session });
     }
 
     await session.commitTransaction();

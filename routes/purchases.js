@@ -8,6 +8,7 @@ const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { generateSignedUrl, generateSignedUrls, generateSignedUrlsBatch } = require('../utils/imageUpload');
+const { getTransactionDate } = require('../utils/helpers');
 
 
 const router = express.Router();
@@ -922,7 +923,7 @@ router.put('/:id', auth, async (req, res) => {
     );
 
     purchase.supplier = value.supplier;
-    purchase.purchaseDate = value.purchaseDate ? new Date(value.purchaseDate) : purchase.purchaseDate;
+    purchase.purchaseDate = value.purchaseDate ? getTransactionDate(value.purchaseDate) : purchase.purchaseDate;
     purchase.expectedDeliveryDate = value.expectedDeliveryDate;
     purchase.items = itemsWithDetails;
     purchase.subtotal = subtotal;
@@ -988,7 +989,7 @@ router.post('/:id/qa-checks', auth, async (req, res) => {
       qaStatus: value.qaStatus,
       notes: value.notes || undefined,
       checkedBy: req.user._id,
-      checkedAt: value.checkedAt ? new Date(value.checkedAt) : new Date()
+      checkedAt: value.checkedAt ? getTransactionDate(value.checkedAt) : new Date()
     };
 
     purchase.qualityChecks.push(qaEntry);

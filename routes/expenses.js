@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Joi = require('joi');
 const Expense = require('../models/Expense');
 const CostType = require('../models/CostType');
@@ -6,6 +7,7 @@ const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const { logActivity } = require('../utils/auditLogger');
 const dateControl = require('../middleware/dateControl');
+const { getTransactionDate } = require('../utils/helpers');
 
 
 const router = express.Router();
@@ -83,6 +85,7 @@ router.post('/', auth, checkPermission('expenses'), dateControl({ entityType: 'e
 
     const expense = new Expense({
       ...req.body,
+      expenseDate: getTransactionDate(req.body.expenseDate),
       amount,
       cashAmount,
       bankAmount,
@@ -151,14 +154,8 @@ router.get('/', auth, checkPermission('expenses'), async (req, res) => {
       return !Number.isNaN(parsed.getTime());
     };
 
-    const today = new Date().toISOString().split('T')[0];
     let effectiveStartDate = startDate;
     let effectiveEndDate = endDate;
-
-    if (!effectiveStartDate && !effectiveEndDate) {
-      effectiveStartDate = today;
-      effectiveEndDate = today;
-    }
 
     if (effectiveStartDate && !isValidDate(effectiveStartDate)) {
       return res.status(400).json({
@@ -185,14 +182,26 @@ router.get('/', auth, checkPermission('expenses'), async (req, res) => {
       ];
     }
 
-    if (costType) query.costType = costType;
+    if (costType) {
+      try {
+        query.costType = new mongoose.Types.ObjectId(costType);
+      } catch (e) {
+        query.costType = costType;
+      }
+    }
     if (paymentMethod) query.paymentMethod = paymentMethod;
     if (status) query.status = status;
 
     if (effectiveStartDate || effectiveEndDate) {
       query.expenseDate = {};
-      if (effectiveStartDate) query.expenseDate.$gte = new Date(effectiveStartDate);
-      if (effectiveEndDate) query.expenseDate.$lte = new Date(effectiveEndDate);
+      if (effectiveStartDate) {
+        query.expenseDate.$gte = new Date(effectiveStartDate);
+      }
+      if (effectiveEndDate) {
+        const end = new Date(effectiveEndDate);
+        end.setHours(23, 59, 59, 999);
+        query.expenseDate.$lte = end;
+      }
     }
 
     const expenses = await Expense.find(query)
@@ -388,7 +397,11 @@ router.get('/reports/summary', auth, async (req, res) => {
     if (startDate || endDate) {
       matchConditions.expenseDate = {};
       if (startDate) matchConditions.expenseDate.$gte = new Date(startDate);
-      if (endDate) matchConditions.expenseDate.$lte = new Date(endDate);
+      if (endDate) {
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        matchConditions.expenseDate.$lte = end;
+      }
     }
 
     const summary = await Expense.aggregate([

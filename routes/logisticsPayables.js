@@ -5,7 +5,7 @@ const LogisticsCompany = require('../models/LogisticsCompany');
 const DispatchOrder = require('../models/DispatchOrder');
 const Ledger = require('../models/Ledger');
 const auth = require('../middleware/auth');
-const { sendResponse } = require('../utils/helpers');
+const { sendResponse, getTransactionDate } = require('../utils/helpers');
 const BalanceService = require('../services/BalanceService');
 
 const router = express.Router();
@@ -499,7 +499,7 @@ router.post('/payment', auth, async (req, res) => {
       transactionType: 'payment',
       debit: 0,
       credit: amount,
-      date: new Date(date),
+      date: getTransactionDate(date),
       description: description || `Payment for logistics services - ${company.name}`,
       paymentMethod: method,
       paymentDetails: {

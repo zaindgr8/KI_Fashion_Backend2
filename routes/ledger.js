@@ -8,10 +8,12 @@ const Supplier = require("../models/Supplier");
 const SupplierPaymentReceipt = require("../models/SupplierPaymentReceipt");
 const Buyer = require("../models/Buyer");
 const LogisticsCompany = require("../models/LogisticsCompany");
+const Payment = require("../models/Payment");
 const auth = require("../middleware/auth");
 const BalanceService = require("../services/BalanceService");
 const { logActivity } = require("../utils/auditLogger");
 const dateControl = require("../middleware/dateControl");
+const { getTransactionDate } = require("../utils/helpers");
 
 const router = express.Router()
 
@@ -203,6 +205,187 @@ router.get("/supplier/:id", auth, async (req, res) => {
       success: false,
       message: "Server error",
     });
+  }
+});
+
+/**
+ * Ledger-scoped buyer payment receipts proxy endpoints
+ * These wrap existing Payment model methods so the frontend can call under /ledger namespace
+ */
+
+// GET /ledger/buyer/:id/payment-receipts
+router.get('/buyer/:id/payment-receipts', auth, async (req, res) => {
+  try {
+    const buyerId = req.params.id;
+    // Authorization: distributors/buyers may only view their own receipts
+    if (req.user.role === 'distributor' || req.user.role === 'buyer') {
+      const detected = await getBuyerIdForUser(req.user);
+      if (!detected || detected.toString() !== buyerId) {
+        return res.status(403).json({ success: false, message: 'Access denied. You can only view your own receipts.' });
+      }
+    }
+
+    const { limit = 50, offset = 0, status = 'all' } = req.query;
+    const payments = await Payment.getCustomerPayments(buyerId, { limit: parseInt(limit), offset: parseInt(offset), status });
+    const total = await Payment.countDocuments({ customerId: buyerId, ...(status !== 'all' && { status }) });
+
+    res.json({ success: true, data: { payments, pagination: { total, limit: parseInt(limit), offset: parseInt(offset) } } });
+  } catch (error) {
+    console.error('Get buyer payment receipts error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch buyer payment receipts' });
+  }
+});
+
+// GET /ledger/buyer/:id/payment-receipts/:paymentNumber
+router.get('/buyer/:id/payment-receipts/:paymentNumber', auth, async (req, res) => {
+  try {
+    const { paymentNumber, id: buyerId } = req.params;
+    // Authorization
+    if (req.user.role === 'distributor' || req.user.role === 'buyer') {
+      const detected = await getBuyerIdForUser(req.user);
+      if (!detected || detected.toString() !== buyerId) {
+        return res.status(403).json({ success: false, message: 'Access denied. You can only view your own receipt.' });
+      }
+    }
+
+    const payment = await Payment.getByPaymentNumber(paymentNumber);
+    if (!payment) return res.status(404).json({ success: false, message: 'Payment not found' });
+
+    // Ensure payment belongs to buyer
+    if (payment.customerId && payment.customerId._id && payment.customerId._id.toString() !== buyerId) {
+      return res.status(403).json({ success: false, message: 'Receipt does not belong to this buyer' });
+    }
+
+    // Format receipt data consistent with /payments/:paymentNumber/receipt
+    const receiptData = {
+      receiptNumber: payment.paymentNumber,
+      date: payment.createdAt || payment.paymentDate,
+      customer: {
+        name: payment.customerId?.name || 'Unknown',
+        company: payment.customerId?.company || '',
+        email: payment.customerId?.email || '',
+        phone: payment.customerId?.phone || '',
+        address: payment.customerId?.address || '',
+        customerId: payment.customerId?.buyerId || '-'
+      },
+      payment: {
+        totalAmount: payment.totalAmount,
+        paymentMethod: payment.paymentMethod,
+        cashAmount: payment.cashAmount,
+        bankAmount: payment.bankAmount,
+        paymentDirection: payment.paymentDirection || 'credit',
+        debitReason: payment.debitReason || null
+      },
+      distributions: payment.distributions.map(d => ({ 
+        reference: d.saleNumber, 
+        saleNumber: d.saleNumber,
+        amount: d.amountApplied, 
+        amountApplied: d.amountApplied,
+        isAdvance: d.isAdvance, 
+        saleId: d.saleId, 
+        previousBalance: d.previousBalance || 0, 
+        newBalance: d.newBalance || 0 
+      })),
+      balances: { before: payment.balanceBefore, after: payment.balanceAfter },
+      status: payment.status,
+      createdBy: payment.createdBy?.name || 'System',
+      notes: payment.description || ''
+    };
+
+    if (payment.status === 'reversed' && payment.reversalInfo) {
+      receiptData.reversal = { reversedAt: payment.reversalInfo.reversedAt, reason: payment.reversalInfo.reason };
+    }
+
+    res.json({ success: true, data: receiptData });
+  } catch (error) {
+    console.error('Get buyer payment receipt error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch receipt' });
+  }
+});
+
+// POST /ledger/buyer/:id/payment-receipts/:paymentNumber/reverse
+router.post('/buyer/:id/payment-receipts/:paymentNumber/reverse', auth, async (req, res) => {
+  if (req.user.role !== 'super-admin') {
+    return res.status(403).json({ success: false, message: 'Direct payment reversals are not permitted. Please submit a delete request for approval.', submitRequestAt: '/api/edit-requests' });
+  }
+
+  const session = await mongoose.startSession();
+  session.startTransaction({ readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
+  try {
+    const { id: buyerId, paymentNumber } = req.params;
+    const { reason } = req.body;
+    if (!reason || reason.trim() === '') {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: 'Reversal reason is required' });
+    }
+
+    const payment = await Payment.findOne({ paymentNumber }).session(session);
+    if (!payment) {
+      await session.abortTransaction();
+      return res.status(404).json({ success: false, message: 'Payment not found' });
+    }
+
+    if (payment.customerId.toString() !== buyerId) {
+      await session.abortTransaction();
+      return res.status(403).json({ success: false, message: 'Payment does not belong to this buyer' });
+    }
+
+    // Collect ledger entry IDs to delete
+    const ledgerEntryIdsToDelete = payment.distributions.map(d => d.ledgerEntryId).filter(Boolean);
+    if (ledgerEntryIdsToDelete.length > 0) {
+      await Ledger.deleteMany({ _id: { $in: ledgerEntryIdsToDelete } }).session(session);
+    }
+
+    // Clean up any old-style reversal adjustment entries
+    await Ledger.deleteMany({ type: 'buyer', entityId: payment.customerId, transactionType: 'adjustment', description: { $regex: `^REVERSAL: ${paymentNumber}` } }).session(session);
+
+    // Roll back sale payment tracking
+    const Sale = require('../models/Sale');
+    for (const dist of payment.distributions) {
+      if (dist.saleId) {
+        const sale = await Sale.findById(dist.saleId).session(session);
+        if (sale) {
+          if (payment.paymentMethod === 'cash') {
+            sale.cashPayment = Math.max(0, (sale.cashPayment || 0) - dist.amountApplied);
+          } else {
+            sale.bankPayment = Math.max(0, (sale.bankPayment || 0) - dist.amountApplied);
+          }
+
+          const newTotalPaid = (sale.cashPayment || 0) + (sale.bankPayment || 0);
+          if (newTotalPaid <= 0) sale.paymentStatus = 'pending';
+          else if (newTotalPaid >= sale.grandTotal) sale.paymentStatus = 'paid';
+          else sale.paymentStatus = 'partial';
+
+          if (sale.paymentReferences) {
+            sale.paymentReferences = sale.paymentReferences.filter(pr => pr.paymentNumber !== paymentNumber);
+          }
+
+          await sale.save({ session });
+        }
+      }
+    }
+
+    await Payment.findByIdAndDelete(payment._id).session(session);
+    await session.commitTransaction();
+
+    // Recalculate balances
+    try {
+      await Ledger.recalculateBalances('buyer', payment.customerId, payment.paymentDate || payment.createdAt);
+      const newBalance = await Ledger.getBalance('buyer', payment.customerId);
+      await Buyer.findByIdAndUpdate(payment.customerId, { currentBalance: newBalance });
+    } catch (balanceError) {
+      console.error('Balance sync error after payment deletion:', balanceError);
+    }
+
+    await logActivity(req, { action: 'DELETE', resource: 'CustomerPayment', resourceId: payment._id, description: `Reversed/Deleted customer payment: ${paymentNumber}. Reason: ${reason}` });
+
+    res.json({ success: true, message: `Payment ${paymentNumber} has been deleted`, data: { paymentNumber } });
+  } catch (error) {
+    await session.abortTransaction();
+    console.error('Reverse buyer payment error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to reverse payment' });
+  } finally {
+    session.endSession();
   }
 });
 
@@ -605,6 +788,7 @@ router.post("/entry", auth, dateControl({ entityType: 'ledger', dateField: 'date
     const entryData = {
       ...req.body,
       createdBy: req.user._id,
+      date: getTransactionDate(req.body.date)
     };
 
     console.log(`\n[LEDGER ENTRY] Creating entry:`, {
@@ -639,7 +823,7 @@ router.post("/entry", auth, dateControl({ entityType: 'ledger', dateField: 'date
           paymentMethod: paymentMethod || "cash",
           createdBy: req.user._id,
           description: entryData.description,
-          date: entryData.date || new Date(),
+          date: getTransactionDate(entryData.date),
         });
 
         // Log the activity
@@ -688,7 +872,7 @@ router.post("/entry", auth, dateControl({ entityType: 'ledger', dateField: 'date
           paymentMethod: paymentMethod || "cash",
           createdBy: req.user._id,
           description: entryData.description,
-          date: entryData.date || new Date(),
+          date: getTransactionDate(entryData.date),
         });
 
         // Log the activity

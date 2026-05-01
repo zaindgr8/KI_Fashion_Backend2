@@ -176,6 +176,10 @@ inventorySchema.pre('save', function (next) {
   next();
 });
 
+const isClientSession = (value) => {
+  return value && typeof value === 'object' && typeof value.inTransaction === 'function';
+};
+
 inventorySchema.methods.addStock = function (quantity, reference, referenceId, user, notes = '', movementDate = null) {
   const transactionDate = movementDate ? new Date(movementDate) : new Date();
   this.stockMovements.push({
@@ -239,8 +243,15 @@ inventorySchema.methods.adjustStock = function (newQuantity, reference, user, no
 };
 
 // Add stock with variant composition
-inventorySchema.methods.addStockWithVariants = function (quantity, variantComposition, reference, referenceId, user, notes = '', movementDate = null) {
-  const transactionDate = movementDate ? new Date(movementDate) : new Date();
+inventorySchema.methods.addStockWithVariants = function (quantity, variantComposition, reference, referenceId, user, notes = '', movementDate = null, session = null) {
+  let resolvedMovementDate = movementDate;
+  let resolvedSession = session;
+  if (isClientSession(movementDate)) {
+    resolvedSession = movementDate;
+    resolvedMovementDate = null;
+  }
+
+  const transactionDate = resolvedMovementDate ? new Date(resolvedMovementDate) : new Date();
   this.stockMovements.push({
     type: 'in',
     quantity: quantity,
@@ -277,7 +288,7 @@ inventorySchema.methods.addStockWithVariants = function (quantity, variantCompos
   if (!this.firstArrivalDate) {
     this.firstArrivalDate = this.lastStockUpdate;
   }
-  return this.save();
+  return resolvedSession ? this.save({ session: resolvedSession }) : this.save();
 };
 
 // Recalculate average cost price from purchase batches (weighted average)
@@ -370,9 +381,16 @@ inventorySchema.methods.getVariantAvailableStock = function (size, color) {
 };
 
 // Add stock with batch tracking (for FIFO cost calculation)
-inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, reference, referenceId, user, notes = '', movementDate = null) {
-  const transactionDate = movementDate
-    ? new Date(movementDate)
+inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, reference, referenceId, user, notes = '', movementDate = null, session = null) {
+  let resolvedMovementDate = movementDate;
+  let resolvedSession = session;
+  if (isClientSession(movementDate)) {
+    resolvedSession = movementDate;
+    resolvedMovementDate = null;
+  }
+
+  const transactionDate = resolvedMovementDate
+    ? new Date(resolvedMovementDate)
     : (batchInfo?.purchaseDate ? new Date(batchInfo.purchaseDate) : new Date());
 
   // Add to purchase batches for FIFO tracking
@@ -417,7 +435,7 @@ inventorySchema.methods.addStockWithBatch = function (quantity, batchInfo, refer
   }, 0);
   this.averageCostPrice = totalQuantity > 0 ? totalValue / totalQuantity : (batchInfo.landedPrice || batchInfo.costPrice);
 
-  return this.save();
+  return resolvedSession ? this.save({ session: resolvedSession }) : this.save();
 };
 
 // Helper to recalculate average cost from batches

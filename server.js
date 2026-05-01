@@ -145,11 +145,17 @@ const path = require("path");
 const invoicesDir = path.join(__dirname, "invoices");
 app.use("/invoices", express.static(invoicesDir));
 
+// Fail fast instead of buffering queries for 10 seconds
+mongoose.set('bufferCommands', false);
+
 // Database connection
 mongoose
   .connect(process.env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
+    // Remove useNewUrlParser & useUnifiedTopology — deprecated in Mongoose 6+
+    serverSelectionTimeoutMS: 5000,   // fail fast if Atlas unreachable
+    socketTimeoutMS: 45000,           // kill idle sockets after 45s
+    maxPoolSize: 10,                  // connection pool
+    heartbeatFrequencyMS: 10000,      // keep connection alive (crucial for Cloud Run)
   })
   .then(async () => {
     console.log("MongoDB connected successfully");
@@ -159,11 +165,34 @@ mongoose
       const Product = require('./models/Product');
       await Product.syncIndexes();
       console.log('Product indexes synced successfully');
+
+      startServer(BASE_PORT, MAX_PORT_ATTEMPTS);
+
+
     } catch (err) {
       console.error('Product index sync error:', err.message);
     }
   })
   .catch((err) => console.error("MongoDB connection error:", err));
+
+
+
+// Auto-reconnect on drop
+mongoose.connection.on('disconnected', () => {
+  console.warn('MongoDB disconnected — attempting reconnect...');
+  setTimeout(() => {
+    mongoose.connect(process.env.MONGODB_URI, {
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+      heartbeatFrequencyMS: 10000,
+    }).catch(err => console.error('Reconnect failed:', err.message));
+  }, 3000); // wait 3s before retrying
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('MongoDB connection error:', err);
+});
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
@@ -238,10 +267,6 @@ const { startReservationCleanup } = require('./utils/reservation-cleanup');
 // Try the requested port, but fall back to the next one if it's already in use.
 const startServer = (port, attemptsLeft) => {
   const server = app.listen(port, () => {
-
-
-
-
     // Start periodic stock reservation cleanup
     startReservationCleanup();
   });
@@ -257,6 +282,6 @@ const startServer = (port, attemptsLeft) => {
   });
 };
 
-startServer(BASE_PORT, MAX_PORT_ATTEMPTS);
+// startServer(BASE_PORT, MAX_PORT_ATTEMPTS);
 
 module.exports = app;

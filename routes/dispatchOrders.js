@@ -13,7 +13,8 @@ const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const dateControl = require('../middleware/dateControl');
-const { sendResponse } = require('../utils/helpers');
+const EditRequestService = require('../services/EditRequestService');
+const { sendResponse, getTransactionDate } = require('../utils/helpers');
 const { logActivity } = require('../utils/auditLogger');
 
 const { generateDispatchOrderQR, buildDispatchOrderQrPayload } = require('../utils/qrCode');
@@ -40,6 +41,38 @@ const resolveMinSellingPrice = (value, fallback = 0) => {
   const parsedFallback = Number(fallback);
   if (Number.isFinite(parsedFallback) && parsedFallback >= 0) return truncateToTwoDecimals(parsedFallback);
   return 0;
+};
+
+const buildRequestError = (message, status = 400, details = null, code = null) => {
+  const err = new Error(message);
+  err.status = status;
+  if (details) err.details = details;
+  if (code) err.code = code;
+  return err;
+};
+
+const formatTransactionError = (error, actionLabel) => {
+  let status = error.status || 500;
+  let message = error.message || `Failed to ${actionLabel}.`;
+  let errors = error.details || null;
+
+  if (error.name === 'ValidationError') {
+    status = 400;
+    message = error.message || `Invalid data while attempting to ${actionLabel}.`;
+    errors = error.errors || errors;
+  }
+
+  if (error.code === 11000) {
+    status = 409;
+    message = `Duplicate record detected while trying to ${actionLabel}. This can happen if the order was partially processed earlier or another request ran in parallel. Please refresh and try again.`;
+    errors = { code: 'DUPLICATE_KEY', key: error.keyValue || null };
+  }
+
+  if (!message.toLowerCase().includes('no changes')) {
+    message = `${message} No changes were saved.`;
+  }
+
+  return { status, message, errors };
 };
 
 // Configure multer for memory storage
@@ -253,7 +286,7 @@ async function normalizeDispatchOrderForAdmin(dispatchOrder, input = {}, user, o
     dispatchOrder.markModified('logisticsCompany');
   }
   if (dispatchDate) {
-    dispatchOrder.dispatchDate = new Date(dispatchDate);
+    dispatchOrder.dispatchDate = getTransactionDate(dispatchDate);
     dispatchOrder.markModified('dispatchDate');
   }
   if (isTotalBoxesConfirmed !== undefined) {
@@ -649,7 +682,7 @@ router.post('/', auth, checkPermission('dispatch_orders'), dateControl({ entityT
     }
 
     // Set dispatch date from date field or use current date
-    const dispatchDate = req.body.date ? new Date(req.body.date) : new Date();
+    const dispatchDate = getTransactionDate(req.body.date);
 
     // Calculate totals before saving (pre-save hook will recalculate, but this ensures validation passes)
     const totalQuantity = processedItems.reduce((sum, item) => sum + item.quantity, 0);
@@ -692,10 +725,8 @@ router.post('/', auth, checkPermission('dispatch_orders'), dateControl({ entityT
       { path: 'qrCode.generatedBy', select: 'name' }
     ]);
 
-    // Convert images to signed URLs
-    await convertDispatchOrderImages(dispatchOrder);
-
-    await dispatchOrder.save();
+    const orderObj = dispatchOrder.toObject();
+    await convertDispatchOrderImages(orderObj);
 
     // Log the activity
     await logActivity(req, {
@@ -706,7 +737,7 @@ router.post('/', auth, checkPermission('dispatch_orders'), dateControl({ entityT
       changes: { old: null, new: dispatchOrder.toObject() }
     });
 
-    return sendResponse.success(res, dispatchOrder, 'Dispatch order created successfully', 201);
+    return sendResponse.success(res, orderObj, 'Dispatch order created successfully', 201);
 
   } catch (error) {
     console.error('Create dispatch order error:', error);
@@ -715,7 +746,7 @@ router.post('/', auth, checkPermission('dispatch_orders'), dateControl({ entityT
 });
 
 // Create manual entry (CRM Admin only - replaces Purchase)
-router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateField: 'purchaseDate', requestType: 'create' }), async (req, res) => {
+router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateField: 'purchaseDate', requestType: 'create', allowAdminBypassWithBaseline: true }), async (req, res) => {
   // Helper to normalize size/color arrays - handles strings, comma-separated strings, and arrays
   const normalizeToArray = (value) => {
     if (!value) return [];
@@ -731,164 +762,263 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
     return [];
   };
 
+  // Only admin/manager can create manual entries
+  if (!['super-admin', 'admin', 'employee'].includes(req.user.role)) {
+    return sendResponse.error(res, 'Only admins and managers can create manual entries', 403);
+  }
+
+  const { error, value } = manualEntrySchema.validate(req.body, {
+    abortEarly: false,
+    allowUnknown: true,
+    stripUnknown: false
+  });
+  if (error) {
+    console.error('Validation error:', JSON.stringify(error.details, null, 2));
+    return sendResponse.error(res, error.details[0].message, 400);
+  }
+
+  const session = await mongoose.startSession();
+  const txOptions = { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } };
+  let manualOrderId = null;
+
   try {
-    // Only admin/manager can create manual entries
-    if (!['super-admin', 'admin', 'employee'].includes(req.user.role)) {
-      return sendResponse.error(res, 'Only admins and managers can create manual entries', 403);
-    }
+    await session.withTransaction(async () => {
+      const supplier = await Supplier.findById(value.supplier).session(session);
+      if (!supplier) throw buildRequestError('Supplier not found', 400);
 
-    const { error, value } = manualEntrySchema.validate(req.body, {
-      abortEarly: false,
-      allowUnknown: true,
-      stripUnknown: false
-    });
-    if (error) {
-      console.error('Validation error:', JSON.stringify(error.details, null, 2));
-      return sendResponse.error(res, error.details[0].message, 400);
-    }
+      const normalizeSku = (value) => String(value || '').trim().toUpperCase();
+      const itemsWithDetails = [];
 
-    // Verify supplier exists
-    const supplier = await Supplier.findById(value.supplier);
-    if (!supplier) return sendResponse.error(res, 'Supplier not found', 400);
+      const productIds = value.items.map(i => i.product).filter(Boolean);
+      const productCodes = value.items.map(i => i.productCode).filter(Boolean).map(c => normalizeSku(c));
 
-    const normalizeSku = (value) => String(value || '').trim().toUpperCase();
-    const itemsWithDetails = [];
+      const [existingProductsById, existingProductsBySku] = await Promise.all([
+        Product.find({ _id: { $in: productIds } }).session(session),
+        Product.find({ sku: { $in: productCodes }, supplier: value.supplier }).session(session)
+      ]);
 
-    const productIds = value.items.map(i => i.product).filter(Boolean);
-    const productCodes = value.items.map(i => i.productCode).filter(Boolean).map(c => normalizeSku(c));
-    
-    const [existingProductsById, existingProductsBySku] = await Promise.all([
-      Product.find({ _id: { $in: productIds } }),
-      Product.find({ sku: { $in: productCodes }, supplier: value.supplier })
-    ]);
+      const productMap = new Map();
+      existingProductsById.forEach(p => productMap.set(p._id.toString(), p));
+      existingProductsBySku.forEach(p => productMap.set(p.sku, p));
 
-    const productMap = new Map();
-    existingProductsById.forEach(p => productMap.set(p._id.toString(), p));
-    existingProductsBySku.forEach(p => productMap.set(p.sku, p));
+      for (const item of value.items) {
+        let product = null;
+        let season = null;
 
-    for (const item of value.items) {
-      let product = null;
-      let season = null;
-
-      if (item.product) {
-        product = productMap.get(String(item.product));
-        if (!product) return sendResponse.error(res, `Product not found: ${item.product}`, 400);
-        const productSupplierId = product.supplier?._id || product.supplier;
-        if (productSupplierId && String(productSupplierId) !== String(value.supplier)) {
-          return sendResponse.error(res, `Product supplier mismatch for item: ${item.productCode || product.sku}`, 400);
-        }
-        season = product.season;
-      } else if (item.productCode) {
-        const productCodeUpper = normalizeSku(item.productCode);
-        product = productMap.get(productCodeUpper);
-        if (product) {
+        if (item.product) {
+          product = productMap.get(String(item.product));
+          if (!product) throw buildRequestError(`Product not found: ${item.product}`, 400);
+          const productSupplierId = product.supplier?._id || product.supplier;
+          if (productSupplierId && String(productSupplierId) !== String(value.supplier)) {
+            throw buildRequestError(`Product supplier mismatch for item: ${item.productCode || product.sku}`, 400);
+          }
           season = product.season;
-        } else if (item.season?.length > 0) {
-          if (!item.productName?.trim()) return sendResponse.error(res, `Product name required for new product: ${item.productCode}`, 400);
-          season = item.season;
-        } else {
-          return sendResponse.error(res, `Season required for new product: ${item.productCode}`, 400);
+        } else if (item.productCode) {
+          const productCodeUpper = normalizeSku(item.productCode);
+          product = productMap.get(productCodeUpper);
+          if (product) {
+            season = product.season;
+          } else if (item.season?.length > 0) {
+            if (!item.productName?.trim()) throw buildRequestError(`Product name required for new product: ${item.productCode}`, 400);
+            season = item.season;
+          } else {
+            throw buildRequestError(`Season required for new product: ${item.productCode}`, 400);
+          }
+        }
+
+        const costPrice = item.costPrice || (product ? product.pricing?.costPrice : 0);
+        const exchangeRate = value.exchangeRate || 1.0;
+        const percentage = value.percentage || 0;
+        const landedPrice = truncateToTwoDecimals((costPrice / exchangeRate) * (1 + (percentage / 100)));
+        const landedTotal = item.landedTotal ? truncateToTwoDecimals(item.landedTotal) : truncateToTwoDecimals(landedPrice * item.quantity);
+
+        itemsWithDetails.push({
+          product: product ? product._id : undefined,
+          productName: item.productName || product?.name,
+          productCode: item.productCode || product?.productCode || product?.sku,
+          season, costPrice, minSellingPrice: item.minSellingPrice, landedPrice, landedTotal,
+          quantity: item.quantity,
+          productImage: item.productImage,
+          useVariantTracking: true,
+          packets: item.packets,
+          size: item.size,
+          primaryColor: item.primaryColor,
+          material: item.material
+        });
+      }
+
+      const supplierPaymentTotal = itemsWithDetails.reduce((sum, item) => sum + ((item.costPrice || 0) * item.quantity), 0);
+      const subtotal = itemsWithDetails.reduce((sum, item) => sum + (item.landedTotal || 0), 0);
+      const totalDiscount = value.totalDiscount || 0;
+      const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
+      const grandTotal = Math.max(0, subtotal - totalDiscount + (value.totalTax || 0) + (value.shippingCost || 0));
+
+      const initialPaidAmount = Number(value.cashPayment || 0) + Number(value.bankPayment || 0);
+      const currentSupplierBalance = await Ledger.getBalance('supplier', supplier._id, session);
+      let creditApplied = 0;
+      let finalRemainingBalance = Math.max(0, discountedSupplierPaymentTotal - initialPaidAmount);
+
+      if (currentSupplierBalance < 0) {
+        creditApplied = Math.min(Math.abs(currentSupplierBalance), finalRemainingBalance);
+        finalRemainingBalance = Math.max(0, finalRemainingBalance - creditApplied);
+      }
+
+      const dispatchOrder = new DispatchOrder({
+        supplier: value.supplier,
+        supplierUser: supplier.userId || null,
+        logisticsCompany: value.logisticsCompany || null,
+        dispatchDate: getTransactionDate(value.purchaseDate),
+        items: itemsWithDetails,
+        status: 'confirmed',
+        confirmedAt: new Date(),
+        confirmedBy: req.user._id,
+        subtotal,
+        totalDiscount,
+        totalTax: value.totalTax || 0,
+        shippingCost: value.shippingCost || 0,
+        supplierPaymentTotal: discountedSupplierPaymentTotal,
+        grandTotal,
+        cashPayment: value.cashPayment || 0,
+        bankPayment: value.bankPayment || 0,
+        remainingBalance: finalRemainingBalance,
+        paymentStatus: finalRemainingBalance <= 0 ? 'paid' : (initialPaidAmount + creditApplied > 0 ? 'partial' : 'pending'),
+        paymentDetails: {
+          cashPayment: value.cashPayment || 0,
+          bankPayment: value.bankPayment || 0,
+          creditApplied,
+          remainingBalance: finalRemainingBalance,
+          paymentStatus: finalRemainingBalance <= 0 ? 'paid' : (initialPaidAmount + creditApplied > 0 ? 'partial' : 'pending')
+        },
+        invoiceNumber: value.invoiceNumber,
+        notes: value.notes,
+        createdBy: req.user._id
+      });
+
+      await dispatchOrder.save({ session });
+
+      const ledgerTasks = [];
+      ledgerTasks.push(Ledger.createEntry({
+        type: 'supplier',
+        entityId: supplier._id,
+        entityModel: 'Supplier',
+        transactionType: 'purchase',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: discountedSupplierPaymentTotal,
+        credit: 0,
+        date: dispatchOrder.dispatchDate,
+        description: `Manual Purchase ${dispatchOrder.orderNumber}`,
+        createdBy: req.user._id
+      }, session));
+      if (value.cashPayment > 0) ledgerTasks.push(Ledger.createEntry({
+        type: 'supplier',
+        entityId: supplier._id,
+        entityModel: 'Supplier',
+        transactionType: 'payment',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: 0,
+        credit: value.cashPayment,
+        date: dispatchOrder.dispatchDate,
+        description: `Cash payment: ${dispatchOrder.orderNumber}`,
+        paymentMethod: 'cash',
+        createdBy: req.user._id
+      }, session));
+      if (value.bankPayment > 0) ledgerTasks.push(Ledger.createEntry({
+        type: 'supplier',
+        entityId: supplier._id,
+        entityModel: 'Supplier',
+        transactionType: 'payment',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: 0,
+        credit: value.bankPayment,
+        date: dispatchOrder.dispatchDate,
+        description: `Bank payment: ${dispatchOrder.orderNumber}`,
+        paymentMethod: 'bank',
+        createdBy: req.user._id
+      }, session));
+      if (creditApplied > 0) ledgerTasks.push(Ledger.createEntry({
+        type: 'supplier',
+        entityId: supplier._id,
+        entityModel: 'Supplier',
+        transactionType: 'credit_application',
+        referenceId: dispatchOrder._id,
+        referenceModel: 'DispatchOrder',
+        debit: 0,
+        credit: creditApplied,
+        date: dispatchOrder.dispatchDate,
+        description: `Credit applied: ${dispatchOrder.orderNumber}`,
+        createdBy: req.user._id
+      }, session));
+      ledgerTasks.push(Supplier.findByIdAndUpdate(
+        supplier._id,
+        { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: discountedSupplierPaymentTotal - initialPaidAmount - creditApplied } },
+        { session }
+      ));
+
+      if (dispatchOrder.logisticsCompany && value.totalBoxes > 0) {
+        const lc = await LogisticsCompany.findById(dispatchOrder.logisticsCompany).session(session);
+        if (lc?.rates?.boxRate > 0) {
+          ledgerTasks.push(Ledger.createEntry({
+            type: 'logistics',
+            entityId: lc._id,
+            entityModel: 'LogisticsCompany',
+            transactionType: 'charge',
+            referenceId: dispatchOrder._id,
+            referenceModel: 'DispatchOrder',
+            debit: value.totalBoxes * lc.rates.boxRate,
+            credit: 0,
+            date: dispatchOrder.dispatchDate,
+            description: `Logistics charge: ${dispatchOrder.orderNumber}`,
+            createdBy: req.user._id
+          }, session));
         }
       }
 
-      const costPrice = item.costPrice || (product ? product.pricing?.costPrice : 0);
-      const exchangeRate = value.exchangeRate || 1.0;
-      const percentage = value.percentage || 0;
-      const landedPrice = truncateToTwoDecimals((costPrice / exchangeRate) * (1 + (percentage / 100)));
-      const landedTotal = item.landedTotal ? truncateToTwoDecimals(item.landedTotal) : truncateToTwoDecimals(landedPrice * item.quantity);
+      await Promise.all(ledgerTasks);
 
-      itemsWithDetails.push({
-        product: product ? product._id : undefined,
-        productName: item.productName || product?.name,
-        productCode: item.productCode || product?.productCode || product?.sku,
-        season, costPrice, minSellingPrice: item.minSellingPrice, landedPrice, landedTotal,
-        quantity: item.quantity,
-        productImage: item.productImage,
-        useVariantTracking: true,
-        packets: item.packets,
-        size: item.size,
-        primaryColor: item.primaryColor,
-        material: item.material
-      });
-    }
-
-    const supplierPaymentTotal = itemsWithDetails.reduce((sum, item) => sum + ((item.costPrice || 0) * item.quantity), 0);
-    const subtotal = itemsWithDetails.reduce((sum, item) => sum + (item.landedTotal || 0), 0);
-    const totalDiscount = value.totalDiscount || 0;
-    const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
-    const grandTotal = Math.max(0, subtotal - totalDiscount + (value.totalTax || 0) + (value.shippingCost || 0));
-
-    const initialPaidAmount = Number(value.cashPayment || 0) + Number(value.bankPayment || 0);
-    const currentSupplierBalance = await Ledger.getBalance('supplier', supplier._id);
-    let creditApplied = 0;
-    let finalRemainingBalance = Math.max(0, discountedSupplierPaymentTotal - initialPaidAmount);
-
-    if (currentSupplierBalance < 0) {
-      creditApplied = Math.min(Math.abs(currentSupplierBalance), finalRemainingBalance);
-      finalRemainingBalance = Math.max(0, finalRemainingBalance - creditApplied);
-    }
-
-    const dispatchOrder = new DispatchOrder({
-      supplier: value.supplier,
-      supplierUser: supplier.userId || null,
-      logisticsCompany: value.logisticsCompany || null,
-      dispatchDate: value.purchaseDate ? new Date(value.purchaseDate) : new Date(),
-      items: itemsWithDetails,
-      status: 'confirmed', confirmedAt: new Date(), confirmedBy: req.user._id,
-      subtotal, totalDiscount, totalTax: value.totalTax || 0, shippingCost: value.shippingCost || 0,
-      supplierPaymentTotal: discountedSupplierPaymentTotal, grandTotal,
-      cashPayment: value.cashPayment || 0, bankPayment: value.bankPayment || 0,
-      remainingBalance: finalRemainingBalance,
-      paymentStatus: finalRemainingBalance <= 0 ? 'paid' : (initialPaidAmount + creditApplied > 0 ? 'partial' : 'pending'),
-      paymentDetails: { cashPayment: value.cashPayment || 0, bankPayment: value.bankPayment || 0, creditApplied, remainingBalance: finalRemainingBalance, paymentStatus: finalRemainingBalance <= 0 ? 'paid' : (initialPaidAmount + creditApplied > 0 ? 'partial' : 'pending') },
-      invoiceNumber: value.invoiceNumber, notes: value.notes, createdBy: req.user._id
-    });
-
-    await dispatchOrder.save();
-
-    const ledgerTasks = [];
-    ledgerTasks.push(Ledger.createEntry({
-      type: 'supplier', entityId: supplier._id, entityModel: 'Supplier', transactionType: 'purchase',
-      referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: discountedSupplierPaymentTotal, credit: 0,
-      date: dispatchOrder.dispatchDate, description: `Manual Purchase ${dispatchOrder.orderNumber}`, createdBy: req.user._id
-    }));
-    if (value.cashPayment > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplier._id, entityModel: 'Supplier', transactionType: 'payment', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: value.cashPayment, date: dispatchOrder.dispatchDate, description: `Cash payment: ${dispatchOrder.orderNumber}`, paymentMethod: 'cash', createdBy: req.user._id }));
-    if (value.bankPayment > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplier._id, entityModel: 'Supplier', transactionType: 'payment', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: value.bankPayment, date: dispatchOrder.dispatchDate, description: `Bank payment: ${dispatchOrder.orderNumber}`, paymentMethod: 'bank', createdBy: req.user._id }));
-    if (creditApplied > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplier._id, entityModel: 'Supplier', transactionType: 'credit_application', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: creditApplied, date: dispatchOrder.dispatchDate, description: `Credit applied: ${dispatchOrder.orderNumber}`, createdBy: req.user._id }));
-    ledgerTasks.push(Supplier.findByIdAndUpdate(supplier._id, { $inc: { totalPurchases: discountedSupplierPaymentTotal, currentBalance: discountedSupplierPaymentTotal - initialPaidAmount - creditApplied } }));
-    
-    if (dispatchOrder.logisticsCompany && value.totalBoxes > 0) {
-      LogisticsCompany.findById(dispatchOrder.logisticsCompany).then(lc => {
-        if (lc?.rates?.boxRate > 0) {
-          Ledger.createEntry({
-            type: 'logistics', entityId: lc._id, entityModel: 'LogisticsCompany', transactionType: 'charge',
-            referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: value.totalBoxes * lc.rates.boxRate, credit: 0,
-            date: dispatchOrder.dispatchDate, description: `Logistics charge: ${dispatchOrder.orderNumber}`, createdBy: req.user._id
-          }).catch(e => console.error("Logistics Ledger Error:", e));
-        }
-      });
-    }
-    await Promise.all(ledgerTasks);
-
-    try {
-      await dispatchOrder.populate({ path: 'items.product' });
       const bwipjs = require('bwip-js');
       const transactionDate = dispatchOrder.dispatchDate || new Date();
 
       const productUpdateTasks = dispatchOrder.items.map(async (item) => {
         let productObj = item.product;
+
+        // In this flow item.product can be a populated document, plain object, or ObjectId.
+        // Ensure we always work with a real Product document before using document methods.
+        if (productObj && typeof productObj.save !== 'function') {
+          const maybeProductId = productObj._id || productObj;
+          if (mongoose.Types.ObjectId.isValid(maybeProductId)) {
+            productObj = await Product.findById(maybeProductId).session(session);
+          } else {
+            productObj = null;
+          }
+        }
+
         if (!productObj) {
           productObj = new Product({
-            name: item.productName || 'Unknown Product', sku: item.productCode?.toUpperCase(), supplier: supplier._id,
-            productCode: item.productCode, season: item.season, category: 'General', unit: 'piece',
+            name: item.productName || 'Unknown Product',
+            sku: item.productCode?.toUpperCase(),
+            supplier: supplier._id,
+            productCode: item.productCode,
+            season: item.season,
+            category: 'General',
+            unit: 'piece',
             pricing: { costPrice: item.costPrice, sellingPrice: resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2) },
-            size: normalizeToArray(item.size), color: normalizeToArray(item.primaryColor), specifications: { material: item.material },
-            createdBy: req.user._id, images: Array.isArray(item.productImage) ? item.productImage : (item.productImage ? [item.productImage] : [])
+            size: normalizeToArray(item.size),
+            color: normalizeToArray(item.primaryColor),
+            specifications: { material: item.material },
+            createdBy: req.user._id,
+            images: Array.isArray(item.productImage) ? item.productImage : (item.productImage ? [item.productImage] : [])
           });
-          await productObj.save();
+          await productObj.save({ session });
           item.product = productObj._id;
         } else {
           let hasUpdates = false;
+          if (!Array.isArray(productObj.images)) {
+            productObj.images = [];
+            hasUpdates = true;
+          }
           if (item.productImage) {
             const imgs = Array.isArray(item.productImage) ? item.productImage : [item.productImage];
             imgs.forEach(url => { if (url && !productObj.images.includes(url)) { productObj.images.unshift(url); hasUpdates = true; } });
@@ -896,45 +1026,63 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
           const newSizes = normalizeToArray(item.size);
           const mergedSizes = [...new Set([...normalizeToArray(productObj.size), ...newSizes])];
           if (mergedSizes.length !== normalizeToArray(productObj.size).length) { productObj.size = mergedSizes; hasUpdates = true; }
-          if (hasUpdates) await productObj.save();
+          if (hasUpdates) await productObj.save({ session });
+          item.product = productObj._id;
         }
         return productObj;
       });
       await Promise.all(productUpdateTasks);
 
+      dispatchOrder.markModified('items');
+      await dispatchOrder.save({ session });
+
       for (const item of dispatchOrder.items) {
         const prodId = item.product?._id || item.product;
-        const [inventory, packetGroups] = await Promise.all([
-          Inventory.findOne({ product: prodId }).then(async inv => inv || await new Inventory({ 
-            product: prodId, 
-            currentStock: 0, 
-            averageCostPrice: item.landedPrice, 
-            purchaseBatches: [],
-            minStockLevel: 0,
-            maxStockLevel: 1000,
-            reorderLevel: 10
-          }).save()),
-          (async () => {
-             const groups = new Map();
-             const isLoose = item.packets.some(p => p.isLoose);
-             if (isLoose) {
-               item.packets.filter(p => p.isLoose).forEach(p => p.composition.forEach(c => {
-                 const k = `${c.color}|${c.size}`;
-                 if (groups.has(k)) groups.get(k).quantity += c.quantity;
-                 else groups.set(k, { color: c.color, size: c.size, quantity: c.quantity, isLoose: true });
-               }));
-             } else {
-               item.packets.forEach(p => {
-                 const b = generatePacketBarcode(supplier._id.toString(), prodId.toString(), p.composition, false);
-                 if (groups.has(b)) groups.get(b).count++;
-                 else groups.set(b, { barcode: b, comp: p.composition, items: p.totalItems || p.composition.reduce((s, c) => s + c.quantity, 0), count: 1, isLoose: false });
-               });
-             }
-             return Array.from(groups.values());
-          })()
-        ]);
 
-        const batchInfo = { dispatchOrderId: dispatchOrder._id, supplierId: supplier._id, purchaseDate: transactionDate, costPrice: item.costPrice, landedPrice: item.landedPrice, exchangeRate: value.exchangeRate || 1.0 };
+        const inventory = await Inventory.findOneAndUpdate(
+          { product: prodId },
+          {
+            $setOnInsert: {
+              product: prodId,
+              currentStock: 0,
+              averageCostPrice: item.landedPrice,
+              purchaseBatches: [],
+              minStockLevel: 0,
+              maxStockLevel: 1000,
+              reorderLevel: 10
+            }
+          },
+          { new: true, upsert: true, session, setDefaultsOnInsert: true }
+        );
+
+        const packetGroups = (() => {
+          const groups = new Map();
+          const isLoose = item.packets.some(p => p.isLoose);
+          if (isLoose) {
+            item.packets.filter(p => p.isLoose).forEach(p => p.composition.forEach(c => {
+              const k = `${c.color}|${c.size}`;
+              if (groups.has(k)) groups.get(k).quantity += c.quantity;
+              else groups.set(k, { color: c.color, size: c.size, quantity: c.quantity, isLoose: true });
+            }));
+          } else {
+            item.packets.forEach(p => {
+              const b = generatePacketBarcode(supplier._id.toString(), prodId.toString(), p.composition, false);
+              if (groups.has(b)) groups.get(b).count++;
+              else groups.set(b, { barcode: b, comp: p.composition, items: p.totalItems || p.composition.reduce((s, c) => s + c.quantity, 0), count: 1, isLoose: false });
+            });
+          }
+          return Array.from(groups.values());
+        })();
+
+        const batchInfo = {
+          dispatchOrderId: dispatchOrder._id,
+          supplierId: supplier._id,
+          purchaseDate: transactionDate,
+          costPrice: item.costPrice,
+          landedPrice: item.landedPrice,
+          exchangeRate: value.exchangeRate || 1.0
+        };
+
         if (item.packets?.length > 0) {
           const variantComposition = [];
           item.packets.forEach(packet => packet.composition.forEach(comp => {
@@ -942,13 +1090,31 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
             if (existing) existing.quantity += comp.quantity;
             else variantComposition.push({ size: comp.size, color: comp.color, quantity: comp.quantity });
           }));
-          await inventory.addStockWithVariants(item.quantity, variantComposition, 'DispatchOrder', dispatchOrder._id, req.user._id, `Manual Purchase ${dispatchOrder.orderNumber}`, transactionDate);
+          await inventory.addStockWithVariants(
+            item.quantity,
+            variantComposition,
+            'DispatchOrder',
+            dispatchOrder._id,
+            req.user._id,
+            `Manual Purchase ${dispatchOrder.orderNumber}`,
+            transactionDate,
+            session
+          );
           inventory.purchaseBatches.push({ ...batchInfo, quantity: item.quantity, remainingQuantity: item.quantity });
         } else {
-          await inventory.addStockWithBatch(item.quantity, batchInfo, 'DispatchOrder', dispatchOrder._id, req.user._id, `Manual Purchase ${dispatchOrder.orderNumber}`);
+          await inventory.addStockWithBatch(
+            item.quantity,
+            batchInfo,
+            'DispatchOrder',
+            dispatchOrder._id,
+            req.user._id,
+            `Manual Purchase ${dispatchOrder.orderNumber}`,
+            transactionDate,
+            session
+          );
         }
         inventory.recalculateAverageCost();
-        await inventory.save();
+        await inventory.save({ session });
 
         const packetTasks = packetGroups.map(async (group) => {
           let barcode = group.barcode;
@@ -961,54 +1127,82 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
             qty = group.quantity;
             itemsPerPacket = 1;
           }
-          let ps = await PacketStock.findOne({ barcode });
+          let ps = await PacketStock.findOne({ barcode }).session(session);
           if (ps) {
-            await ps.addStock(qty, dispatchOrder._id, item.costPrice * itemsPerPacket, item.landedPrice * itemsPerPacket, transactionDate);
+            await ps.addStock(qty, dispatchOrder._id, item.costPrice * itemsPerPacket, item.landedPrice * itemsPerPacket, transactionDate, session);
             ps.suggestedSellingPrice = resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2) * itemsPerPacket;
           } else {
             const buffer = await bwipjs.toBuffer({ bcid: 'code128', text: barcode, scale: 3, height: 10, includetext: true, textxalign: 'center', textsize: 8 }).catch(() => null);
             const image = buffer ? `data:image/png;base64,${buffer.toString('base64')}` : null;
             ps = new PacketStock({
-              barcode, product: prodId, supplier: supplier._id, composition: comp, totalItemsPerPacket: itemsPerPacket, availablePackets: qty,
-              costPricePerPacket: item.costPrice * itemsPerPacket, landedPricePerPacket: item.landedPrice * itemsPerPacket,
+              barcode,
+              product: prodId,
+              supplier: supplier._id,
+              composition: comp,
+              totalItemsPerPacket: itemsPerPacket,
+              availablePackets: qty,
+              costPricePerPacket: item.costPrice * itemsPerPacket,
+              landedPricePerPacket: item.landedPrice * itemsPerPacket,
               suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2) * itemsPerPacket,
-              isLoose: !!group.isLoose, barcodeImage: image ? { dataUrl: image, format: 'code128', generatedAt: transactionDate } : undefined,
+              isLoose: !!group.isLoose,
+              barcodeImage: image ? { dataUrl: image, format: 'code128', generatedAt: transactionDate } : undefined,
               dispatchOrderHistory: [{ dispatchOrderId: dispatchOrder._id, quantity: qty, costPricePerPacket: item.costPrice * itemsPerPacket, landedPricePerPacket: item.landedPrice * itemsPerPacket, addedAt: transactionDate }]
             });
           }
-          return ps.save();
+          return ps.save({ session });
         });
         await Promise.all(packetTasks);
       }
-    } catch (invError) { console.error("Inventory/Stock Error:", invError); }
 
-    // Populate for response
-    await dispatchOrder.populate([
-      { path: 'supplier', select: 'name company phone email address' },
-      { path: 'items.product', select: 'name sku unit images color size productCode pricing' },
-      { path: 'createdBy', select: 'name email' },
-      { path: 'confirmedBy', select: 'name' }
-    ]);
+      manualOrderId = dispatchOrder._id;
+    }, txOptions);
 
-    // Convert images to signed URLs
-    await convertDispatchOrderImages(dispatchOrder);
+    const dispatchOrder = await DispatchOrder.findById(manualOrderId)
+      .populate([
+        { path: 'supplier', select: 'name company phone email address' },
+        { path: 'items.product', select: 'name sku unit images color size productCode pricing' },
+        { path: 'createdBy', select: 'name email' },
+        { path: 'confirmedBy', select: 'name' }
+      ]);
 
-    await dispatchOrder.save();
+    const orderObj = dispatchOrder.toObject();
+    await convertDispatchOrderImages(orderObj);
 
-    // Log the activity
     await logActivity(req, {
       action: 'CREATE',
       resource: 'Purchase',
       resourceId: dispatchOrder._id,
-      description: `Created manual purchase/dispatch order: ${dispatchOrder.orderNumber} (Supplier: ${supplier.company})`,
+      description: `Created manual purchase/dispatch order: ${dispatchOrder.orderNumber} (Supplier: ${dispatchOrder.supplier?.company || 'Unknown'})`,
       changes: { old: null, new: dispatchOrder.toObject() }
     });
 
-    return sendResponse.success(res, dispatchOrder, 'Manual entry created successfully', 201);
+    // Auto-generate edit request for backdated entries (Admin only)
+    if (req.pendingBackdate) {
+      try {
+        await EditRequestService.submitRequest({
+          entityType: 'dispatch-order',
+          entityId: dispatchOrder._id,
+          requestType: 'edit',
+          requestedChanges: { dispatchDate: req.pendingBackdate },
+          rawPayload: { dispatchDate: req.pendingBackdate },
+          reason: `Auto-generated request to update Dispatch Date from ${new Date().toLocaleDateString('en-GB')} to ${new Date(req.pendingBackdate).toLocaleDateString('en-GB')} (Backdated creation by admin)`,
+          requestedBy: req.user._id,
+          entityRef: dispatchOrder.orderNumber
+        });
+      } catch (editReqError) {
+        console.error('Failed to auto-create backdate edit request:', editReqError.message);
+        // We don't block the response since the main record is already saved
+      }
+    }
+
+    return sendResponse.success(res, orderObj, 'Manual entry created successfully', 201);
 
   } catch (error) {
     console.error('Create manual entry error:', error);
-    return sendResponse.error(res, error.message || 'Server error', 500);
+    const { status, message, errors } = formatTransactionError(error, 'create manual purchase');
+    return sendResponse.error(res, message, status, errors);
+  } finally {
+    session.endSession();
   }
 });
 
@@ -1351,10 +1545,10 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
       { path: 'submittedForApprovalBy', select: 'name' }
     ]);
 
-    // Convert images to signed URLs
-    await convertDispatchOrderImages(dispatchOrder);
+    const orderObj = dispatchOrder.toObject();
+    await convertDispatchOrderImages(orderObj);
 
-    return sendResponse.success(res, dispatchOrder, 'Dispatch order submitted for approval successfully');
+    return sendResponse.success(res, orderObj, 'Dispatch order submitted for approval successfully');
 
   } catch (error) {
     console.error('Submit approval error:', error);
@@ -1363,8 +1557,19 @@ router.post('/:id/submit-approval', auth, async (req, res) => {
 });
 
 // Confirm dispatch order (Super-admin/Admin)
-router.post('/:id/confirm', auth, dateControl({ entityType: 'dispatch-order', dateField: 'dispatchDate', requestType: 'update' }), async (req, res) => {
-  try {
+router.post(
+  '/:id/confirm',
+  auth,
+  dateControl({
+    entityType: 'dispatch-order',
+    dateField: 'dispatchDate',
+    requestType: 'update',
+    compareToExisting: true,
+    existingDateField: 'dispatchDate',
+    entityModel: DispatchOrder,
+    allowAdminBypassWithBaseline: true
+  }),
+  async (req, res) => {
     // Only super-admin or admin can confirm dispatch orders
     if (req.user.role !== 'super-admin' && req.user.role !== 'admin') {
       return sendResponse.error(res, 'Only super-admin or admin can confirm dispatch orders', 403);
@@ -1383,354 +1588,481 @@ router.post('/:id/confirm', auth, dateControl({ entityType: 'dispatch-order', da
       isTotalBoxesConfirmed
     } = req.body;
 
-    const dispatchOrder = await DispatchOrder.findById(req.params.id)
-      .populate('supplier')
-      .populate('logisticsCompany', 'name rates');
+    const session = await mongoose.startSession();
+    const txOptions = { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } };
+    let confirmedOrderId = null;
 
-    if (!dispatchOrder) {
-      return sendResponse.error(res, 'Dispatch order not found', 404);
-    }
+    try {
+      await session.withTransaction(async () => {
+        const dispatchOrder = await DispatchOrder.findById(req.params.id).session(session);
 
-    if (!['pending', 'pending-approval'].includes(dispatchOrder.status)) {
-      return sendResponse.error(res, 'Only pending or pending-approval dispatch orders can be confirmed', 400);
-    }
-
-    // Ensure every item has packet configuration before allowing confirmation
-    const unconfiguredItems = (dispatchOrder.items || []).filter(item => !item.packets || item.packets.length === 0);
-    if (unconfiguredItems.length > 0) {
-      const names = unconfiguredItems.map(item => `"${item.productName || item.productCode}"`).join(', ');
-      return sendResponse.error(res, `Cannot confirm order: the following items are missing packet configuration: ${names}`, 400);
-    }
-
-    // Validate and set exchange rate and percentage from admin input
-    const finalExchangeRate = exchangeRate !== undefined && exchangeRate !== null
-      ? parseFloat(exchangeRate)
-      : dispatchOrder.exchangeRate || 1.0;
-    const finalPercentage = percentage !== undefined && percentage !== null
-      ? parseFloat(percentage)
-      : dispatchOrder.percentage || 0;
-
-    if (isNaN(finalExchangeRate) || finalExchangeRate <= 0) {
-      return sendResponse.error(res, 'Invalid exchange rate. Must be a positive number.', 400);
-    }
-
-    if (isNaN(finalPercentage) || finalPercentage < 0) {
-      return sendResponse.error(res, 'Invalid percentage. Must be a non-negative number.', 400);
-    }
-
-    // Update dispatch order with admin-provided exchange rate and percentage
-    dispatchOrder.exchangeRate = finalExchangeRate;
-    dispatchOrder.percentage = finalPercentage;
-
-    // Update logistics and date if provided (Super-admin can refine these during confirmation)
-    if (logisticsCompany) {
-      dispatchOrder.logisticsCompany = logisticsCompany;
-      dispatchOrder.markModified('logisticsCompany');
-      // Re-populate to ensure we have rates for ledger calculation later
-      await dispatchOrder.populate('logisticsCompany', 'name code contactInfo rates');
-    }
-    if (dispatchDate !== undefined) {
-      const parsedDispatchDate = new Date(dispatchDate);
-      if (Number.isNaN(parsedDispatchDate.getTime())) {
-        return sendResponse.error(res, 'Invalid dispatch date.', 400);
-      }
-      dispatchOrder.dispatchDate = parsedDispatchDate;
-      dispatchOrder.markModified('dispatchDate');
-    }
-    if (isTotalBoxesConfirmed !== undefined) {
-      dispatchOrder.isTotalBoxesConfirmed = !!isTotalBoxesConfirmed;
-      dispatchOrder.markModified('isTotalBoxesConfirmed');
-    }
-    if (totalBoxes !== undefined) {
-      dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
-      dispatchOrder.markModified('totalBoxes');
-    }
-
-    const transactionDate = dispatchOrder.dispatchDate ? new Date(dispatchOrder.dispatchDate) : null;
-    if (!transactionDate || Number.isNaN(transactionDate.getTime())) {
-      return sendResponse.error(res, 'Dispatch date is required before confirming this order.', 400);
-    }
-
-    // Update items - handle structural changes (add/remove)
-    if (Array.isArray(items)) {
-      if (items.length === dispatchOrder.items.length) {
-        // Standard mapping if length matches (preserves item IDs)
-        dispatchOrder.items.forEach((item, index) => {
-          const reqItem = items[index];
-          if (reqItem) {
-            if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
-            if (reqItem.productName) item.productName = reqItem.productName;
-            if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
-            if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
-            if (reqItem.minSellingPrice !== undefined) item.minSellingPrice = Number(reqItem.minSellingPrice);
-            if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
-            if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
-            if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
-            if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
-            if (reqItem.packets) item.packets = reqItem.packets;
-            if (reqItem.boxes) item.boxes = reqItem.boxes;
-          }
-        });
-        dispatchOrder.markModified('items');
-      } else {
-        // If items were added or removed, replace the array
-        dispatchOrder.items = items;
-        dispatchOrder.markModified('items');
-      }
-      // Save these updates so the order reflects what was confirmed
-      await dispatchOrder.save();
-    }
-
-    // Calculate confirmed quantities and prices
-    const confirmedQuantities = dispatchOrder.items.map((item, index) => {
-      const returnedQty = (dispatchOrder.returnedItems || [])
-        .filter(r => r.itemIndex === index)
-        .reduce((sum, r) => sum + r.quantity, 0);
-      return { itemIndex: index, quantity: Math.max(0, (item.quantity || 0) - returnedQty) };
-    });
-
-    let supplierPaymentTotal = 0;
-    let landedPriceTotal = 0;
-    const itemsWithPrices = dispatchOrder.items.map((item, index) => {
-      const qty = confirmedQuantities[index].quantity;
-      const landedPrice = truncateToTwoDecimals((item.costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
-      supplierPaymentTotal += item.costPrice * qty;
-      landedPriceTotal += landedPrice * qty;
-      return { ...item.toObject(), supplierPaymentAmount: item.costPrice, landedPrice, confirmedQuantity: qty };
-    });
-
-    const totalDiscount = (discount !== undefined && discount !== null) ? parseFloat(discount) : (dispatchOrder.totalDiscount || 0);
-    const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
-    const subtotal = truncateToTwoDecimals(landedPriceTotal);
-    const grandTotal = truncateToTwoDecimals(Math.max(0, subtotal - totalDiscount));
-
-    // ==========================================
-    // STEP 1: BATCH LOOKUPS & PARALLEL PROCESSING
-    // ==========================================
-    const supplierId = dispatchOrder.supplier._id || dispatchOrder.supplier;
-    const skus = [...new Set(dispatchOrder.items.map(i => i.productCode?.trim().toUpperCase()).filter(Boolean))];
-    
-    const [existingProducts, existingInventories] = await Promise.all([
-      Product.find({ sku: { $in: skus }, supplier: supplierId }),
-      Inventory.find({ product: { $in: dispatchOrder.items.map(i => i.product).filter(Boolean) } })
-    ]);
-
-    const productMap = new Map(existingProducts.map(p => [p.sku, p]));
-    const inventoryMap = new Map(existingInventories.map(inv => [inv.product.toString(), inv]));
-
-    const inventoryResults = [];
-    const bwipjs = require('bwip-js');
-
-    // Item processing tasks
-    const itemTasks = dispatchOrder.items.map(async (item, index) => {
-      try {
-        const confirmedQty = confirmedQuantities[index].quantity;
-        if (confirmedQty <= 0) return { index, success: true, skipped: true };
-
-        const productCodeUpper = item.productCode?.trim().toUpperCase();
-        let product = productMap.get(productCodeUpper);
-        const landedPrice = itemsWithPrices[index].landedPrice;
-
-        // 1. Product Updates/Creation
-        if (!product) {
-          const colors = Array.isArray(item.primaryColor) ? item.primaryColor : [item.primaryColor];
-          const sizes = Array.isArray(item.size) ? item.size : [item.size];
-          product = new Product({
-            name: item.productName, sku: productCodeUpper, supplier: supplierId, productCode: item.productCode,
-            season: item.season, category: 'General', unit: 'piece',
-            pricing: { costPrice: landedPrice, sellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) },
-            color: colors.filter(Boolean), size: sizes.filter(Boolean),
-            specifications: { color: colors[0], material: item.material },
-            isActive: true, createdBy: req.user._id
-          });
-          await product.save();
-        } else {
-          let needsSave = false;
-          if (!product.isActive) { product.isActive = true; needsSave = true; }
-          if (product.pricing.costPrice !== landedPrice) { product.pricing.costPrice = landedPrice; needsSave = true; }
-          const resMin = resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2);
-          if (product.pricing.sellingPrice !== resMin) { product.pricing.sellingPrice = resMin; product.pricing.minSellingPrice = resMin; needsSave = true; }
-          if (item.productImage) {
-            const imgs = Array.isArray(item.productImage) ? item.productImage : [item.productImage];
-            imgs.forEach(url => { if (url && !product.images.includes(url)) { product.images.unshift(url); needsSave = true; } });
-          }
-          if (needsSave) await product.save();
-        }
-        item.product = product._id;
-
-        // 2. Inventory Updates
-        let inventory = inventoryMap.get(product._id.toString());
-        if (!inventory) {
-          inventory = new Inventory({ 
-            product: product._id, 
-            currentStock: 0, 
-            averageCostPrice: landedPrice, 
-            purchaseBatches: [],
-            minStockLevel: 0,
-            maxStockLevel: 1000,
-            reorderLevel: 10
-          });
-          await inventory.save();
+        if (!dispatchOrder) {
+          throw buildRequestError('Dispatch order not found', 404);
         }
 
-        const batchInfo = { dispatchOrderId: dispatchOrder._id, supplierId, purchaseDate: transactionDate, costPrice: item.costPrice, landedPrice, exchangeRate: finalExchangeRate };
+        if (!['pending', 'pending-approval'].includes(dispatchOrder.status)) {
+          throw buildRequestError('Only pending or pending-approval dispatch orders can be confirmed', 400);
+        }
 
-        if (item.useVariantTracking && item.packets?.length > 0) {
-          const variantComp = [];
-          item.packets.forEach(p => {
-            if (!p.composition || !Array.isArray(p.composition)) return;
-            p.composition.forEach(c => {
-              const qty = Number(c.quantity);
-              if (c.size && c.color && !isNaN(qty) && qty > 0) {
-                const e = variantComp.find(v => v.size === c.size && v.color === c.color);
-                if (e) e.quantity += qty;
-                else variantComp.push({ size: c.size, color: c.color, quantity: qty });
+        const unconfiguredItems = (dispatchOrder.items || []).filter(item => !item.packets || item.packets.length === 0);
+        if (unconfiguredItems.length > 0) {
+          const names = unconfiguredItems.map(item => `"${item.productName || item.productCode}"`).join(', ');
+          throw buildRequestError(
+            `Cannot confirm order: the following items are missing packet configuration: ${names}`,
+            400,
+            { code: 'MISSING_PACKETS', items: unconfiguredItems.map(item => item.productName || item.productCode || 'unknown') }
+          );
+        }
+
+        const finalExchangeRate = exchangeRate !== undefined && exchangeRate !== null
+          ? parseFloat(exchangeRate)
+          : dispatchOrder.exchangeRate || 1.0;
+        const finalPercentage = percentage !== undefined && percentage !== null
+          ? parseFloat(percentage)
+          : dispatchOrder.percentage || 0;
+
+        if (isNaN(finalExchangeRate) || finalExchangeRate <= 0) {
+          throw buildRequestError('Invalid exchange rate. Must be a positive number.', 400);
+        }
+
+        if (isNaN(finalPercentage) || finalPercentage < 0) {
+          throw buildRequestError('Invalid percentage. Must be a non-negative number.', 400);
+        }
+
+        dispatchOrder.exchangeRate = finalExchangeRate;
+        dispatchOrder.percentage = finalPercentage;
+
+        if (logisticsCompany) {
+          dispatchOrder.logisticsCompany = logisticsCompany;
+          dispatchOrder.markModified('logisticsCompany');
+        }
+        if (dispatchDate !== undefined) {
+          const parsedDispatchDate = new Date(dispatchDate);
+          if (Number.isNaN(parsedDispatchDate.getTime())) {
+            throw buildRequestError('Invalid dispatch date.', 400);
+          }
+          dispatchOrder.dispatchDate = parsedDispatchDate;
+          dispatchOrder.markModified('dispatchDate');
+        }
+        if (isTotalBoxesConfirmed !== undefined) {
+          dispatchOrder.isTotalBoxesConfirmed = !!isTotalBoxesConfirmed;
+          dispatchOrder.markModified('isTotalBoxesConfirmed');
+        }
+        if (totalBoxes !== undefined) {
+          dispatchOrder.totalBoxes = parseInt(totalBoxes) || 0;
+          dispatchOrder.markModified('totalBoxes');
+        }
+
+        const transactionDate = dispatchOrder.dispatchDate ? new Date(dispatchOrder.dispatchDate) : null;
+        if (!transactionDate || Number.isNaN(transactionDate.getTime())) {
+          throw buildRequestError('Dispatch date is required before confirming this order.', 400);
+        }
+
+        if (Array.isArray(items)) {
+          if (items.length === dispatchOrder.items.length) {
+            dispatchOrder.items.forEach((item, index) => {
+              const reqItem = items[index];
+              if (reqItem) {
+                if (reqItem.quantity !== undefined) item.quantity = Number(reqItem.quantity);
+                if (reqItem.productName) item.productName = reqItem.productName;
+                if (reqItem.productCode) item.productCode = reqItem.productCode ? reqItem.productCode.trim() : item.productCode;
+                if (reqItem.costPrice !== undefined) item.costPrice = Number(reqItem.costPrice);
+                if (reqItem.minSellingPrice !== undefined) item.minSellingPrice = Number(reqItem.minSellingPrice);
+                if (reqItem.primaryColor) item.primaryColor = Array.isArray(reqItem.primaryColor) ? reqItem.primaryColor : [reqItem.primaryColor];
+                if (reqItem.size) item.size = Array.isArray(reqItem.size) ? reqItem.size : [reqItem.size];
+                if (reqItem.season) item.season = Array.isArray(reqItem.season) ? reqItem.season : [reqItem.season];
+                if (reqItem.productImage) item.productImage = Array.isArray(reqItem.productImage) ? reqItem.productImage : [reqItem.productImage];
+                if (reqItem.packets) item.packets = reqItem.packets;
+                if (reqItem.boxes) item.boxes = reqItem.boxes;
               }
             });
-          });
-          await inventory.addStockWithVariants(confirmedQty, variantComp, 'DispatchOrder', dispatchOrder._id, req.user._id, `Confirm Order ${dispatchOrder.orderNumber}`, transactionDate);
-          inventory.purchaseBatches.push({ ...batchInfo, quantity: confirmedQty, remainingQuantity: confirmedQty });
-        } else {
-          await inventory.addStockWithBatch(confirmedQty, batchInfo, 'DispatchOrder', dispatchOrder._id, req.user._id, `Confirm Order ${dispatchOrder.orderNumber}`);
-        }
-        inventory.recalculateAverageCost();
-        await inventory.save();
-
-        // 3. PacketStock Updates
-        const packetGroups = new Map();
-        const isLoose = item.packets.some(p => p.isLoose);
-        
-        if (isLoose) {
-          item.packets.filter(p => p.isLoose).forEach(p => {
-            if (!p.composition || !Array.isArray(p.composition)) return;
-            p.composition.forEach(c => {
-              const qty = Number(c.quantity);
-              if (c.size && c.color && !isNaN(qty) && qty > 0) {
-                const k = `${c.color}|${c.size}`;
-                if (packetGroups.has(k)) packetGroups.get(k).quantity += qty;
-                else packetGroups.set(k, { color: c.color, size: c.size, quantity: qty, isLoose: true });
-              }
-            });
-          });
-        } else {
-          item.packets.forEach(p => {
-            const b = generatePacketBarcode(supplierId.toString(), product._id.toString(), p.composition, false);
-            if (packetGroups.has(b)) packetGroups.get(b).count++;
-            else packetGroups.set(b, { barcode: b, comp: p.composition, items: p.totalItems || p.composition.reduce((s, c) => s + c.quantity, 0), count: 1, isLoose: false });
-          });
-        }
-
-        const psTasks = Array.from(packetGroups.values()).map(async (group) => {
-          let barcode = group.barcode;
-          let comp = group.comp;
-          let itemsPerPkt = group.items;
-          let qty = group.count;
-
-          if (group.isLoose) {
-            comp = [{ size: group.size, color: group.color, quantity: 1 }];
-            barcode = generatePacketBarcode(supplierId.toString(), product._id.toString(), comp, true);
-            qty = group.quantity;
-            itemsPerPkt = 1;
-          }
-
-          let ps = await PacketStock.findOne({ barcode });
-          if (ps) {
-            await ps.addStock(qty, dispatchOrder._id, item.costPrice * itemsPerPkt, landedPrice * itemsPerPkt, transactionDate);
-            ps.suggestedSellingPrice = resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) * itemsPerPkt;
+            dispatchOrder.markModified('items');
           } else {
-            const buffer = await bwipjs.toBuffer({ bcid: 'code128', text: barcode, scale: 3, height: 10, includetext: true, textxalign: 'center', textsize: 8 }).catch(() => null);
-            ps = new PacketStock({
-              barcode, product: product._id, supplier: supplierId, composition: comp, totalItemsPerPacket: itemsPerPkt, availablePackets: qty,
-              costPricePerPacket: item.costPrice * itemsPerPkt, landedPricePerPacket: landedPrice * itemsPerPkt,
-              suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) * itemsPerPkt,
-              isLoose: !!group.isLoose, barcodeImage: buffer ? { dataUrl: `data:image/png;base64,${buffer.toString('base64')}`, format: 'code128', generatedAt: transactionDate } : undefined,
-              dispatchOrderHistory: [{ dispatchOrderId: dispatchOrder._id, quantity: qty, costPricePerPacket: item.costPrice * itemsPerPkt, landedPricePerPacket: landedPrice * itemsPerPkt, addedAt: transactionDate }]
+            dispatchOrder.items = items;
+            dispatchOrder.markModified('items');
+          }
+          await dispatchOrder.save({ session });
+        }
+
+        const confirmedQuantities = dispatchOrder.items.map((item, index) => {
+          const returnedQty = (dispatchOrder.returnedItems || [])
+            .filter(r => r.itemIndex === index)
+            .reduce((sum, r) => sum + r.quantity, 0);
+          return { itemIndex: index, quantity: Math.max(0, (item.quantity || 0) - returnedQty) };
+        });
+
+        let supplierPaymentTotal = 0;
+        let landedPriceTotal = 0;
+        const itemsWithPrices = dispatchOrder.items.map((item, index) => {
+          const qty = confirmedQuantities[index].quantity;
+          const landedPrice = truncateToTwoDecimals((item.costPrice / finalExchangeRate) * (1 + (finalPercentage / 100)));
+          supplierPaymentTotal += item.costPrice * qty;
+          landedPriceTotal += landedPrice * qty;
+          return { ...item.toObject(), supplierPaymentAmount: item.costPrice, landedPrice, confirmedQuantity: qty };
+        });
+
+        const totalDiscount = (discount !== undefined && discount !== null) ? parseFloat(discount) : (dispatchOrder.totalDiscount || 0);
+        const discountedSupplierPaymentTotal = Math.max(0, supplierPaymentTotal - totalDiscount);
+        const subtotal = truncateToTwoDecimals(landedPriceTotal);
+        const grandTotal = truncateToTwoDecimals(Math.max(0, subtotal - totalDiscount));
+
+        const supplierId = dispatchOrder.supplier?._id || dispatchOrder.supplier;
+        const skus = [...new Set(dispatchOrder.items.map(i => i.productCode?.trim().toUpperCase()).filter(Boolean))];
+
+        const [existingProducts, existingInventories] = await Promise.all([
+          Product.find({ sku: { $in: skus }, supplier: supplierId }).session(session),
+          Inventory.find({ product: { $in: dispatchOrder.items.map(i => i.product).filter(Boolean) } }).session(session)
+        ]);
+
+        const productMap = new Map(existingProducts.map(p => [p.sku, p]));
+        const inventoryMap = new Map(existingInventories.map(inv => [inv.product.toString(), inv]));
+
+        const bwipjs = require('bwip-js');
+
+        const itemTasks = dispatchOrder.items.map(async (item, index) => {
+          try {
+            const confirmedQty = confirmedQuantities[index].quantity;
+            if (confirmedQty <= 0) return { index, success: true, skipped: true };
+
+            const productCodeUpper = item.productCode?.trim().toUpperCase();
+            let product = productMap.get(productCodeUpper);
+            const landedPrice = itemsWithPrices[index].landedPrice;
+
+            if (!product && productCodeUpper) {
+              product = await Product.findOne({ sku: productCodeUpper, supplier: supplierId }).session(session);
+              if (product) productMap.set(productCodeUpper, product);
+            }
+
+            if (!product) {
+              const colors = Array.isArray(item.primaryColor) ? item.primaryColor : [item.primaryColor];
+              const sizes = Array.isArray(item.size) ? item.size : [item.size];
+              product = new Product({
+                name: item.productName,
+                sku: productCodeUpper,
+                supplier: supplierId,
+                productCode: item.productCode,
+                season: item.season,
+                category: 'General',
+                unit: 'piece',
+                pricing: { costPrice: landedPrice, sellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) },
+                color: colors.filter(Boolean),
+                size: sizes.filter(Boolean),
+                specifications: { color: colors[0], material: item.material },
+                isActive: true,
+                createdBy: req.user._id
+              });
+              await product.save({ session });
+              if (productCodeUpper) productMap.set(productCodeUpper, product);
+            } else {
+              let needsSave = false;
+              if (!product.isActive) { product.isActive = true; needsSave = true; }
+              if (product.pricing.costPrice !== landedPrice) { product.pricing.costPrice = landedPrice; needsSave = true; }
+              const resMin = resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2);
+              if (product.pricing.sellingPrice !== resMin) {
+                product.pricing.sellingPrice = resMin;
+                product.pricing.minSellingPrice = resMin;
+                needsSave = true;
+              }
+              if (!Array.isArray(product.images)) {
+                product.images = [];
+                needsSave = true;
+              }
+              if (item.productImage) {
+                const imgs = Array.isArray(item.productImage) ? item.productImage : [item.productImage];
+                imgs.forEach(url => { if (url && !product.images.includes(url)) { product.images.unshift(url); needsSave = true; } });
+              }
+              if (needsSave) await product.save({ session });
+            }
+
+            item.product = product._id;
+
+            let inventory = inventoryMap.get(product._id.toString());
+            if (!inventory) {
+              inventory = await Inventory.findOneAndUpdate(
+                { product: product._id },
+                {
+                  $setOnInsert: {
+                    product: product._id,
+                    currentStock: 0,
+                    averageCostPrice: landedPrice,
+                    purchaseBatches: [],
+                    minStockLevel: 0,
+                    maxStockLevel: 1000,
+                    reorderLevel: 10
+                  }
+                },
+                { new: true, upsert: true, session, setDefaultsOnInsert: true }
+              );
+              inventoryMap.set(product._id.toString(), inventory);
+            }
+
+            const batchInfo = {
+              dispatchOrderId: dispatchOrder._id,
+              supplierId,
+              purchaseDate: transactionDate,
+              costPrice: item.costPrice,
+              landedPrice,
+              exchangeRate: finalExchangeRate
+            };
+
+            if (item.useVariantTracking && item.packets?.length > 0) {
+              const variantComp = [];
+              item.packets.forEach(p => {
+                if (!p.composition || !Array.isArray(p.composition)) return;
+                p.composition.forEach(c => {
+                  const qty = Number(c.quantity);
+                  if (c.size && c.color && !isNaN(qty) && qty > 0) {
+                    const e = variantComp.find(v => v.size === c.size && v.color === c.color);
+                    if (e) e.quantity += qty;
+                    else variantComp.push({ size: c.size, color: c.color, quantity: qty });
+                  }
+                });
+              });
+              await inventory.addStockWithVariants(
+                confirmedQty,
+                variantComp,
+                'DispatchOrder',
+                dispatchOrder._id,
+                req.user._id,
+                `Confirm Order ${dispatchOrder.orderNumber}`,
+                transactionDate,
+                session
+              );
+              inventory.purchaseBatches.push({ ...batchInfo, quantity: confirmedQty, remainingQuantity: confirmedQty });
+            } else {
+              await inventory.addStockWithBatch(
+                confirmedQty,
+                batchInfo,
+                'DispatchOrder',
+                dispatchOrder._id,
+                req.user._id,
+                `Confirm Order ${dispatchOrder.orderNumber}`,
+                transactionDate,
+                session
+              );
+            }
+            inventory.recalculateAverageCost();
+            await inventory.save({ session });
+
+            const packetGroups = new Map();
+            const isLoose = item.packets.some(p => p.isLoose);
+
+            if (isLoose) {
+              item.packets.filter(p => p.isLoose).forEach(p => {
+                if (!p.composition || !Array.isArray(p.composition)) return;
+                p.composition.forEach(c => {
+                  const qty = Number(c.quantity);
+                  if (c.size && c.color && !isNaN(qty) && qty > 0) {
+                    const k = `${c.color}|${c.size}`;
+                    if (packetGroups.has(k)) packetGroups.get(k).quantity += qty;
+                    else packetGroups.set(k, { color: c.color, size: c.size, quantity: qty, isLoose: true });
+                  }
+                });
+              });
+            } else {
+              item.packets.forEach(p => {
+                const b = generatePacketBarcode(supplierId.toString(), product._id.toString(), p.composition, false);
+                if (packetGroups.has(b)) packetGroups.get(b).count++;
+                else packetGroups.set(b, { barcode: b, comp: p.composition, items: p.totalItems || p.composition.reduce((s, c) => s + c.quantity, 0), count: 1, isLoose: false });
+              });
+            }
+
+            const psTasks = Array.from(packetGroups.values()).map(async (group) => {
+              let barcode = group.barcode;
+              let comp = group.comp;
+              let itemsPerPkt = group.items;
+              let qty = group.count;
+
+              if (group.isLoose) {
+                comp = [{ size: group.size, color: group.color, quantity: 1 }];
+                barcode = generatePacketBarcode(supplierId.toString(), product._id.toString(), comp, true);
+                qty = group.quantity;
+                itemsPerPkt = 1;
+              }
+
+              let ps = await PacketStock.findOne({ barcode }).session(session);
+              if (ps) {
+                await ps.addStock(
+                  qty,
+                  dispatchOrder._id,
+                  item.costPrice * itemsPerPkt,
+                  landedPrice * itemsPerPkt,
+                  transactionDate,
+                  session
+                );
+                ps.suggestedSellingPrice = resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) * itemsPerPkt;
+              } else {
+                const buffer = await bwipjs.toBuffer({ bcid: 'code128', text: barcode, scale: 3, height: 10, includetext: true, textxalign: 'center', textsize: 8 }).catch(() => null);
+                ps = new PacketStock({
+                  barcode,
+                  product: product._id,
+                  supplier: supplierId,
+                  composition: comp,
+                  totalItemsPerPacket: itemsPerPkt,
+                  availablePackets: qty,
+                  costPricePerPacket: item.costPrice * itemsPerPkt,
+                  landedPricePerPacket: landedPrice * itemsPerPkt,
+                  suggestedSellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) * itemsPerPkt,
+                  isLoose: !!group.isLoose,
+                  barcodeImage: buffer ? { dataUrl: `data:image/png;base64,${buffer.toString('base64')}`, format: 'code128', generatedAt: transactionDate } : undefined,
+                  dispatchOrderHistory: [{ dispatchOrderId: dispatchOrder._id, quantity: qty, costPricePerPacket: item.costPrice * itemsPerPkt, landedPricePerPacket: landedPrice * itemsPerPkt, addedAt: transactionDate }]
+                });
+              }
+              return ps.save({ session });
+            });
+            await Promise.all(psTasks);
+
+            return { index, success: true, productCode: item.productCode };
+          } catch (err) {
+            console.error(`Item ${index} error:`, err);
+            return { index, success: false, error: err.message, productCode: item.productCode };
+          }
+        });
+
+        const results = await Promise.all(itemTasks);
+        if (results.some(r => !r.success)) {
+          const failedItems = results.filter(r => !r.success);
+          const errorDetails = failedItems.map(r => `Item ${r.index} (${r.productCode || 'unknown'}): ${r.error}`).join('; ');
+          throw buildRequestError(
+            `Confirmation failed. Errors: ${errorDetails}`,
+            400,
+            { code: 'ITEM_PROCESSING_FAILED', items: failedItems }
+          );
+        }
+
+        dispatchOrder.status = 'confirmed';
+        dispatchOrder.confirmedAt = transactionDate;
+        dispatchOrder.confirmedBy = req.user._id;
+        dispatchOrder.exchangeRate = finalExchangeRate;
+        dispatchOrder.percentage = finalPercentage;
+        dispatchOrder.totalDiscount = totalDiscount;
+        dispatchOrder.subtotal = subtotal;
+        dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
+        dispatchOrder.grandTotal = grandTotal;
+        dispatchOrder.paymentDetails = {
+          cashPayment: Number(cashPayment || 0),
+          bankPayment: Number(bankPayment || 0),
+          remainingBalance: discountedSupplierPaymentTotal - Number(cashPayment || 0) - Number(bankPayment || 0),
+          paymentStatus: (discountedSupplierPaymentTotal <= Number(cashPayment || 0) + Number(bankPayment || 0))
+            ? 'paid'
+            : (Number(cashPayment || 0) + Number(bankPayment || 0) > 0 ? 'partial' : 'pending')
+        };
+
+        await dispatchOrder.save({ session });
+
+        const ledgerTasks = [];
+        ledgerTasks.push(Ledger.createEntry({
+          type: 'supplier',
+          entityId: supplierId,
+          entityModel: 'Supplier',
+          transactionType: 'purchase',
+          referenceId: dispatchOrder._id,
+          referenceModel: 'DispatchOrder',
+          debit: discountedSupplierPaymentTotal,
+          credit: 0,
+          date: transactionDate,
+          description: `Confirmed Order ${dispatchOrder.orderNumber}`,
+          createdBy: req.user._id
+        }, session));
+        if (Number(cashPayment) > 0) ledgerTasks.push(Ledger.createEntry({
+          type: 'supplier',
+          entityId: supplierId,
+          entityModel: 'Supplier',
+          transactionType: 'payment',
+          referenceId: dispatchOrder._id,
+          referenceModel: 'DispatchOrder',
+          debit: 0,
+          credit: Number(cashPayment),
+          date: transactionDate,
+          description: `Cash payment: ${dispatchOrder.orderNumber}`,
+          createdBy: req.user._id
+        }, session));
+        if (Number(bankPayment) > 0) ledgerTasks.push(Ledger.createEntry({
+          type: 'supplier',
+          entityId: supplierId,
+          entityModel: 'Supplier',
+          transactionType: 'payment',
+          referenceId: dispatchOrder._id,
+          referenceModel: 'DispatchOrder',
+          debit: 0,
+          credit: Number(bankPayment),
+          date: transactionDate,
+          description: `Bank payment: ${dispatchOrder.orderNumber}`,
+          createdBy: req.user._id
+        }, session));
+        ledgerTasks.push(Supplier.findByIdAndUpdate(
+          supplierId,
+          { $inc: { currentBalance: discountedSupplierPaymentTotal - Number(cashPayment || 0) - Number(bankPayment || 0) } },
+          { session }
+        ));
+
+        if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {
+          const lc = await LogisticsCompany.findById(dispatchOrder.logisticsCompany).session(session);
+          if (lc?.rates?.boxRate > 0) {
+            ledgerTasks.push(Ledger.createEntry({
+              type: 'logistics',
+              entityId: lc._id,
+              entityModel: 'LogisticsCompany',
+              transactionType: 'charge',
+              referenceId: dispatchOrder._id,
+              referenceModel: 'DispatchOrder',
+              debit: dispatchOrder.totalBoxes * lc.rates.boxRate,
+              credit: 0,
+              date: transactionDate,
+              description: `Logistics charge: ${dispatchOrder.orderNumber}`,
+              createdBy: req.user._id
+            }, session));
+          }
+        }
+
+        await Promise.all(ledgerTasks);
+        confirmedOrderId = dispatchOrder._id;
+      }, txOptions);
+
+      const confirmedOrder = await DispatchOrder.findById(confirmedOrderId)
+        .populate('supplier', 'name company')
+        .populate('createdBy', 'name');
+
+      const orderObj = confirmedOrder.toObject();
+      await convertDispatchOrderImages(orderObj);
+
+      sendResponse.success(res, orderObj, 'Dispatch order confirmed successfully');
+
+      (async () => {
+        try {
+          // Create auto-approval request for backdate if it was bypassed by admin
+          if (req.pendingBackdate) {
+            await EditRequestService.submitRequest({
+              entityType: 'dispatch-order',
+              entityId: confirmedOrderId,
+              requestType: 'edit',
+              requestedChanges: { dispatchDate: req.pendingBackdate },
+              rawPayload: { dispatchDate: req.pendingBackdate },
+              reason: `Admin request to update Dispatch Date from ${new Date(confirmedOrder.dispatchDate).toLocaleDateString('en-GB')} to ${new Date(req.pendingBackdate).toLocaleDateString('en-GB')} `,
+              requestedBy: req.user._id,
+              entityRef: confirmedOrder.orderNumber || ''
             });
           }
-          return ps.save();
-        });
-        await Promise.all(psTasks);
 
-        return { index, success: true, productCode: item.productCode };
-      } catch (err) {
-        console.error(`Item ${index} error:`, err);
-        return { index, success: false, error: err.message };
-      }
-    });
-
-    const results = await Promise.all(itemTasks);
-    if (results.some(r => !r.success)) {
-      const failedItems = results.filter(r => !r.success);
-      const errorDetails = failedItems.map(r => `Item ${r.index} (${r.productCode || 'unknown'}): ${r.error}`).join('; ');
-      return sendResponse.error(res, `Confirmation failed. Errors: ${errorDetails}`, 400);
+          await logActivity(req, {
+            action: 'STATUS_CHANGE',
+            resource: 'DispatchOrder',
+            resourceId: confirmedOrderId,
+            description: `Confirmed dispatch order: ${confirmedOrder.orderNumber}`,
+            changes: { old: 'pending', new: 'confirmed' }
+          });
+        } catch (err) {
+          console.error('Post-confirmation background error:', err);
+        }
+      })();
+    } catch (error) {
+      console.error('Confirm dispatch order error:', error);
+      const { status, message, errors } = formatTransactionError(error, 'confirm dispatch order');
+      return sendResponse.error(res, message, status, errors);
+    } finally {
+      session.endSession();
     }
-
-    // ==========================================
-    // STEP 2: FINALIZE ORDER & LEDGER
-    // ==========================================
-    dispatchOrder.status = 'confirmed';
-    dispatchOrder.confirmedAt = transactionDate;
-    dispatchOrder.confirmedBy = req.user._id;
-    dispatchOrder.exchangeRate = finalExchangeRate;
-    dispatchOrder.percentage = finalPercentage;
-    dispatchOrder.totalDiscount = totalDiscount;
-    dispatchOrder.subtotal = subtotal;
-    dispatchOrder.supplierPaymentTotal = discountedSupplierPaymentTotal;
-    dispatchOrder.grandTotal = grandTotal;
-    dispatchOrder.paymentDetails = { 
-      cashPayment: Number(cashPayment || 0), 
-      bankPayment: Number(bankPayment || 0), 
-      remainingBalance: discountedSupplierPaymentTotal - Number(cashPayment || 0) - Number(bankPayment || 0),
-      paymentStatus: (discountedSupplierPaymentTotal <= Number(cashPayment || 0) + Number(bankPayment || 0)) ? 'paid' : (Number(cashPayment || 0) + Number(bankPayment || 0) > 0 ? 'partial' : 'pending')
-    };
-
-    await dispatchOrder.save();
-
-    const ledgerTasks = [];
-    ledgerTasks.push(Ledger.createEntry({
-      type: 'supplier', entityId: supplierId, entityModel: 'Supplier', transactionType: 'purchase',
-      referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: discountedSupplierPaymentTotal, credit: 0,
-      date: transactionDate, description: `Confirmed Order ${dispatchOrder.orderNumber}`, createdBy: req.user._id
-    }));
-    if (Number(cashPayment) > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplierId, entityModel: 'Supplier', transactionType: 'payment', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: Number(cashPayment), date: transactionDate, description: `Cash payment: ${dispatchOrder.orderNumber}`, createdBy: req.user._id }));
-    if (Number(bankPayment) > 0) ledgerTasks.push(Ledger.createEntry({ type: 'supplier', entityId: supplierId, entityModel: 'Supplier', transactionType: 'payment', referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: 0, credit: Number(bankPayment), date: transactionDate, description: `Bank payment: ${dispatchOrder.orderNumber}`, createdBy: req.user._id }));
-    ledgerTasks.push(Supplier.findByIdAndUpdate(supplierId, { $inc: { currentBalance: discountedSupplierPaymentTotal - Number(cashPayment || 0) - Number(bankPayment || 0) } }));
-
-    if (dispatchOrder.logisticsCompany && dispatchOrder.totalBoxes > 0) {
-      const lc = dispatchOrder.logisticsCompany;
-      if (lc.rates?.boxRate > 0) {
-        ledgerTasks.push(Ledger.createEntry({
-          type: 'logistics', entityId: lc._id, entityModel: 'LogisticsCompany', transactionType: 'charge',
-          referenceId: dispatchOrder._id, referenceModel: 'DispatchOrder', debit: dispatchOrder.totalBoxes * lc.rates.boxRate, credit: 0,
-          date: transactionDate, description: `Logistics charge: ${dispatchOrder.orderNumber}`, createdBy: req.user._id
-        }));
-      }
-    }
-    await Promise.all(ledgerTasks);
-
-    await dispatchOrder.populate([{ path: 'supplier', select: 'name company' }, { path: 'createdBy', select: 'name' }]);
-    sendResponse.success(res, dispatchOrder, 'Dispatch order confirmed successfully');
-
-    // Fire-and-forget
-    (async () => {
-      try {
-        const fullOrder = await DispatchOrder.findById(dispatchOrder._id).populate('items.product', 'name sku images color size');
-        await Promise.all([
-          convertDispatchOrderImages(fullOrder),
-          logActivity(req, {
-            action: 'STATUS_CHANGE', resource: 'DispatchOrder', resourceId: dispatchOrder._id,
-            description: `Confirmed dispatch order: ${dispatchOrder.orderNumber}`, changes: { old: 'pending', new: 'confirmed' }
-          })
-        ]);
-        await fullOrder.save();
-      } catch (err) { console.error("Post-confirmation background error:", err); }
-    })();
-
-  } catch (error) {
-    console.error('Confirm dispatch order error:', error);
-    return sendResponse.error(res, error.message || 'Server error', 500);
-  }
-});
+  });
 
 // ==========================================
 // GET /:id/edit-impact — Impact analysis before editing a confirmed order
@@ -2036,7 +2368,7 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
         originalPurchaseEntry.debit = discountedSupplierPaymentTotal;
         originalPurchaseEntry.date = dispatchOrder.dispatchDate; // Update date
         originalPurchaseEntry.description = `Confirmed Order ${dispatchOrder.orderNumber} confirmed (Edited) - Supplier Payment: €${discountedSupplierPaymentTotal.toFixed(2)}, Discount: €${newDiscount.toFixed(2)}, Final Amount: €${discountedSupplierPaymentTotal.toFixed(2)}`;
-        
+
         // Save the updated entry (this triggers internal balance calculation for THIS entry)
         await originalPurchaseEntry.save();
 
@@ -2044,7 +2376,7 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
         // Use the earlier of the old and new date as the starting point for recalculation
         const recalcStartDate = (oldDispatchDate && oldDispatchDate < dispatchOrder.dispatchDate) ? oldDispatchDate : dispatchOrder.dispatchDate;
         await Ledger.recalculateBalances('supplier', dispatchOrder.supplier._id, recalcStartDate);
-        
+
         console.log(`[Edit Order] Updated original ledger entry for order ${dispatchOrder.orderNumber} and recalculated balances from ${recalcStartDate.toISOString()}.`);
       } else {
         // Fallback: If for some reason the original purchase entry is missing, create an adjustment as before
@@ -2078,7 +2410,7 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
       try {
         const inventory = await Inventory.findOne({ product: item.product });
         if (!inventory) continue;
-        
+
         // Update price
         await inventory.updateBatchPrices(dispatchOrder._id, {
           costPrice: item.costPrice,
@@ -2150,10 +2482,11 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
       { path: 'confirmedBy', select: 'name' }
     ]);
 
-    await convertDispatchOrderImages(dispatchOrder);
+    const orderObj = dispatchOrder.toObject();
+    await convertDispatchOrderImages(orderObj);
 
     return sendResponse.success(res, {
-      order: dispatchOrder,
+      order: orderObj,
       ledgerDelta,
       message: Math.abs(ledgerDelta) > 0.001
         ? `Order updated. Ledger entry updated (delta: ${ledgerDelta > 0 ? '+' : ''}€${ledgerDelta.toFixed(2)}).`
@@ -2462,10 +2795,10 @@ router.post('/:id/generate-qr', auth, async (req, res) => {
       { path: 'qrCode.generatedBy', select: 'name' }
     ]);
 
-    // Convert images to signed URLs
-    await convertDispatchOrderImages(dispatchOrder);
+    const orderObj = dispatchOrder.toObject();
+    await convertDispatchOrderImages(orderObj);
 
-    return sendResponse.success(res, dispatchOrder, 'QR code generated successfully');
+    return sendResponse.success(res, orderObj, 'QR code generated successfully');
   } catch (error) {
     console.error('Generate QR code error:', error);
     return sendResponse.error(res, error.message || 'Unable to generate QR code', 500);
@@ -2510,10 +2843,10 @@ router.get('/qr/:qrData', async (req, res) => {
       return sendResponse.error(res, 'Dispatch order not found', 404);
     }
 
-    // Convert images to signed URLs
-    await convertDispatchOrderImages(dispatchOrder);
+    const orderObj = dispatchOrder.toObject();
+    await convertDispatchOrderImages(orderObj);
 
-    return sendResponse.success(res, dispatchOrder, 'Dispatch order found');
+    return sendResponse.success(res, orderObj, 'Dispatch order found');
   } catch (error) {
     console.error('Get dispatch order from QR error:', error);
     return sendResponse.error(res, 'Server error', 500);
@@ -3061,8 +3394,8 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       { path: 'confirmedBy', select: 'name' }
     ]);
 
-    // Convert images to signed URLs
-    await convertDispatchOrderImages(dispatchOrder);
+    const orderObj = dispatchOrder.toObject();
+    await convertDispatchOrderImages(orderObj);
 
     // Log the activity
     await logActivity(req, {
@@ -3073,7 +3406,7 @@ router.post('/qr/:qrData/confirm', auth, async (req, res) => {
       changes: { old: 'pending', new: 'confirmed' }
     });
 
-    return sendResponse.success(res, dispatchOrder, 'Dispatch order confirmed successfully via QR scan');
+    return sendResponse.success(res, orderObj, 'Dispatch order confirmed successfully via QR scan');
   } catch (error) {
     console.error('Confirm dispatch order via QR error:', error);
     return sendResponse.error(res, error.message || 'Server error', 500);
@@ -3200,10 +3533,8 @@ router.put('/:id', auth, async (req, res) => {
       { path: 'items.product', select: 'name sku unit images color size productCode pricing' }
     ]);
 
-    // Convert images to signed URLs
-    await convertDispatchOrderImages(dispatchOrder);
-
-    await dispatchOrder.save();
+    const orderObj = dispatchOrder.toObject();
+    await convertDispatchOrderImages(orderObj);
 
     // Log the activity
     await logActivity(req, {
@@ -3214,7 +3545,7 @@ router.put('/:id', auth, async (req, res) => {
       changes: { old: oldState, new: dispatchOrder.toObject() }
     });
 
-    return sendResponse.success(res, dispatchOrder, 'Dispatch order updated successfully');
+    return sendResponse.success(res, orderObj, 'Dispatch order updated successfully');
 
   } catch (error) {
     console.error('Update dispatch order error:', error);

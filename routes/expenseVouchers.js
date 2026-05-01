@@ -2,6 +2,7 @@ const express = require('express');
 const Joi = require('joi');
 const ExpenseVoucher = require('../models/ExpenseVoucher');
 const auth = require('../middleware/auth');
+const { getTransactionDate } = require('../utils/helpers');
 
 const router = express.Router();
 
@@ -48,6 +49,7 @@ router.post('/', auth, async (req, res) => {
 
     const voucher = new ExpenseVoucher({
       ...req.body,
+      date: getTransactionDate(req.body.date),
       voucherNumber,
       createdBy: req.user._id
     });

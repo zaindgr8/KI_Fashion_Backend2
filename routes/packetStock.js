@@ -87,8 +87,9 @@ router.get('/scan/:barcode', auth, async (req, res) => {
     }
     
     const actualAvailable = packetStock.availablePackets - packetStock.reservedPackets;
+    const allowEmpty = req.query.allowEmpty === 'true';
     
-    if (actualAvailable <= 0) {
+    if (actualAvailable <= 0 && !allowEmpty) {
       return res.status(400).json({
         success: false,
         message: 'No packets available in stock',
@@ -112,7 +113,8 @@ router.get('/scan/:barcode', auth, async (req, res) => {
           sku: packetStock.product?.sku,
           productCode: packetStock.product?.productCode,
           images: packetStock.product?.images,
-          season: packetStock.product?.season
+          season: packetStock.product?.season,
+          pricing: packetStock.product?.pricing
         },
         supplier: {
           _id: packetStock.supplier?._id,
@@ -599,7 +601,7 @@ router.get('/print-label/:id', async (req, res) => {
     const minPacketPrice = unitMinPrice > 0
       ? toMoney(unitMinPrice * Math.max(1, totalItemsPerPacket))
       : 0;
-    const price = minPacketPrice;
+    const price = unitMinPrice;
     const html = `
 <!DOCTYPE html>
 <html lang="en">

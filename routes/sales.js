@@ -15,6 +15,7 @@ const LogisticsCompany = require('../models/LogisticsCompany');
 const auth = require('../middleware/auth');
 const checkPermission = require('../middleware/checkPermission');
 const dateControl = require('../middleware/dateControl');
+const { getTransactionDate } = require('../utils/helpers');
 const { generateSaleQR } = require('../utils/qrCode');
 const { logActivity } = require('../utils/auditLogger');
 
@@ -123,7 +124,7 @@ const saleSchema = Joi.object({
       country: Joi.string().optional()
     }).optional()
   }).optional(),
-  saleDate: Joi.date().default(Date.now),
+  saleDate: Joi.date().default(() => new Date()),
   deliveryDate: Joi.date().optional(),
   deliveryAddress: Joi.object({
     street: Joi.string().optional(),
@@ -518,6 +519,9 @@ router.post('/lookup-barcode', auth, checkPermission('sales'), async (req, res) 
 router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale', dateField: 'saleDate', requestType: 'create' }), async (req, res) => {
 
   try {
+    // Standardize sale date to include time precision if it's today
+    req.body.saleDate = getTransactionDate(req.body.saleDate);
+
     // Auto-detect buyer ID for distributors BEFORE validation
     if (!req.body.buyer && !req.body.manualCustomer) {
       if (req.user.role === 'distributor' || req.user.role === 'buyer') {
@@ -737,9 +741,9 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
 
       await sale.save({ session: saleSession });
 
-      // Deduct stock for each item immediately in parallel
+      // Deduct stock for each item sequentially to avoid parallel saves on shared documents
       if (!isManualSale) {
-        await Promise.all(req.body.items.map(async (item) => {
+        for (const item of req.body.items) {
           const product = productMap.get(item.product.toString());
           const inventory = inventoryMap.get(item.product.toString());
           
@@ -798,7 +802,7 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
             ps.soldPackets += packetQty;
             await ps.save({ session: saleSession });
           }
-        }));
+        }
       }
 
       // Create ledger entries immediately
@@ -816,7 +820,7 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
           referenceModel: 'Sale',
           debit: grandTotal,
           credit: 0,
-          date: sale.saleDate || new Date(),
+          date: getTransactionDate(sale.saleDate),
           description: `Sale ${saleNumber} - Total: ${grandTotal.toFixed(2)}`,
           paymentDetails: {
             cashPayment: cashPayment,
@@ -838,7 +842,7 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
             referenceModel: 'Sale',
             debit: 0,
             credit: cashPayment,
-            date: sale.saleDate || new Date(),
+            date: getTransactionDate(sale.saleDate),
             description: `Cash payment for Sale ${saleNumber}`,
             paymentMethod: 'cash',
             isSaleTimePayment: true,
@@ -863,7 +867,7 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
             referenceModel: 'Sale',
             debit: 0,
             credit: bankPayment,
-            date: sale.saleDate || new Date(),
+            date: getTransactionDate(sale.saleDate),
             description: `Bank/Card payment for Sale ${saleNumber}`,
             paymentMethod: 'bank',
             isSaleTimePayment: true,
@@ -912,7 +916,7 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
             cashAmount: cashPayment,
             bankAmount: bankPayment,
             paymentMethod: cashPayment > 0 ? 'cash' : 'bank',
-            paymentDate: sale.saleDate || new Date(),
+            paymentDate: getTransactionDate(sale.saleDate),
             description: `Payment at time of Sale ${saleNumber}`,
             distributions: saleDistributions,
             advanceAmount: 0,
@@ -947,7 +951,7 @@ router.post('/', auth, checkPermission('sales'), dateControl({ entityType: 'sale
           referenceModel: 'Sale',
           debit: shippingMeta.logisticsPayable,
           credit: 0,
-          date: sale.saleDate || new Date(),
+          date: getTransactionDate(sale.saleDate),
           description: `Shipping payable for Sale ${saleNumber} - ${shippingMeta.shippingBoxes} boxes x ${shippingMeta.logisticsBoxRateSnapshot.toFixed(2)} = ${shippingMeta.logisticsPayable.toFixed(2)}`,
           remarks: `shippingBoxes=${shippingMeta.shippingBoxes};buyerShippingCharge=${shippingMeta.buyerShippingCharge.toFixed(2)}`,
           createdBy: req.user._id
@@ -1374,100 +1378,160 @@ router.put('/:id', auth, async (req, res) => {
     });
 
     // Re-sync ledger entries for the updated sale
+    // Re-sync ledger entries for the updated sale
     try {
       const saleId = sale._id;
       const saleDate = sale.saleDate || sale.createdAt || new Date();
+      const originalSaleDate = previousSale.saleDate || previousSale.createdAt || saleDate;
       const cashPayment = sale.cashPayment || 0;
       const bankPayment = sale.bankPayment || 0;
 
-      // 1. Delete previous buyer sale/receipt entries and old logistics charge entries.
-      await Ledger.deleteMany({
-        referenceId: saleId,
-        referenceModel: 'Sale',
-        transactionType: 'sale'
-      });
-      await Ledger.deleteMany({
-        referenceId: saleId,
-        referenceModel: 'Sale',
-        isSaleTimePayment: true
-      });
-      await Ledger.deleteMany({
-        referenceId: saleId,
-        referenceModel: 'Sale',
-        type: 'logistics',
-        transactionType: 'charge'
-      });
+      // 1. Calculate standalone payment amounts (recorded via Add Payment modal)
+      const standalonePayments = (previousSale.paymentReferences || []).reduce((acc, ref) => {
+        const amount = Number(ref.amountApplied || 0);
+        if (ref.paymentMethod === 'cash') acc.cash += amount;
+        else acc.bank += amount;
+        return acc;
+      }, { cash: 0, bank: 0 });
 
-      // 2. Recreate buyer ledger entries only if buyer sale.
+      const saleTimeCash = Math.max(0, cashPayment - standalonePayments.cash);
+      const saleTimeBank = Math.max(0, bankPayment - standalonePayments.bank);
+
+      // 2. Re-sync buyer ledger entries if buyer sale
       if (sale.buyer) {
         const buyerId = sale.buyer._id || sale.buyer;
 
-        await Ledger.createEntry({
-          type: 'buyer',
-          entityId: buyerId,
-          entityModel: 'Buyer',
-          transactionType: 'sale',
-          referenceId: saleId,
-          referenceModel: 'Sale',
-          debit: grandTotal,
-          credit: 0,
-          date: saleDate,
-          description: `Sale ${sale.saleNumber} - Total: ${grandTotal.toFixed(2)} (edited)`,
-          paymentDetails: {
-            cashPayment,
-            bankPayment,
-            remainingBalance: Math.max(0, grandTotal - cashPayment - bankPayment)
+        // Update Sale Debit entry (Preserves Entry # and chronological order)
+        const existingSaleDebit = await Ledger.findOneAndUpdate(
+          { referenceId: saleId, transactionType: 'sale' },
+          {
+            debit: grandTotal,
+            date: saleDate,
+            description: `Sale ${sale.saleNumber} - Total: ${grandTotal.toFixed(2)} (edited)`,
+            paymentDetails: {
+              cashPayment,
+              bankPayment,
+              remainingBalance: Math.max(0, grandTotal - cashPayment - bankPayment)
+            }
           },
-          createdBy: req.user._id
+          { new: true }
+        );
+
+        if (!existingSaleDebit) {
+          await Ledger.createEntry({
+            type: 'buyer',
+            entityId: buyerId,
+            entityModel: 'Buyer',
+            transactionType: 'sale',
+            referenceId: saleId,
+            referenceModel: 'Sale',
+            debit: grandTotal,
+            credit: 0,
+            date: saleDate,
+            description: `Sale ${sale.saleNumber} - Total: ${grandTotal.toFixed(2)} (edited)`,
+            paymentDetails: {
+              cashPayment,
+              bankPayment,
+              remainingBalance: Math.max(0, grandTotal - cashPayment - bankPayment)
+            },
+            createdBy: req.user._id
+          });
+        }
+
+        // Handle Cash Payment entry
+        const existingCashEntry = await Ledger.findOne({
+          referenceId: saleId,
+          isSaleTimePayment: true,
+          paymentMethod: 'cash'
         });
 
-        if (cashPayment > 0) {
-          await Ledger.createEntry({
-            type: 'buyer',
-            entityId: buyerId,
-            entityModel: 'Buyer',
-            transactionType: 'receipt',
-            referenceId: saleId,
-            referenceModel: 'Sale',
-            debit: 0,
-            credit: cashPayment,
-            date: saleDate,
-            description: `Cash payment for Sale ${sale.saleNumber}`,
-            paymentMethod: 'cash',
-            isSaleTimePayment: true,
-            paymentDetails: { cashPayment, bankPayment: 0, remainingBalance: 0 },
-            createdBy: req.user._id
-          });
+        if (saleTimeCash > 0) {
+          if (existingCashEntry) {
+            await Ledger.findByIdAndUpdate(existingCashEntry._id, {
+              credit: saleTimeCash,
+              date: saleDate,
+              description: `Cash payment for Sale ${sale.saleNumber} (at sale time)`,
+              paymentDetails: { cashPayment: saleTimeCash, bankPayment: 0, remainingBalance: 0 }
+            });
+          } else {
+            await Ledger.createEntry({
+              type: 'buyer',
+              entityId: buyerId,
+              entityModel: 'Buyer',
+              transactionType: 'receipt',
+              referenceId: saleId,
+              referenceModel: 'Sale',
+              debit: 0,
+              credit: saleTimeCash,
+              date: saleDate,
+              description: `Cash payment for Sale ${sale.saleNumber} (at sale time)`,
+              paymentMethod: 'cash',
+              isSaleTimePayment: true,
+              paymentDetails: { cashPayment: saleTimeCash, bankPayment: 0, remainingBalance: 0 },
+              createdBy: req.user._id
+            });
+          }
+        } else if (existingCashEntry) {
+          await Ledger.deleteOne({ _id: existingCashEntry._id });
         }
 
-        if (bankPayment > 0) {
-          await Ledger.createEntry({
-            type: 'buyer',
-            entityId: buyerId,
-            entityModel: 'Buyer',
-            transactionType: 'receipt',
-            referenceId: saleId,
-            referenceModel: 'Sale',
-            debit: 0,
-            credit: bankPayment,
-            date: saleDate,
-            description: `Bank/Card payment for Sale ${sale.saleNumber}`,
-            paymentMethod: 'bank',
-            isSaleTimePayment: true,
-            paymentDetails: { cashPayment: 0, bankPayment, remainingBalance: 0 },
-            createdBy: req.user._id
-          });
+        // Handle Bank Payment entry
+        const existingBankEntry = await Ledger.findOne({
+          referenceId: saleId,
+          isSaleTimePayment: true,
+          paymentMethod: 'bank'
+        });
+
+        if (saleTimeBank > 0) {
+          if (existingBankEntry) {
+            await Ledger.findByIdAndUpdate(existingBankEntry._id, {
+              credit: saleTimeBank,
+              date: saleDate,
+              description: `Bank/Card payment for Sale ${sale.saleNumber} (at sale time)`,
+              paymentDetails: { cashPayment: 0, bankPayment: saleTimeBank, remainingBalance: 0 }
+            });
+          } else {
+            await Ledger.createEntry({
+              type: 'buyer',
+              entityId: buyerId,
+              entityModel: 'Buyer',
+              transactionType: 'receipt',
+              referenceId: saleId,
+              referenceModel: 'Sale',
+              debit: 0,
+              credit: saleTimeBank,
+              date: saleDate,
+              description: `Bank/Card payment for Sale ${sale.saleNumber} (at sale time)`,
+              paymentMethod: 'bank',
+              isSaleTimePayment: true,
+              paymentDetails: { cashPayment: 0, bankPayment: saleTimeBank, remainingBalance: 0 },
+              createdBy: req.user._id
+            });
+          }
+        } else if (existingBankEntry) {
+          await Ledger.deleteOne({ _id: existingBankEntry._id });
         }
 
-        await Ledger.recalculateBalances('buyer', buyerId, saleDate);
+        const recalcStartDate = originalSaleDate < saleDate ? originalSaleDate : saleDate;
+        await Ledger.recalculateBalances('buyer', buyerId, recalcStartDate);
         const newBalance = await Ledger.getBalance('buyer', buyerId);
         await Buyer.findByIdAndUpdate(buyerId, { currentBalance: newBalance });
       }
 
-      // 3. Recreate logistics charge if shipping cost tracking is enabled.
-      if (sale.logisticsPayable > 0 && sale.logisticsCompany) {
-        const logisticsCompanyId = sale.logisticsCompany._id || sale.logisticsCompany;
+      // 3. Re-sync logistics charge entry
+      const existingLogisticsCharge = await Ledger.findOneAndUpdate(
+        { referenceId: saleId, type: 'logistics', transactionType: 'charge' },
+        {
+          debit: sale.logisticsPayable,
+          date: saleDate,
+          description: `Shipping payable for Sale ${sale.saleNumber} - ${sale.shippingBoxes || 0} boxes x ${(sale.logisticsBoxRateSnapshot || 0).toFixed(2)} = ${(sale.logisticsPayable || 0).toFixed(2)}`,
+          remarks: `shippingBoxes=${sale.shippingBoxes || 0};buyerShippingCharge=${(sale.buyerShippingCharge || 0).toFixed(2)}`
+        },
+        { new: true }
+      );
 
+      if (sale.logisticsPayable > 0 && sale.logisticsCompany && !existingLogisticsCharge) {
+        const logisticsCompanyId = sale.logisticsCompany._id || sale.logisticsCompany;
         await Ledger.createEntry({
           type: 'logistics',
           entityId: logisticsCompanyId,
@@ -1482,14 +1546,15 @@ router.put('/:id', auth, async (req, res) => {
           remarks: `shippingBoxes=${sale.shippingBoxes || 0};buyerShippingCharge=${(sale.buyerShippingCharge || 0).toFixed(2)}`,
           createdBy: req.user._id
         });
-
         await Ledger.recalculateBalances('logistics', logisticsCompanyId, saleDate);
+      } else if (sale.logisticsPayable > 0 && sale.logisticsCompany && existingLogisticsCharge) {
+        await Ledger.recalculateBalances('logistics', existingLogisticsCharge.entityId, saleDate);
+      } else if (existingLogisticsCharge && sale.logisticsPayable === 0) {
+        const oldLogisticsId = existingLogisticsCharge.entityId;
+        await Ledger.deleteOne({ _id: existingLogisticsCharge._id });
+        await Ledger.recalculateBalances('logistics', oldLogisticsId, saleDate);
       }
 
-      // If logistics company changed, recalculate old company balance too.
-      if (previousSale.logisticsCompany && String(previousSale.logisticsCompany) !== String(sale.logisticsCompany?._id || sale.logisticsCompany || '')) {
-        await Ledger.recalculateBalances('logistics', previousSale.logisticsCompany, saleDate);
-      }
 
     } catch (ledgerError) {
       console.error('Ledger re-sync error after sale edit:', ledgerError);

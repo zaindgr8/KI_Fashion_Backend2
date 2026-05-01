@@ -17,6 +17,7 @@ const Product = require('../models/Product');
 const LogisticsCompany = require('../models/LogisticsCompany');
 const { generatePacketBarcode, generateLooseItemBarcode } = require('../utils/barcodeGenerator');
 const { generateDispatchOrderQR } = require('../utils/qrCode');
+const { getTransactionDate } = require('../utils/helpers');
 
 // Map entityType → Mongoose Model
 const ENTITY_MODELS = {
@@ -341,7 +342,7 @@ class EditRequestService {
         referenceId: null, // Will update after save
         user: userId,
         notes: `Sale ${saleNumber} (Backdated Approval)`,
-        date: saleDate || new Date()
+        date: getTransactionDate(saleDate)
       });
 
       if (product.variantTracking?.enabled && item.variant) {
@@ -384,7 +385,7 @@ class EditRequestService {
       grandTotal,
       cashPayment,
       bankPayment,
-      saleDate: saleDate || new Date(),
+      saleDate: getTransactionDate(saleDate),
       saleType: saleType || 'retail',
       notes,
       createdBy: userId,
@@ -477,7 +478,7 @@ class EditRequestService {
     const BalanceService = require('./BalanceService');
 
     const paymentNumber = await Payment.getNextPaymentNumber(session);
-    const paymentDate = date ? new Date(date) : new Date();
+    const paymentDate = getTransactionDate(date);
     const balanceBefore = await BalanceService.getBuyerBalance(customerId);
 
     let distributions = [];
@@ -577,7 +578,7 @@ class EditRequestService {
       paymentMethod,
       createdBy: userId,
       description,
-      date: date ? new Date(date) : new Date(),
+      date: getTransactionDate(date),
       session
     });
 
@@ -635,7 +636,7 @@ class EditRequestService {
       return EditRequestService.applyDispatchOrderConfirm(orderId, payload, reviewerId, session);
     }
 
-    const editableStatuses = ['confirmed', 'picked_up', 'in_transit', 'delivered'];
+    const editableStatuses = ['confirmed', 'pending', 'in_transit', 'delivered'];
     if (!editableStatuses.includes(dispatchOrder.status)) {
       throw new Error(`Cannot edit order with status: ${dispatchOrder.status}`);
     }
@@ -847,9 +848,14 @@ class EditRequestService {
     const newShipping = payload.shippingCost ?? currentSale.shippingCost ?? 0;
     const grandTotal = Math.max(0, subtotal + totalTax - newDiscount + newShipping);
 
+    // Calculate total paid and new payment status
+    const totalPaid = (payload.cashPayment ?? currentSale.cashPayment ?? 0) + 
+                      (payload.bankPayment ?? currentSale.bankPayment ?? 0);
+    const paymentStatus = totalPaid >= grandTotal ? 'paid' : totalPaid > 0 ? 'partial' : 'pending';
+
     const sale = await Sale.findByIdAndUpdate(
       saleId,
-      { ...payload, subtotal, totalTax, grandTotal },
+      { ...payload, subtotal, totalTax, grandTotal, paymentStatus },
       { new: true, runValidators: true, session }
     );
     if (!sale) throw new Error('Sale not found after update');
@@ -858,87 +864,143 @@ class EditRequestService {
     if (sale.buyer) {
       try {
         const buyerId = sale.buyer;
-        const grandTotal = sale.grandTotal || 0;
-        const cashPayment = sale.cashPayment || 0;
-        const bankPayment = sale.bankPayment || 0;
+        const grandTotalValue = sale.grandTotal || 0;
+        const cashPaymentTotal = sale.cashPayment || 0;
+        const bankPaymentTotal = sale.bankPayment || 0;
         const saleDate = sale.saleDate || sale.createdAt || new Date();
+        const originalSaleDate = currentSale.saleDate || currentSale.createdAt || saleDate;
 
-        // 1. Delete old sale debit entry and sale-time payment credits
-        await Ledger.deleteMany({
-          referenceId: saleId,
-          referenceModel: 'Sale',
-          transactionType: 'sale'
-        });
-        await Ledger.deleteMany({
-          referenceId: saleId,
-          referenceModel: 'Sale',
-          isSaleTimePayment: true
-        });
+        // 1. Calculate standalone payment amounts (recorded via Add Payment modal, NOT at sale time)
+        const standalonePayments = (currentSale.paymentReferences || []).reduce((acc, ref) => {
+          const amount = Number(ref.amountApplied || 0);
+          if (ref.paymentMethod === 'cash') acc.cash += amount;
+          else acc.bank += amount;
+          return acc;
+        }, { cash: 0, bank: 0 });
 
-        // 2. Recreate sale debit entry with updated grandTotal
-        await Ledger.createEntry({
-          type: 'buyer',
-          entityId: buyerId,
-          entityModel: 'Buyer',
-          transactionType: 'sale',
-          referenceId: saleId,
-          referenceModel: 'Sale',
-          debit: grandTotal,
-          credit: 0,
-          date: saleDate,
-          description: `Sale ${sale.saleNumber} - Total: ${grandTotal.toFixed(2)} (edited)`,
-          paymentDetails: {
-            cashPayment,
-            bankPayment,
-            remainingBalance: Math.max(0, grandTotal - cashPayment - bankPayment)
+        const saleTimeCash = Math.max(0, cashPaymentTotal - standalonePayments.cash);
+        const saleTimeBank = Math.max(0, bankPaymentTotal - standalonePayments.bank);
+
+        // 2. Update existing Sale Debit entry instead of deleting (Preserves Entry # and chronological order)
+        const existingSaleDebit = await Ledger.findOneAndUpdate(
+          { referenceId: saleId, transactionType: 'sale' },
+          {
+            debit: grandTotalValue,
+            date: saleDate, // Sync date if it changed
+            description: `Sale ${sale.saleNumber} - Total: ${grandTotalValue.toFixed(2)} (edited)`,
+            paymentDetails: {
+              cashPayment: cashPaymentTotal,
+              bankPayment: bankPaymentTotal,
+              remainingBalance: Math.max(0, grandTotalValue - cashPaymentTotal - bankPaymentTotal)
+            }
           },
-          createdBy: sale.createdBy
-        });
+          { session, new: true }
+        );
 
-        // 3. Recreate sale-time payment credits
-        if (cashPayment > 0) {
+        if (!existingSaleDebit) {
+          // Fallback if no sale entry exists (legacy data)
           await Ledger.createEntry({
             type: 'buyer',
             entityId: buyerId,
             entityModel: 'Buyer',
-            transactionType: 'receipt',
+            transactionType: 'sale',
             referenceId: saleId,
             referenceModel: 'Sale',
-            debit: 0,
-            credit: cashPayment,
+            debit: grandTotalValue,
+            credit: 0,
             date: saleDate,
-            description: `Cash payment for Sale ${sale.saleNumber}`,
-            paymentMethod: 'cash',
-            isSaleTimePayment: true,
-            paymentDetails: { cashPayment, bankPayment: 0, remainingBalance: 0 },
+            description: `Sale ${sale.saleNumber} - Total: ${grandTotalValue.toFixed(2)} (edited)`,
+            paymentDetails: {
+              cashPayment: cashPaymentTotal,
+              bankPayment: bankPaymentTotal,
+              remainingBalance: Math.max(0, grandTotalValue - cashPaymentTotal - bankPaymentTotal)
+            },
             createdBy: sale.createdBy
-          });
-        }
-        if (bankPayment > 0) {
-          await Ledger.createEntry({
-            type: 'buyer',
-            entityId: buyerId,
-            entityModel: 'Buyer',
-            transactionType: 'receipt',
-            referenceId: saleId,
-            referenceModel: 'Sale',
-            debit: 0,
-            credit: bankPayment,
-            date: saleDate,
-            description: `Bank/Card payment for Sale ${sale.saleNumber}`,
-            paymentMethod: 'bank',
-            isSaleTimePayment: true,
-            paymentDetails: { cashPayment: 0, bankPayment, remainingBalance: 0 },
-            createdBy: sale.createdBy
-          });
+          }, session);
         }
 
-        // 4. Recalculate running balances from this sale's date onwards
-        await Ledger.recalculateBalances('buyer', buyerId, saleDate);
+        // 3. Update or Create/Delete Cash Payment entry
+        const existingCashEntry = await Ledger.findOne({
+          referenceId: saleId,
+          isSaleTimePayment: true,
+          paymentMethod: 'cash'
+        }).session(session);
 
-        // 5. Sync buyer's currentBalance from aggregated ledger
-        const newBalance = await Ledger.getBalance('buyer', buyerId);
-        await Buyer.findByIdAndUpdate(buyerId, { currentBalance: newBalance });
+        if (saleTimeCash > 0) {
+          if (existingCashEntry) {
+            await Ledger.findByIdAndUpdate(existingCashEntry._id, {
+              credit: saleTimeCash,
+              date: saleDate,
+              description: `Cash payment for Sale ${sale.saleNumber} (at sale time)`,
+              paymentDetails: { cashPayment: saleTimeCash, bankPayment: 0, remainingBalance: 0 }
+            }, { session });
+          } else {
+            await Ledger.createEntry({
+              type: 'buyer',
+              entityId: buyerId,
+              entityModel: 'Buyer',
+              transactionType: 'receipt',
+              referenceId: saleId,
+              referenceModel: 'Sale',
+              debit: 0,
+              credit: saleTimeCash,
+              date: saleDate,
+              description: `Cash payment for Sale ${sale.saleNumber} (at sale time)`,
+              paymentMethod: 'cash',
+              isSaleTimePayment: true,
+              paymentDetails: { cashPayment: saleTimeCash, bankPayment: 0, remainingBalance: 0 },
+              createdBy: sale.createdBy
+            }, session);
+          }
+        } else if (existingCashEntry) {
+          await Ledger.deleteOne({ _id: existingCashEntry._id }).session(session);
+        }
+
+        // 4. Update or Create/Delete Bank Payment entry
+        const existingBankEntry = await Ledger.findOne({
+          referenceId: saleId,
+          isSaleTimePayment: true,
+          paymentMethod: 'bank'
+        }).session(session);
+
+        if (saleTimeBank > 0) {
+          if (existingBankEntry) {
+            await Ledger.findByIdAndUpdate(existingBankEntry._id, {
+              credit: saleTimeBank,
+              date: saleDate,
+              description: `Bank/Card payment for Sale ${sale.saleNumber} (at sale time)`,
+              paymentDetails: { cashPayment: 0, bankPayment: saleTimeBank, remainingBalance: 0 }
+            }, { session });
+          } else {
+            await Ledger.createEntry({
+              type: 'buyer',
+              entityId: buyerId,
+              entityModel: 'Buyer',
+              transactionType: 'receipt',
+              referenceId: saleId,
+              referenceModel: 'Sale',
+              debit: 0,
+              credit: saleTimeBank,
+              date: saleDate,
+              description: `Bank/Card payment for Sale ${sale.saleNumber} (at sale time)`,
+              paymentMethod: 'bank',
+              isSaleTimePayment: true,
+              paymentDetails: { cashPayment: 0, bankPayment: saleTimeBank, remainingBalance: 0 },
+              createdBy: sale.createdBy
+            }, session);
+          }
+        } else if (existingBankEntry) {
+          await Ledger.deleteOne({ _id: existingBankEntry._id }).session(session);
+        }
+
+        // 5. Recalculate running balances from the earlier of old/new date
+        const recalcStartDate = originalSaleDate < saleDate ? originalSaleDate : saleDate;
+        await Ledger.recalculateBalances('buyer', buyerId, recalcStartDate, session);
+
+        // 6. Sync buyer's currentBalance from aggregated ledger
+        const newBalance = await Ledger.getBalance('buyer', buyerId, session);
+        await Buyer.findByIdAndUpdate(buyerId, { currentBalance: newBalance }).session(session);
+
 
       } catch (ledgerError) {
         console.error('Ledger re-sync error after sale edit request approval:', ledgerError);

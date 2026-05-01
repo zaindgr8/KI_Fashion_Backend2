@@ -646,6 +646,15 @@ router.get('/customers', auth, checkPermission('reports'), async (req, res) => {
   try {
     let { startDate, endDate } = req.query;
 
+    const buildUtcDayBoundary = (dateValue, endOfDay = false) => {
+      const [year, month, day] = String(dateValue).split('-').map(Number);
+      if (!year || !month || !day) return null;
+
+      return endOfDay
+        ? new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999))
+        : new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
+    };
+
     const today = new Date().toISOString().split('T')[0];
     if (!startDate && !endDate) {
       startDate = today;
@@ -655,8 +664,17 @@ router.get('/customers', auth, checkPermission('reports'), async (req, res) => {
     const matchConditions = { deliveryStatus: 'delivered' };
     if (startDate || endDate) {
       matchConditions.saleDate = {};
-      if (startDate) matchConditions.saleDate.$gte = new Date(startDate);
-      if (endDate) matchConditions.saleDate.$lte = new Date(endDate);
+      if (startDate) {
+        const startBoundary = buildUtcDayBoundary(startDate);
+        if (startBoundary) matchConditions.saleDate.$gte = startBoundary;
+      }
+      if (endDate) {
+        const endBoundary = buildUtcDayBoundary(endDate, true);
+        if (endBoundary) matchConditions.saleDate.$lte = endBoundary;
+      }
+      if (!Object.keys(matchConditions.saleDate).length) {
+        delete matchConditions.saleDate;
+      }
     }
 
     const customerAnalysis = await Sale.aggregate([
@@ -702,7 +720,7 @@ router.get('/customers', auth, checkPermission('reports'), async (req, res) => {
           averageOrderValue: 1,
           status: {
             $cond: [
-              { $lte: [{ $divide: [{ $subtract: [new Date(), '$lastOrderDate'] }, 1000 * 60 * 60 * 24] }, 30] },
+              { $lte: [{ $divide: [{ $subtract: ['$$NOW', '$lastOrderDate'] }, 1000 * 60 * 60 * 24] }, 30] },
               'active',
               'inactive'
             ]
@@ -910,7 +928,7 @@ router.get('/dashboard', auth, checkPermission('reports'), async (req, res) => {
 
     // Pending orders
     const pendingOrders = await Sale.countDocuments({
-      deliveryStatus: { $in: ['pending', 'processing'] }
+      deliveryStatus: { $in: [ 'delivered'] }
     });
 
     // Top selling products this month
@@ -963,6 +981,12 @@ router.get('/dashboard', auth, checkPermission('reports'), async (req, res) => {
           thisWeek: weeklySales[0]?.totalSales || 0,
           thisMonth: monthlySales[0]?.totalSales || 0,
           thisYear: yearlySales[0]?.totalSales || 0
+        },
+        totalOrders: {
+          today: todaySales[0]?.orderCount || 0,
+          thisWeek: weeklySales[0]?.orderCount || 0,
+          thisMonth: monthlySales[0]?.orderCount || 0,
+          thisYear: yearlySales[0]?.orderCount || 0
         },
         totalPurchases: {
           today: todayPurchases[0]?.totalPurchases || 0,
@@ -1929,7 +1953,7 @@ router.get('/profit-loss', auth, async (req, res) => {
       .populate('buyer', 'name company email phone')
       .populate({
         path: 'items.product',
-        select: 'name productCode pricing supplier',
+        select: 'name productCode sku pricing supplier',
         populate: {
           path: 'supplier',
           select: 'name'
@@ -1981,7 +2005,7 @@ router.get('/profit-loss', auth, async (req, res) => {
             transactionDate: sale.saleDate,
             invoiceNumber: sale.saleNumber || sale.invoiceNumber,
             customerName: sale.buyer?.name || sale.buyer?.company || 'Walk-in',
-            productCode: item.product?.productCode || '—',
+            productCode: item.product?.productCode || item.product?.sku || item.packetBarcode || '—',
             productId: item.product?._id,
             itemsSold: quantity,
             sellingPrice: unitSellingPrice,
@@ -2198,34 +2222,43 @@ router.get('/cash-in-hand', auth, async (req, res) => {
 // Product Summary Report
 router.get('/product-summary', auth, async (req, res) => {
   try {
-    let { startDate, endDate } = req.query;
-
-    const today = new Date().toISOString().split('T')[0];
-    if (!startDate && !endDate) {
-      startDate = today;
-      endDate = today;
-    }
+    const { startDate, endDate, activityOnly } = req.query;
+    const hasDateFilter = Boolean(startDate || endDate);
+    const filterByActivity = String(activityOnly).toLowerCase() === 'true';
 
     // Build optional date filters for dispatch orders and sales
     const dispatchDateFilter = {};
     const saleDateFilter = {};
-    if (startDate || endDate) {
-      if (startDate) {
-        dispatchDateFilter['$gte'] = new Date(startDate);
-        saleDateFilter['$gte'] = new Date(startDate);
+    let parsedStartDate = null;
+    let parsedEndDate = null;
+
+    if (startDate) {
+      parsedStartDate = new Date(startDate);
+      if (Number.isNaN(parsedStartDate.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid startDate format' });
       }
-      if (endDate) {
-        const end = new Date(endDate);
-        end.setHours(23, 59, 59, 999);
-        dispatchDateFilter['$lte'] = end;
-        saleDateFilter['$lte'] = end;
-      }
+      parsedStartDate.setHours(0, 0, 0, 0);
+      dispatchDateFilter['$gte'] = parsedStartDate;
+      saleDateFilter['$gte'] = parsedStartDate;
     }
 
-    const hasDateFilter = startDate || endDate;
+    if (endDate) {
+      parsedEndDate = new Date(endDate);
+      if (Number.isNaN(parsedEndDate.getTime())) {
+        return res.status(400).json({ success: false, message: 'Invalid endDate format' });
+      }
+      parsedEndDate.setHours(23, 59, 59, 999);
+      dispatchDateFilter['$lte'] = parsedEndDate;
+      saleDateFilter['$lte'] = parsedEndDate;
+    }
+
+    if (parsedStartDate && parsedEndDate && parsedStartDate > parsedEndDate) {
+      return res.status(400).json({ success: false, message: 'startDate cannot be after endDate' });
+    }
 
     // Build sub-pipelines for dispatch orders (items bought)
     const dispatchPipeline = [
+      { $match: { status: { $in: ['confirmed', 'picked_up', 'in_transit', 'delivered'] } } },
       ...(hasDateFilter ? [{ $match: { dispatchDate: dispatchDateFilter } }] : []),
       {
         $match: {
@@ -2247,6 +2280,7 @@ router.get('/product-summary', auth, async (req, res) => {
 
     // Build sub-pipelines for sales (items sold + revenue)
     const salesPipeline = [
+      { $match: { deliveryStatus: 'delivered' } },
       ...(hasDateFilter ? [{ $match: { saleDate: saleDateFilter } }] : []),
       {
         $match: {
@@ -2359,6 +2393,16 @@ router.get('/product-summary', auth, async (req, res) => {
           productId: '$product'
         }
       },
+      ...(hasDateFilter && filterByActivity
+        ? [{
+            $match: {
+              $or: [
+                { itemsBought: { $gt: 0 } },
+                { itemsSold: { $gt: 0 } }
+              ]
+            }
+          }]
+        : []),
       { $sort: { supplierName: 1, productCode: 1 } }
     ]).allowDiskUse(true);
 

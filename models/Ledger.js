@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { getTransactionDate } = require('../utils/helpers');
 
 const ledgerSchema = new mongoose.Schema({
   type: {
@@ -228,7 +229,7 @@ ledgerSchema.statics.createEntry = async function (entryData, session = null) {
     throw new Error('Invalid entryData: type and entityId are required');
   }
 
-  const entryDate = entryData.date ? new Date(entryData.date) : new Date();
+  const entryDate = entryData.date ? getTransactionDate(entryData.date) : getTransactionDate();
 
   // Find the entry that immediately precedes this new one in the timeline
   let findPreviousQuery = this.findOne({
@@ -338,8 +339,8 @@ ledgerSchema.statics.recalculateBalances = async function (type, entityId, start
  * Balance = Sum of debits - Sum of credits
  * Positive balance = Entity owes us / We owe entity (depending on context)
  */
-ledgerSchema.statics.getBalance = async function (type, entityId) {
-  const result = await this.aggregate([
+ledgerSchema.statics.getBalance = async function (type, entityId, session = null) {
+  const aggregation = this.aggregate([
     { $match: { type, entityId: new mongoose.Types.ObjectId(entityId) } },
     {
       $group: {
@@ -349,6 +350,12 @@ ledgerSchema.statics.getBalance = async function (type, entityId) {
       }
     }
   ]);
+
+  if (session) {
+    aggregation.session(session);
+  }
+
+  const result = await aggregation;
 
   const totalDebit = result[0]?.totalDebit || 0;
   const totalCredit = result[0]?.totalCredit || 0;

@@ -208,6 +208,11 @@ const saleSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
+  returnTotal: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
   paymentStatus: {
     type: String,
     enum: ['pending', 'partial', 'paid', 'refunded', 'awaiting_payment', 'failed'],

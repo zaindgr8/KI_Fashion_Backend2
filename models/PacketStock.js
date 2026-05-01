@@ -190,8 +190,19 @@ packetStockSchema.virtual('actualAvailable').get(function () {
   return Math.max(0, this.availablePackets - this.reservedPackets);
 });
 
+const isClientSession = (value) => {
+  return value && typeof value === 'object' && typeof value.inTransaction === 'function';
+};
+
 // Method to add stock
-packetStockSchema.methods.addStock = function (quantity, dispatchOrderId, costPrice, landedPrice, movementDate = null) {
+packetStockSchema.methods.addStock = function (quantity, dispatchOrderId, costPrice, landedPrice, movementDate = null, session = null) {
+  let resolvedMovementDate = movementDate;
+  let resolvedSession = session;
+  if (isClientSession(movementDate)) {
+    resolvedSession = movementDate;
+    resolvedMovementDate = null;
+  }
+
   const previousTotal = this.availablePackets;
   this.availablePackets += quantity;
 
@@ -209,7 +220,7 @@ packetStockSchema.methods.addStock = function (quantity, dispatchOrderId, costPr
   // Calculate suggested selling price (20% margin on landed)
   this.suggestedSellingPrice = this.landedPricePerPacket * 1.20;
 
-  const transactionDate = movementDate ? new Date(movementDate) : new Date();
+  const transactionDate = resolvedMovementDate ? new Date(resolvedMovementDate) : new Date();
 
   // Track history
   this.dispatchOrderHistory.push({
@@ -220,7 +231,7 @@ packetStockSchema.methods.addStock = function (quantity, dispatchOrderId, costPr
     addedAt: Number.isNaN(transactionDate.getTime()) ? new Date() : transactionDate
   });
 
-  return this.save();
+  return resolvedSession ? this.save({ session: resolvedSession }) : this.save();
 };
 
 // Method to reserve packets for a pending sale

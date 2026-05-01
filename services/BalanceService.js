@@ -16,6 +16,7 @@ const Ledger = require('../models/Ledger');
 const DispatchOrder = require('../models/DispatchOrder');
 const Return = require('../models/Return');
 const SupplierPaymentReceipt = require('../models/SupplierPaymentReceipt');
+const { getTransactionDate } = require('../utils/helpers');
 
 class BalanceService {
   static async createSupplierPaymentReceipt({
@@ -213,9 +214,9 @@ static async getSupplierBalanceSummary(supplierId) {
     
     const orders = await DispatchOrder.find({
       supplier: supplierId,
-      status: 'confirmed'
+      status: { $in: ['confirmed', 'picked_up', 'in_transit', 'delivered'] }
     })
-    .select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount createdAt confirmedAt')
+    .select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount createdAt confirmedAt dispatchDate')
     .session(session)
     .lean();
 
@@ -234,16 +235,26 @@ static async getSupplierBalanceSummary(supplierId) {
           returnTotal: returnTotal,
           remainingBalance: remainingBalance,
           createdAt: order.createdAt,
-          confirmedAt: order.confirmedAt
+          confirmedAt: order.confirmedAt,
+          dispatchDate: order.dispatchDate
         };
       })
     );
 
-    // FIFO: Sort by confirmedAt ASCENDING (first confirmed = first paid)
-    // This matches the ledger display order where entries are created at confirmation time
+    // FIFO: Sort by dispatchDate (oldest first)
+    // This ensures backdated orders are paid first.
+    // If dates/times are identical, use orderNumber as a tie-breaker.
     return ordersWithBalances
       .filter(o => o.remainingBalance > 0)
-      .sort((a, b) => new Date(a.confirmedAt) - new Date(b.confirmedAt)); // Sort by confirmation date
+      .sort((a, b) => {
+        const dateA = new Date(a.dispatchDate || a.createdAt);
+        const dateB = new Date(b.dispatchDate || b.createdAt);
+        
+        if (dateA - dateB !== 0) return dateA - dateB;
+        
+        // Tie-breaker: Order Number (sequential)
+        return String(a.orderNumber).localeCompare(String(b.orderNumber));
+      });
   }
 
   /**
@@ -314,10 +325,18 @@ static async getSupplierBalanceSummary(supplierId) {
       })
     );
 
-    // Sort by confirmedAt ASCENDING for FIFO distribution (first confirmed = first paid)
+    // Sort by confirmedAt ASCENDING for FIFO distribution (oldest first)
     return chargesWithBalances
       .filter(c => c.remainingBalance > 0)
-      .sort((a, b) => new Date(a.confirmedAt) - new Date(b.confirmedAt));
+      .sort((a, b) => {
+        const dateA = new Date(a.confirmedAt);
+        const dateB = new Date(b.confirmedAt);
+        
+        if (dateA - dateB !== 0) return dateA - dateB;
+        
+        // Tie-breaker: Order Number (sequential)
+        return String(a.orderNumber).localeCompare(String(b.orderNumber));
+      });
   }
 
   // =====================================================
@@ -341,7 +360,7 @@ static async getSupplierBalanceSummary(supplierId) {
     // Outstanding balance = overpayments (when remaining is negative)
     const allOrders = await DispatchOrder.find({
       supplier: supplierId,
-      status: 'confirmed'
+      status: { $in: ['confirmed', 'picked_up', 'in_transit', 'delivered'] }
     }).select('_id orderNumber items confirmedQuantities supplierPaymentTotal totalDiscount').lean();
 
     let totalOutstandingBalance = 0;
@@ -483,7 +502,7 @@ static async getSupplierBalanceSummary(supplierId) {
     session = null
   }) {
     const discountedTotal = Math.max(0, supplierPaymentTotal - discount);
-    const entryDate = new Date();
+    const entryDate = getTransactionDate();
     const entries = [];
 
     // 1. Create purchase entry (debit - what we owe supplier)
@@ -565,7 +584,7 @@ static async getSupplierBalanceSummary(supplierId) {
     paymentMethod,
     createdBy,
     description,
-    date = new Date(),
+    date = getTransactionDate(),
     session = null
   }) {
     return await Ledger.createEntry({
@@ -594,7 +613,7 @@ static async getSupplierBalanceSummary(supplierId) {
     returnId,
     createdBy,
     description,
-    date = new Date(),
+    date = getTransactionDate(),
     session = null
   }) {
     return await Ledger.createEntry({
@@ -636,7 +655,7 @@ static async getSupplierBalanceSummary(supplierId) {
     paymentMethod,
     createdBy,
     description,
-    date = new Date(),
+    date = getTransactionDate(),
     balanceBefore = null,
     session: externalSession = null
   }) {
@@ -885,15 +904,17 @@ static async getSupplierBalanceSummary(supplierId) {
       buyer: buyerId,
       paymentStatus: { $in: ['pending', 'partial'] }
     })
-      .sort({ saleDate: 1 }) // Oldest first (FIFO)
+      .sort({ saleDate: 1, saleNumber: 1 }) // Oldest first (FIFO) with tie-breaker
       .session(session)
       .lean();
     
     // Calculate remaining balance for each sale
     return sales.map(sale => {
       const totalPaid = (sale.cashPayment || 0) + (sale.bankPayment || 0);
+      const returnTotal = sale.returnTotal || 0;
       const grandTotal = sale.grandTotal || 0;
-      const remainingBalance = Math.max(0, grandTotal - totalPaid);
+      const totalCoverage = totalPaid + returnTotal;
+      const remainingBalance = Math.max(0, grandTotal - totalCoverage);
       
       return {
         _id: sale._id,
@@ -901,6 +922,8 @@ static async getSupplierBalanceSummary(supplierId) {
         saleDate: sale.saleDate,
         grandTotal: grandTotal,
         totalPaid: totalPaid,
+        returnTotal: returnTotal,
+        totalCoverage: totalCoverage,
         remainingBalance: remainingBalance
       };
     }).filter(sale => sale.remainingBalance > 0); // Only include sales with remaining balance
@@ -918,7 +941,7 @@ static async getSupplierBalanceSummary(supplierId) {
     paymentMethod,
     createdBy,
     description,
-    date = new Date(),
+    date = getTransactionDate(),
     session: externalSession = null
   }) {
     const Sale = require('../models/Sale');

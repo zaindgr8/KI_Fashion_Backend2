@@ -7,7 +7,7 @@ const Supplier = require('../models/Supplier');
 const Ledger = require('../models/Ledger');
 const PacketStock = require('../models/PacketStock');
 const auth = require('../middleware/auth');
-const { sendResponse } = require('../utils/helpers');
+const { sendResponse, getTransactionDate } = require('../utils/helpers');
 const BalanceService = require('../services/BalanceService');
 const PacketReturnService = require('../services/PacketReturnService');
 const { logActivity } = require('../utils/auditLogger');
@@ -618,9 +618,10 @@ router.post('/packet-return', auth, dateControl('returnDate'), async (req, res) 
       });
     }
 
-    // Update Inventory (reduce stock)
+    const returnDate = getTransactionDate(req.body.returnDate);
+
     const productId = packetStock.product._id || packetStock.product;
-    const inventory = await Inventory.findOne({ product: productId }).session(session);
+    let inventory = await Inventory.findOne({ product: productId }).session(session);
 
     if (inventory) {
       // Reduce current stock
@@ -656,7 +657,7 @@ router.post('/packet-return', auth, dateControl('returnDate'), async (req, res) 
         referenceId: null, // Will update after creating Return doc
         user: req.user._id,
         notes: `Packet return - ${packetStock.barcode}${reason ? ` - ${reason}` : ''}`,
-        date: new Date()
+        date: returnDate
       });
 
       // Reduce from batches (FIFO)
@@ -689,7 +690,7 @@ router.post('/packet-return', auth, dateControl('returnDate'), async (req, res) 
         reason: reason
       }],
       totalReturnValue: returnValue,
-      returnedAt: req.body.returnDate || new Date(),
+      returnedAt: returnDate,
       returnedBy: req.user._id,
       notes: `${notes}${breakResult ? ` | Packet broken, remaining items moved to loose stock` : ''}`
     });
@@ -1077,7 +1078,7 @@ router.post('/product-return', auth, dateControl('returnDate'), async (req, res)
         returnComposition: item.returnComposition
       })),
       totalReturnValue: totalReturnValue,
-      returnedAt: returnDate ? new Date(returnDate) : new Date(),
+      returnedAt: getTransactionDate(returnDate),
       returnedBy: req.user._id,
       notes: notes || ''
     });

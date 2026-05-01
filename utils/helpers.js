@@ -101,6 +101,26 @@ const formatDate = (date, format = 'DD/MM/YYYY') => {
   }
 };
 
+/**
+ * Ensures a date object has full time precision.
+ * If the input date matches today's local date, it returns the current full timestamp (now).
+ * If no date is provided, it returns the current time.
+ * This prevents the common 05:00 AM issue caused by date-only strings.
+ */
+const getTransactionDate = (inputDate) => {
+  if (!inputDate) return new Date();
+
+  const d = new Date(inputDate);
+  const now = new Date();
+
+  // If the input date is today (local time), use current time to preserve precision
+  if (d.toDateString() === now.toDateString()) {
+    return now;
+  }
+
+  return d;
+};
+
 const getDateRange = (period = 'month') => {
   const now = new Date();
   let startDate, endDate = new Date();
@@ -248,6 +268,7 @@ module.exports = {
   formatPaginationResponse,
   generateOrderNumber,
   formatDate,
+  getTransactionDate,
   getDateRange,
   calculatePercentageChange,
   calculateProfitMargin,
