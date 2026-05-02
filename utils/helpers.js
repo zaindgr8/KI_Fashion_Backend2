@@ -104,14 +104,23 @@ const formatDate = (date, format = 'DD/MM/YYYY') => {
 /**
  * Ensures a date object has full time precision.
  * If the input date matches today's local date, it returns the current full timestamp (now).
+ * If an existing date is provided, it preserves the time (HH:mm:ss) from that existing date.
  * If no date is provided, it returns the current time.
- * This prevents the common 05:00 AM issue caused by date-only strings.
  */
-const getTransactionDate = (inputDate) => {
+const getTransactionDate = (inputDate, existingDate = null) => {
   if (!inputDate) return new Date();
 
   const d = new Date(inputDate);
   const now = new Date();
+
+  // If we have an existing date, preserve its time components
+  if (existingDate) {
+    const oldD = new Date(existingDate);
+    if (!isNaN(oldD.getTime())) {
+      d.setHours(oldD.getHours(), oldD.getMinutes(), oldD.getSeconds(), oldD.getMilliseconds());
+      return d;
+    }
+  }
 
   // If the input date is today (local time), use current time to preserve precision
   if (d.toDateString() === now.toDateString()) {

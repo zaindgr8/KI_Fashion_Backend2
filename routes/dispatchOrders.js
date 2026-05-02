@@ -286,7 +286,8 @@ async function normalizeDispatchOrderForAdmin(dispatchOrder, input = {}, user, o
     dispatchOrder.markModified('logisticsCompany');
   }
   if (dispatchDate) {
-    dispatchOrder.dispatchDate = getTransactionDate(dispatchDate);
+    // Preserve existing time if available
+    dispatchOrder.dispatchDate = getTransactionDate(dispatchDate, dispatchOrder.dispatchDate);
     dispatchOrder.markModified('dispatchDate');
   }
   if (isTotalBoxesConfirmed !== undefined) {
@@ -997,17 +998,22 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
 
         if (!productObj) {
           productObj = new Product({
-            name: item.productName || 'Unknown Product',
-            sku: item.productCode?.toUpperCase(),
-            supplier: supplier._id,
+            name: item.productName,
+            sku: normalizeSku(item.productCode),
+            supplier: value.supplier,
             productCode: item.productCode,
             season: item.season,
             category: 'General',
             unit: 'piece',
-            pricing: { costPrice: item.costPrice, sellingPrice: resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2) },
-            size: normalizeToArray(item.size),
-            color: normalizeToArray(item.primaryColor),
-            specifications: { material: item.material },
+            pricing: { 
+              costPrice: item.landedPrice, 
+              sellingPrice: resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2),
+              minSellingPrice: resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2)
+            },
+            color: normalizeToArray(item.primaryColor).filter(Boolean),
+            size: normalizeToArray(item.size).filter(Boolean),
+            specifications: { color: normalizeToArray(item.primaryColor)[0], material: item.material },
+            isActive: true,
             createdBy: req.user._id,
             images: Array.isArray(item.productImage) ? item.productImage : (item.productImage ? [item.productImage] : [])
           });
@@ -1015,6 +1021,21 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
           item.product = productObj._id;
         } else {
           let hasUpdates = false;
+          if (!productObj.isActive) { productObj.isActive = true; hasUpdates = true; }
+          
+          // Sync pricing - costPrice should be base currency (landedPrice)
+          if (productObj.pricing.costPrice !== item.landedPrice) {
+            productObj.pricing.costPrice = item.landedPrice;
+            hasUpdates = true;
+          }
+          
+          const resMin = resolveMinSellingPrice(item.minSellingPrice, item.landedPrice * 1.2);
+          if (productObj.pricing.sellingPrice !== resMin) {
+            productObj.pricing.sellingPrice = resMin;
+            productObj.pricing.minSellingPrice = resMin;
+            hasUpdates = true;
+          }
+
           if (!Array.isArray(productObj.images)) {
             productObj.images = [];
             hasUpdates = true;
@@ -1026,6 +1047,7 @@ router.post('/manual', auth, dateControl({ entityType: 'dispatch-order', dateFie
           const newSizes = normalizeToArray(item.size);
           const mergedSizes = [...new Set([...normalizeToArray(productObj.size), ...newSizes])];
           if (mergedSizes.length !== normalizeToArray(productObj.size).length) { productObj.size = mergedSizes; hasUpdates = true; }
+          
           if (hasUpdates) await productObj.save({ session });
           item.product = productObj._id;
         }
@@ -1744,7 +1766,11 @@ router.post(
                 season: item.season,
                 category: 'General',
                 unit: 'piece',
-                pricing: { costPrice: landedPrice, sellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) },
+                pricing: { 
+                  costPrice: landedPrice, 
+                  sellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2),
+                  minSellingPrice: resolveMinSellingPrice(item.minSellingPrice, landedPrice * 1.2) 
+                },
                 color: colors.filter(Boolean),
                 size: sizes.filter(Boolean),
                 specifications: { color: colors[0], material: item.material },
@@ -2215,6 +2241,11 @@ router.patch('/:id/edit-confirmed', auth, async (req, res) => {
     if (dispatchDate !== undefined && dispatchDate !== null) {
       const newD = new Date(dispatchDate);
       if (!isNaN(newD.getTime())) {
+        // Time Preservation: Keep original HH:mm:ss if possible
+        if (oldDispatchDate) {
+          newD.setHours(oldDispatchDate.getHours(), oldDispatchDate.getMinutes(), oldDispatchDate.getSeconds(), oldDispatchDate.getMilliseconds());
+        }
+
         if (!oldDispatchDate || oldDispatchDate.getTime() !== newD.getTime()) {
           dispatchOrder.dispatchDate = newD;
           dateChanged = true;

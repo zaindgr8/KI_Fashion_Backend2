@@ -1349,6 +1349,14 @@ router.put('/:id', auth, async (req, res) => {
       });
     }
 
+    // Preserve the original time if the date is sent from frontend (which strips time)
+    if (req.body.saleDate) {
+      const newDate = new Date(req.body.saleDate);
+      const oldDate = new Date(previousSale.saleDate || previousSale.createdAt);
+      newDate.setHours(oldDate.getHours(), oldDate.getMinutes(), oldDate.getSeconds(), oldDate.getMilliseconds());
+      req.body.saleDate = newDate;
+    }
+
     const sale = await Sale.findByIdAndUpdate(
       req.params.id,
       {

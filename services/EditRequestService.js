@@ -120,7 +120,7 @@ class EditRequestService {
       }
 
       let result;
-      
+
       if (editRequest.requestType === 'create') {
         // Creation doesn't need conflict check
         result = await EditRequestService.applyCreate(editRequest, reviewerId, session);
@@ -648,6 +648,11 @@ class EditRequestService {
     if (dispatchDate !== undefined && dispatchDate !== null) {
       const newD = new Date(dispatchDate);
       if (!isNaN(newD.getTime())) {
+        // Time Preservation: Keep original HH:mm:ss if possible
+        if (oldDispatchDate) {
+          newD.setHours(oldDispatchDate.getHours(), oldDispatchDate.getMinutes(), oldDispatchDate.getSeconds(), oldDispatchDate.getMilliseconds());
+        }
+
         if (!oldDispatchDate || oldDispatchDate.getTime() !== newD.getTime()) {
           dispatchOrder.dispatchDate = newD;
           dateChanged = true;
@@ -778,7 +783,7 @@ class EditRequestService {
       originalPurchaseEntry.debit = supplierPaymentTotal;
       originalPurchaseEntry.date = dispatchOrder.dispatchDate; // Update date
       originalPurchaseEntry.description = `Confirmed Order ${dispatchOrder.orderNumber} confirmed (Edited) - Supplier Payment: €${supplierPaymentTotal.toFixed(2)}, Final Amount (inc discount): €${supplierPaymentTotal.toFixed(2)}`;
-      
+
       await originalPurchaseEntry.save({ session });
 
       // Recalculate balances from the earlier of old/new date
@@ -848,9 +853,17 @@ class EditRequestService {
     const newShipping = payload.shippingCost ?? currentSale.shippingCost ?? 0;
     const grandTotal = Math.max(0, subtotal + totalTax - newDiscount + newShipping);
 
+    // Preserve original time if the date is sent from frontend (which strips time)
+    if (payload.saleDate) {
+      const newDate = new Date(payload.saleDate);
+      const oldDate = new Date(currentSale.saleDate || currentSale.createdAt);
+      newDate.setHours(oldDate.getHours(), oldDate.getMinutes(), oldDate.getSeconds(), oldDate.getMilliseconds());
+      payload.saleDate = newDate;
+    }
+
     // Calculate total paid and new payment status
-    const totalPaid = (payload.cashPayment ?? currentSale.cashPayment ?? 0) + 
-                      (payload.bankPayment ?? currentSale.bankPayment ?? 0);
+    const totalPaid = (payload.cashPayment ?? currentSale.cashPayment ?? 0) +
+      (payload.bankPayment ?? currentSale.bankPayment ?? 0);
     const paymentStatus = totalPaid >= grandTotal ? 'paid' : totalPaid > 0 ? 'partial' : 'pending';
 
     const sale = await Sale.findByIdAndUpdate(
@@ -1207,7 +1220,7 @@ class EditRequestService {
     const supplier = await Supplier.findById(supplierId).session(session);
     if (!supplier) throw new Error('Supplier not found');
 
-    const orderDate = dispatchDate ? new Date(dispatchDate) : new Date();
+    const orderDate = getTransactionDate(dispatchDate);
 
     // 1. Create DispatchOrder (already confirmed)
     const orderNumber = `PUR-${Date.now()}`; // Simplified for service
@@ -1383,7 +1396,7 @@ class EditRequestService {
       dispatchDate
     } = payload;
 
-    const orderDate = dispatchDate ? new Date(dispatchDate) : dispatchOrder.dispatchDate;
+    const orderDate = dispatchDate ? getTransactionDate(dispatchDate, dispatchOrder.dispatchDate) : dispatchOrder.dispatchDate;
 
     // 1. Update Order Fields
     dispatchOrder.status = 'confirmed';
